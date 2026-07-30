@@ -52,6 +52,7 @@ jobs:
             --noconfirm `
             --clean `
             --onefile `
+            --noconsole `
             --name GeneLabLedger `
             --paths . `
             --hidden-import=uvicorn `
