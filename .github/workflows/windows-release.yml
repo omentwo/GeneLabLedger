@@ -62,8 +62,11 @@ jobs:
             --include-package=pydantic_settings `
             --include-package=sqlalchemy `
             --include-package=alembic `
-            --include-package=webview `
             --include-data-dir=../frontend/dist=frontend/dist `
+            --nofollow-import-to=webview.platforms.android `
+            --nofollow-import-to=webview.platforms.gtk `
+            --nofollow-import-to=webview.platforms.cocoa `
+            --nofollow-import-to=webview.platforms.qt `
             --nofollow-import-to=pytest `
             --nofollow-import-to=ruff `
             --nofollow-import-to=httpx `
