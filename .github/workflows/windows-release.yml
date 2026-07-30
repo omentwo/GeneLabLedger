@@ -35,7 +35,7 @@ jobs:
         with:
           python-version: "3.13"
 
-            - name: Install backend and packaging tools
+      - name: Install backend and packaging tools
         working-directory: backend
         shell: pwsh
         run: |
@@ -59,12 +59,14 @@ jobs:
             --include-package=fastapi `
             --include-package=starlette `
             --include-package=pydantic `
+            --include-package=pydantic_settings `
             --include-package=sqlalchemy `
             --include-package=alembic `
             --include-package=webview `
             --include-data-dir=../frontend/dist=frontend/dist `
             --nofollow-import-to=pytest `
             --nofollow-import-to=ruff `
+            --nofollow-import-to=httpx `
             desktop/launcher.py
 
           New-Item -ItemType Directory -Force -Path ../release | Out-Null
