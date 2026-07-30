@@ -36,17 +36,17 @@ jobs:
           python-version: "3.13"
 
       - name: Install backend and packaging tools
+        working-directory: backend
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
           python -m pip install uv
-          Set-Location backend
-          uv sync --dev --locked
+          uv sync --all-groups --locked
 
       - name: Build desktop executable
+        working-directory: backend
         shell: pwsh
         run: |
-          Set-Location backend
           uv run pyinstaller `
             --noconfirm `
             --clean `
