@@ -1,0 +1,39 @@
+# Python
+backend/.venv/
+backend/.uv-cache/
+backend/**/__pycache__/
+backend/.pytest_cache/
+backend/.ruff_cache/
+backend/*.egg-info/
+*.py[cod]
+
+# Local runtime data and machine configuration
+backend/data/
+backend/.env
+backend/tools/
+*.db
+*.sqlite
+*.sqlite3
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+frontend/playwright-report/
+frontend/test-results/
+frontend/*.tsbuildinfo
+
+# Desktop packaging output
+build/
+dist/
+installer-output/
+*.spec.bak
+
+# Generated documents
+*.pdf
+*.prn
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

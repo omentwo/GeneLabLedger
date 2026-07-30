@@ -1,0 +1,96 @@
+import { apiRequest, jsonBody } from "@/api/client";
+import type {
+  ExperimentRun,
+  ProjectRecord,
+  RecordCreateInput,
+  RecordList,
+  RecordUpdateInput,
+} from "@/types/api";
+
+export interface RecordQuery {
+  project_id?: string;
+  status?: string;
+  pathology_number?: string;
+  search?: string;
+  experiment_date?: string;
+  report_generated?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+function queryString(query: RecordQuery): string {
+  const params = new URLSearchParams();
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== "") params.set(key, String(value));
+  });
+  const encoded = params.toString();
+  return encoded ? `?${encoded}` : "";
+}
+
+export function listRecords(query: RecordQuery = {}): Promise<RecordList> {
+  return apiRequest<RecordList>(`/records${queryString(query)}`);
+}
+
+export function createRecord(payload: RecordCreateInput): Promise<ProjectRecord> {
+  return apiRequest<ProjectRecord>("/records", {
+    method: "POST",
+    body: jsonBody(payload),
+  });
+}
+
+export function updateRecord(
+  recordId: string,
+  payload: RecordUpdateInput,
+): Promise<ProjectRecord> {
+  return apiRequest<ProjectRecord>(`/records/${recordId}`, {
+    method: "PATCH",
+    body: jsonBody(payload),
+  });
+}
+
+export function setRecordLock(
+  recordId: string,
+  locked: boolean,
+): Promise<ProjectRecord> {
+  return apiRequest<ProjectRecord>(`/records/${recordId}/lock`, {
+    method: "PUT",
+    body: jsonBody({ locked }),
+  });
+}
+
+export function assignRecordProject(
+  recordId: string,
+  targetProjectId: string,
+): Promise<ProjectRecord> {
+  return apiRequest<ProjectRecord>(`/records/${recordId}/assign-project`, {
+    method: "POST",
+    body: jsonBody({ target_project_id: targetProjectId }),
+  });
+}
+
+export function repeatRecord(
+  recordId: string,
+  experimentDate: string,
+): Promise<ExperimentRun> {
+  return apiRequest<ExperimentRun>(`/records/${recordId}/repeat`, {
+    method: "POST",
+    body: jsonBody({ experiment_date: experimentDate }),
+  });
+}
+
+export function deleteRecord(recordId: string): Promise<void> {
+  return apiRequest<void>(`/records/${recordId}`, { method: "DELETE" });
+}
+
+export function setRecordsReportGenerated(
+  recordIds: string[],
+  reportGenerated: boolean,
+): Promise<ProjectRecord[]> {
+  return apiRequest<ProjectRecord[]>("/records/report-status", {
+    method: "PUT",
+    body: jsonBody({
+      record_ids: recordIds,
+      report_generated: reportGenerated,
+    }),
+  });
+}
