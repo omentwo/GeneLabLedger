@@ -42,6 +42,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install uv
           uv sync --all-groups --locked
+          uv pip install pyinstaller
 
       - name: Build desktop executable
         working-directory: backend
