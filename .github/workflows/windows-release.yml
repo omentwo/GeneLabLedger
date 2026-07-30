@@ -46,22 +46,47 @@ jobs:
         shell: pwsh
         run: |
           Set-Location backend
-          python -m PyInstaller `
+          uv run pyinstaller `
             --noconfirm `
             --clean `
             --onefile `
             --name GeneLabLedger `
             --paths . `
+            --hidden-import=uvicorn `
+            --hidden-import=uvicorn.logging `
+            --hidden-import=uvicorn.loops `
+            --hidden-import=uvicorn.loops.auto `
+            --hidden-import=uvicorn.protocols `
+            --hidden-import=uvicorn.protocols.http `
+            --hidden-import=uvicorn.protocols.http.auto `
+            --hidden-import=uvicorn.protocols.websockets `
+            --hidden-import=uvicorn.protocols.websockets.auto `
+            --hidden-import=uvicorn.lifespan `
+            --hidden-import=uvicorn.lifespan.on `
+            --hidden-import=fastapi `
+            --hidden-import=starlette `
+            --hidden-import=pydantic `
+            --hidden-import=pydantic_settings `
+            --hidden-import=sqlalchemy `
+            --hidden-import=alembic `
+            --hidden-import=webview `
+            --hidden-import=app `
+            --hidden-import=app.main `
+            --hidden-import=app.config `
+            --collect-all uvicorn `
+            --collect-all fastapi `
+            --collect-all starlette `
+            --collect-all pydantic `
             --add-data "..\frontend\dist;frontend\dist" `
             desktop\launcher.py
           New-Item -ItemType Directory -Force -Path ..\release | Out-Null
-          Compress-Archive -Path dist\GeneLabLedger.exe -DestinationPath ..\release\GeneLabLedger-windows-x64.zip -Force
+          Copy-Item -Path dist\GeneLabLedger.exe -Destination ..\release\GeneLabLedger-windows-x64.exe -Force
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: GeneLabLedger-windows-x64
-          path: release/GeneLabLedger-windows-x64.zip
+          path: release/GeneLabLedger-windows-x64.exe
           if-no-files-found: error
 
       - name: Publish GitHub Release for version tags
@@ -71,6 +96,6 @@ jobs:
         shell: pwsh
         run: |
           gh release create "${{ github.ref_name }}" `
-            release/GeneLabLedger-windows-x64.zip `
+            release/GeneLabLedger-windows-x64.exe `
             --title "GeneLabLedger ${{ github.ref_name }}" `
             --generate-notes
