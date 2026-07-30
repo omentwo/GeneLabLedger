@@ -39,8 +39,9 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          python -m pip install uv pyinstaller
-          uv sync --project backend --dev --locked
+          python -m pip install uv
+          Set-Location backend
+          uv sync --dev --locked
 
       - name: Build desktop executable
         shell: pwsh
