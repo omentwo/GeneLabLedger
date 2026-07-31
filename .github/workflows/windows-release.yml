@@ -49,7 +49,7 @@ jobs:
         shell: pwsh
         run: |
           uv run python -m nuitka `
-            --onefile `
+            --standalone `
             --windows-console-mode=disable `
             --output-filename=GeneLabLedger.exe `
             --output-dir=dist `
