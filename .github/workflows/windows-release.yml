@@ -50,7 +50,7 @@ jobs:
         run: |
           uv run python -m nuitka `
             --standalone `
-            --windows-console-mode=disable `
+            --windows-console-mode=force `
             --output-filename=GeneLabLedger.exe `
             --output-dir=dist `
             --assume-yes-for-downloads `
