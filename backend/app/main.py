@@ -12,7 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import auto_exports, experiments, exports, imports, projects, records, reports, system
+from app.api import auto_exports, exports, imports, projects, records, reports, system
+from app.audit import prune_audit_logs
 from app.config import Settings
 from app.database import Database
 from app.seed import seed_initial_data
@@ -36,6 +37,12 @@ def create_app(
             database.create_all()
         with database.session_factory() as session:
             seed_initial_data(session)
+            prune_audit_logs(
+                session,
+                max_rows=app_settings.audit_log_max_rows,
+                retention_days=app_settings.audit_log_retention_days,
+            )
+            session.commit()
         await auto_export_scheduler.start()
         try:
             yield
@@ -64,7 +71,6 @@ def create_app(
     app.include_router(system.router, prefix="/api")
     app.include_router(projects.router, prefix="/api")
     app.include_router(records.router, prefix="/api")
-    app.include_router(experiments.router, prefix="/api")
     app.include_router(reports.router, prefix="/api")
     app.include_router(auto_exports.router, prefix="/api")
     app.include_router(imports.router, prefix="/api")

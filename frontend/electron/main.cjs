@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain } = require("electron");
+const { app, BrowserWindow, Menu, dialog, ipcMain } = require("electron");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
@@ -189,10 +189,10 @@ function assertTrustedIpcSender(event) {
 function createMainWindow() {
   mainWindow = new BrowserWindow({
     title: APP_TITLE,
-    width: 1440,
-    height: 900,
-    minWidth: 1120,
-    minHeight: 700,
+    width: 1360,
+    height: 820,
+    minWidth: 1000,
+    minHeight: 640,
     show: false,
     autoHideMenuBar: true,
     backgroundColor: "#f7f8fa",
@@ -208,6 +208,12 @@ function createMainWindow() {
     },
   });
   mainWindow.once("ready-to-show", () => mainWindow?.show());
+  mainWindow.webContents.on("before-input-event", (event, input) => {
+    if ((input.control || input.meta) && String(input.key).toLowerCase() === "w") {
+      event.preventDefault();
+      app.quit();
+    }
+  });
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   const packagedEntryUrl = pathToFileURL(path.join(__dirname, "../dist/index.html")).href;
   const developmentUrl = process.env.VITE_DEV_SERVER_URL || "http://127.0.0.1:5173";
@@ -308,6 +314,7 @@ if (!singleInstance) {
 
   app.whenReady().then(async () => {
     try {
+      Menu.setApplicationMenu(null);
       app.setAppLogsPath();
       dataDirectory = await ensureDataDirectory();
       if (!dataDirectory) {

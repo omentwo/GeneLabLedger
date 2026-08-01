@@ -51,47 +51,6 @@ def upgrade() -> None:
     )
     op.drop_table("cases")
 
-    op.create_table(
-        "experiment_plans",
-        sa.Column("id", sa.String(length=36), nullable=False),
-        sa.Column("prefix", sa.String(length=80), nullable=False),
-        sa.Column("last_applied_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.PrimaryKeyConstraint("id"),
-    )
-    op.create_table(
-        "experiment_plan_items",
-        sa.Column("id", sa.String(length=36), nullable=False),
-        sa.Column("plan_id", sa.String(length=36), nullable=False),
-        sa.Column("record_id", sa.String(length=36), nullable=False),
-        sa.Column("position", sa.Integer(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["plan_id"], ["experiment_plans.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["record_id"], ["project_records.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("plan_id", "position", name="uq_plan_position"),
-        sa.UniqueConstraint("plan_id", "record_id", name="uq_plan_record"),
-    )
-    op.create_index(
-        op.f("ix_experiment_plan_items_plan_id"),
-        "experiment_plan_items",
-        ["plan_id"],
-        unique=False,
-    )
-    op.create_index(
-        op.f("ix_experiment_plan_items_record_id"),
-        "experiment_plan_items",
-        ["record_id"],
-        unique=False,
-    )
-    op.create_index(
-        "ix_plan_item_record_created",
-        "experiment_plan_items",
-        ["record_id", "created_at"],
-        unique=False,
-    )
 
 
 def downgrade() -> None:

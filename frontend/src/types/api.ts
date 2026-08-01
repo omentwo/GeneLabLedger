@@ -63,6 +63,7 @@ export interface RecordCreateInput {
   pathology_number: string;
   status: RecordStatus;
   experiment_date: string | null;
+  experiment_number?: string | null;
   values: Record<string, string>;
 }
 
@@ -70,30 +71,8 @@ export interface RecordUpdateInput {
   pathology_number?: string;
   status?: RecordStatus;
   experiment_date?: string | null;
+  experiment_number?: string | null;
   values?: Record<string, string>;
-}
-
-export interface ExperimentPlanItem {
-  id: string;
-  plan_id: string;
-  record_id: string;
-  project_id: string;
-  project_name: string;
-  pathology_number: string;
-  experiment_date: string | null;
-  previous_experiment_number: string | null;
-  position: number;
-  experiment_number: string;
-  status: RecordStatus;
-}
-
-export interface ExperimentPlan {
-  id: string;
-  prefix: string;
-  last_applied_at: string | null;
-  items: ExperimentPlanItem[];
-  created_at: string;
-  updated_at: string;
 }
 
 export interface WorkbookImportRow {

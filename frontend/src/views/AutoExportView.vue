@@ -297,7 +297,7 @@ onMounted(() => {
       <div>
         <strong>由本机后端定时执行</strong>
         <p>
-          每个任务可独立选择项目、周期、格式、目录、重试次数和成功文件保留份数。关闭浏览器后仍会运行。
+          每个任务可独立选择项目、周期、格式、目录、重试次数和成功文件保留份数。自动导出由本机后端执行；关闭桌面应用会同时停止后端，应用关闭期间不会运行，请保持桌面应用运行。
         </p>
       </div>
       <el-tag effect="plain">
@@ -348,7 +348,7 @@ onMounted(() => {
           <div>
             <h2 class="page-card-title">{{ editorTitle }}</h2>
             <p class="page-description">
-              {{ selectedTask ? "修改保存后立即更新调度" : "保存后由后端开始调度" }}
+              {{ selectedTask ? "修改保存后立即更新调度" : "保存后由后端开始调度；需保持桌面应用运行" }}
             </p>
           </div>
           <el-switch

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     database_url: str | None = None
     auto_create_schema: bool = False
     max_template_size_mb: int = 20
+    audit_log_max_rows: int = Field(default=100_000, ge=1_000, le=1_000_000)
+    audit_log_retention_days: int = Field(default=365, ge=30, le=3_650)
 
     @model_validator(mode="after")
     def fill_computed_defaults(self) -> Settings:

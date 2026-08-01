@@ -13,7 +13,7 @@ import {
   Upload,
 } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import { commitWorkbookImport, previewWorkbookImport } from "@/api/imports";
@@ -49,8 +49,19 @@ const router = useRouter();
 const appStore = useAppStore();
 
 const activeProjectId = ref("");
+type LedgerRow = ProjectRecord & { _draft?: true };
 const records = ref<ProjectRecord[]>([]);
 const selectedRecords = ref<ProjectRecord[]>([]);
+const selectionStartDate = ref("");
+const selectionEndDate = ref("");
+const tableRef = ref<{
+  clearSelection: () => void;
+  doLayout: () => void;
+  setScrollTop?: (top: number) => void;
+  toggleAllSelection: () => void;
+  toggleRowSelection: (row: LedgerRow, selected?: boolean) => void;
+} | null>(null);
+let bottomScrollTimers: number[] = [];
 const loading = ref(false);
 const savingIds = ref(new Set<string>());
 const managerVisible = ref(false);
@@ -70,7 +81,6 @@ const exportFilter = reactive({
   start: "",
   end: "",
 });
-type LedgerRow = ProjectRecord & { _draft?: true };
 const draftRows = ref<LedgerRow[]>([]);
 const importFileInput = ref<HTMLInputElement | null>(null);
 const importFile = ref<File | null>(null);
@@ -131,9 +141,23 @@ function makeDraftRow(): LedgerRow {
   };
 }
 
+function scrollTableToBottom(): void {
+  bottomScrollTimers.forEach((timer) => window.clearTimeout(timer));
+  bottomScrollTimers = [];
+  const applyScroll = () => {
+    tableRef.value?.setScrollTop?.(Number.MAX_SAFE_INTEGER);
+  };
+  void nextTick(() => {
+    applyScroll();
+    bottomScrollTimers.push(window.setTimeout(applyScroll, 40));
+    bottomScrollTimers.push(window.setTimeout(applyScroll, 140));
+  });
+}
+
 function appendDraftRow(): void {
   if (!currentProject.value) return;
   draftRows.value.push(makeDraftRow());
+  scrollTableToBottom();
 }
 
 function fieldOptions(field: FieldDefinition): string[] {
@@ -156,6 +180,8 @@ function setValue(record: ProjectRecord, field: FieldDefinition, value: string):
     record.pathology_number = value;
   } else if (field.system_key === "experiment_date") {
     record.experiment_date = value || null;
+  } else if (field.system_key === "experiment_number") {
+    record.experiment_number = value || null;
   } else if (field.system_key === "status") {
     record.status = value as RecordStatus;
   } else {
@@ -163,8 +189,8 @@ function setValue(record: ProjectRecord, field: FieldDefinition, value: string):
   }
 }
 
-function isEditableField(field: FieldDefinition): boolean {
-  return field.system_key !== "experiment_number";
+function isEditableField(): boolean {
+  return true;
 }
 
 function persistedKey(recordId: string, fieldId: string): string {
@@ -218,6 +244,9 @@ function payloadForField(
     record.experiment_date = normalized || null;
     return { experiment_date: normalized || null };
   }
+  if (field.system_key === "experiment_number") {
+    return { experiment_number: value || null };
+  }
   if (field.system_key === "status") {
     if (value !== "待实验" && value !== "已完成") {
       throw new Error("状态只能是“待实验”或“已完成”");
@@ -258,6 +287,7 @@ async function persistDraft(record: LedgerRow, notify = true): Promise<boolean> 
       pathology_number: pathologyNumber,
       status: record.status,
       experiment_date: experimentDate || null,
+      experiment_number: record.experiment_number?.trim() || null,
       values,
     });
     const draftIndex = draftRows.value.findIndex((item) => item.id === record.id);
@@ -265,6 +295,7 @@ async function persistDraft(record: LedgerRow, notify = true): Promise<boolean> 
     if (activeProjectId.value === projectId) {
       records.value.push(created);
       rememberRecord(created);
+      scrollTableToBottom();
     }
     if (notify) ElMessage.success("病理号已自动保存，记录已加入表格底部");
     return true;
@@ -277,7 +308,7 @@ async function persistDraft(record: LedgerRow, notify = true): Promise<boolean> 
 }
 
 async function saveField(record: LedgerRow, field: FieldDefinition): Promise<void> {
-  if (!isEditableField(field)) return;
+  if (!isEditableField()) return;
   if (isDraft(record)) {
     if (field.system_key === "experiment_date") {
       try {
@@ -339,6 +370,7 @@ async function loadRecords(projectId = activeProjectId.value): Promise<void> {
     records.value = loaded;
     selectedRecords.value = [];
     rememberAll();
+    await nextTick();
   } catch (error) {
     if (requestSequence !== loadSequence) return;
     ElMessage.error(error instanceof Error ? error.message : "台账读取失败");
@@ -372,6 +404,36 @@ function selectProject(projectId: string): void {
   activeProjectId.value = projectId;
 }
 
+function selectAllVisible(): void {
+  tableRef.value?.toggleAllSelection();
+}
+
+function invertVisibleSelection(): void {
+  const selectedIds = new Set(selectedRecords.value.map((record) => record.id));
+  tableRef.value?.clearSelection();
+  tableRows.value.forEach((row) => {
+    if (!isDraft(row)) tableRef.value?.toggleRowSelection(row, !selectedIds.has(row.id));
+  });
+}
+
+function selectByDateRange(): void {
+  try {
+    const startDate = normalizeDate(selectionStartDate.value);
+    const endDate = normalizeDate(selectionEndDate.value);
+    if (!startDate || !endDate) throw new Error("请选择开始日期和结束日期");
+    if (startDate > endDate) throw new Error("开始日期不能晚于结束日期");
+    tableRef.value?.clearSelection();
+    tableRows.value.forEach((row) => {
+      const date = row.experiment_date ?? "";
+      if (!isDraft(row) && date >= startDate && date <= endDate) {
+        tableRef.value?.toggleRowSelection(row, true);
+      }
+    });
+  } catch (error) {
+    ElMessage.warning(error instanceof Error ? error.message : "日期无效");
+  }
+}
+
 async function handleManagerChanged(): Promise<void> {
   await loadRecords();
 }
@@ -387,6 +449,8 @@ async function handleHeaderResize(
   try {
     await updateField(field.id, { width: Math.round(newWidth) });
     await appStore.reloadProjects();
+    await nextTick();
+    tableRef.value?.doLayout();
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "列宽保存失败");
   }
@@ -401,6 +465,7 @@ function mergePayload(
   }
   if (incoming.status !== undefined) target.status = incoming.status;
   if ("experiment_date" in incoming) target.experiment_date = incoming.experiment_date;
+  if ("experiment_number" in incoming) target.experiment_number = incoming.experiment_number;
   if (incoming.values) target.values = { ...(target.values ?? {}), ...incoming.values };
   return target;
 }
@@ -436,7 +501,7 @@ async function pasteGrid(
       }
       rowValues.forEach((rawValue, columnOffset) => {
         const field = fields.value[startColumnIndex + columnOffset];
-        if (field && !isEditableField(field)) return;
+        if (field && !isEditableField()) return;
         if (!field) return;
         const value = rawValue.trim();
         setValue(record, field, value);
@@ -858,6 +923,8 @@ watch(activeProjectId, async (projectId, previousProjectId) => {
   records.value = [];
   draftRows.value = [];
   selectedRecords.value = [];
+  selectionStartDate.value = "";
+  selectionEndDate.value = "";
   importDialogVisible.value = false;
   importFile.value = null;
   importPreview.value = null;
@@ -866,6 +933,8 @@ watch(activeProjectId, async (projectId, previousProjectId) => {
   persistedValues.clear();
   void router.replace({ query: { ...route.query, project: projectId } });
   await loadRecords(projectId);
+  await nextTick();
+  scrollTableToBottom();
 }, { flush: "sync" });
 
 async function initializeLedger(): Promise<void> {
@@ -886,10 +955,17 @@ async function initializeLedger(): Promise<void> {
   }
   await router.replace({ query: { ...route.query, project: initialProjectId } });
   await loadRecords(initialProjectId);
+  await nextTick();
+  scrollTableToBottom();
 }
 
 onMounted(() => {
   void initializeLedger();
+});
+
+onBeforeUnmount(() => {
+  bottomScrollTimers.forEach((timer) => window.clearTimeout(timer));
+  bottomScrollTimers = [];
 });
 </script>
 
@@ -904,11 +980,8 @@ onMounted(() => {
         type="button"
         @click="selectProject(project.id)"
       >
-        <span>{{ project.name }} 项目台账</span>
+        <span>{{ project.name }}</span>
       </button>
-      <el-button :icon="Setting" class="manage-project-button" @click="managerVisible = true">
-        管理检测项目与表头
-      </el-button>
     </section>
 
     <section class="page-card">
@@ -988,29 +1061,42 @@ onMounted(() => {
 
     <section class="selection-bar">
       <strong>已选 {{ selectedCount }} 条</strong>
-      <el-button size="small" @click="updateSelectedStatus('已完成')">
+      <el-button @click="selectAllVisible">全选</el-button>
+      <el-button @click="invertVisibleSelection">反选</el-button>
+      <EditableDateInput
+        v-model="selectionStartDate"
+        class="selection-date"
+        placeholder="开始日期"
+      />
+      <span class="selection-date-separator">至</span>
+      <EditableDateInput
+        v-model="selectionEndDate"
+        class="selection-date"
+        placeholder="结束日期"
+      />
+      <el-button @click="selectByDateRange">按日期范围选择</el-button>
+      <el-button @click="updateSelectedStatus('已完成')">
         标记已完成
       </el-button>
-      <el-button size="small" @click="updateSelectedStatus('待实验')">
+      <el-button @click="updateSelectedStatus('待实验')">
         标记待实验
       </el-button>
-      <el-button size="small" :icon="Lock" @click="updateSelectedLock(true)">
+      <el-button :icon="Lock" @click="updateSelectedLock(true)">
         锁定所选
       </el-button>
-      <el-button size="small" :icon="Unlock" @click="updateSelectedLock(false)">
+      <el-button :icon="Unlock" @click="updateSelectedLock(false)">
         解锁所选
       </el-button>
-      <el-button size="small" :icon="Document" @click="generateSelectedReports">
+      <el-button :icon="Document" @click="generateSelectedReports">
         打印报告
       </el-button>
-      <el-button size="small" @click="updateSelectedReportStatus(true)">
+      <el-button @click="updateSelectedReportStatus(true)">
         标记已生成报告
       </el-button>
-      <el-button size="small" @click="updateSelectedReportStatus(false)">
+      <el-button @click="updateSelectedReportStatus(false)">
         恢复未生成报告
       </el-button>
       <el-button
-        size="small"
         type="danger"
         plain
         :icon="Delete"
@@ -1018,31 +1104,25 @@ onMounted(() => {
       >
         删除所选
       </el-button>
-      <span class="selection-hint">
-        单击即可编辑；可直接粘贴 Excel 多行多列数据。锁定后仍可复制。
-      </span>
+      <el-button :icon="Setting" class="manage-project-button" @click="managerVisible = true">
+        管理检测项目与表头
+      </el-button>
     </section>
 
     <section class="page-card ledger-table-card">
-      <div class="table-title-row">
-        <strong>
-          当前显示：【{{ currentProject?.name ?? "—" }}】专属台账（{{ records.length }} 条）
-          <span v-if="draftRows.length">，另有 {{ draftRows.length }} 个待填写空行</span>
-        </strong>
-        <span v-if="savingIds.size" class="saving-indicator">
-          正在保存 {{ savingIds.size }} 条记录…
-        </span>
-      </div>
-
       <el-table
+        ref="tableRef"
         v-loading="loading"
         element-loading-text="正在切换或读取项目数据…"
         element-loading-background="#ffffff"
         :data="tableRows"
         row-key="id"
         border
+        :fit="false"
+        table-layout="fixed"
+        scrollbar-always-on
         empty-text="当前项目暂无记录"
-        height="calc(100vh - 330px)"
+        height="100%"
         :row-class-name="
           ({ row }: { row: LedgerRow }) =>
             isDraft(row) ? 'draft-row' : row.locked ? 'locked-row' : ''
@@ -1071,14 +1151,13 @@ onMounted(() => {
           :column-key="field.id"
           :label="field.label"
           :width="field.width"
+          align="center"
+          header-align="center"
           resizable
         >
           <template #default="{ row, $index }: { row: LedgerRow; $index: number }">
-            <span v-if="field.system_key === 'experiment_number'" class="readonly-cell">
-              {{ valueFor(row, field) || "—" }}
-            </span>
             <EditableDateInput
-              v-else-if="field.data_type === 'date' || field.system_key === 'experiment_date'"
+              v-if="field.data_type === 'date' || field.system_key === 'experiment_date'"
               :model-value="valueFor(row, field)"
               :readonly="row.locked"
               @update:model-value="setValue(row, field, $event)"
@@ -1119,21 +1198,20 @@ onMounted(() => {
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="220" fixed="right">
+        <el-table-column label="操作" width="86" fixed="right" align="center" header-align="center">
           <template #default="{ row }: { row: LedgerRow }">
             <span v-if="isDraft(row)" class="draft-row-hint">
-              填写病理号后自动保存
+              待保存
             </span>
             <div v-else class="row-actions">
               <el-button
                 link
                 :icon="row.locked ? Unlock : Lock"
+                :title="row.locked ? '解锁记录' : '锁定记录'"
                 @click="toggleRecordLock(row)"
-              >
-                {{ row.locked ? "解锁" : "锁定" }}
-              </el-button>
+              />
               <el-dropdown trigger="click">
-                <el-button link type="primary">更多</el-button>
+                <el-button link type="primary" aria-label="更多操作">更多</el-button>
                 <template #dropdown>
                   <el-dropdown-menu>
                     <el-dropdown-item :icon="CopyDocument" @click="openAssign(row)">
@@ -1418,23 +1496,50 @@ onMounted(() => {
   margin-top: 14px;
 }
 .project-strip {
+  position: sticky;
+  top: 0;
+  z-index: 10;
   display: flex;
   align-items: stretch;
   gap: 8px;
+  padding: 4px 4px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  background: rgb(255 255 255 / 82%);
+  box-shadow: 0 5px 16px rgb(16 24 40 / 6%);
+  backdrop-filter: blur(12px);
   overflow-x: auto;
+  scrollbar-color: #98a2b3 #eef2f6;
+  scrollbar-width: auto;
+}
+
+.project-strip::-webkit-scrollbar {
+  height: 10px;
+}
+
+.project-strip::-webkit-scrollbar-track {
+  border-radius: 999px;
+  background: #eef2f6;
+}
+
+.project-strip::-webkit-scrollbar-thumb {
+  border: 2px solid #eef2f6;
+  border-radius: 999px;
+  background: #98a2b3;
 }
 
 .project-tab {
   display: flex;
-  min-width: 190px;
-  min-height: 54px;
+  min-width: 150px;
+  min-height: 42px;
   align-items: center;
+  justify-content: center;
   border: 1px solid var(--app-border);
   border-radius: 10px;
   color: #344054;
   background: #fff;
-  padding: 11px 13px;
-  text-align: left;
+  padding: 8px 12px;
+  text-align: center;
   cursor: pointer;
 }
 
@@ -1509,29 +1614,30 @@ onMounted(() => {
   font-size: 13px;
 }
 
-.selection-hint {
-  margin-left: auto;
+.selection-date {
+  width: 132px;
+}
+
+.selection-date-separator {
   color: var(--app-muted);
-  font-size: 12px;
+  font-size: 13px;
+}
+
+.selection-bar > :deep(.el-button) {
+  min-height: 32px;
 }
 
 .ledger-table-card {
+  display: flex;
+  height: calc(100vh - 300px);
+  flex-direction: column;
   min-width: 0;
   overflow: hidden;
 }
 
-.table-title-row {
-  display: flex;
-  min-height: 44px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 14px;
-}
-
-.saving-indicator {
-  color: var(--app-primary);
-  font-size: 12px;
+.ledger-table-card :deep(.el-table) {
+  min-height: 0;
+  flex: 1;
 }
 
 .row-lock {
@@ -1541,8 +1647,40 @@ onMounted(() => {
 
 .row-actions {
   display: flex;
+  height: 24px;
   align-items: center;
-  gap: 2px;
+  justify-content: center;
+  gap: 1px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.row-actions > * {
+  flex: 0 0 auto;
+}
+
+.row-actions :deep(.el-button),
+.row-actions :deep(.el-dropdown .el-button) {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  min-width: 20px;
+  line-height: 1;
+  vertical-align: middle;
+}
+
+.row-actions :deep(.el-dropdown) {
+  display: inline-flex;
+  align-items: center;
+}
+
+.row-actions :deep(.el-dropdown .el-button) {
+  width: 38px;
+  min-width: 38px;
 }
 
 .dropdown-router-link {
@@ -1595,10 +1733,27 @@ onMounted(() => {
 
 :deep(.el-table .cell) {
   padding: 5px 7px;
+  text-align: center;
 }
 
 :deep(.el-table th.el-table__cell) {
   color: #182230;
   background: #f2f4f7;
+  text-align: center;
+}
+
+:deep(.el-table .el-input__inner),
+:deep(.el-table .el-textarea__inner) {
+  text-align: center;
+}
+
+:deep(.ledger-table-card .el-table__body-wrapper .el-scrollbar__bar.is-horizontal) {
+  height: 10px;
+  bottom: 2px;
+}
+
+:deep(.ledger-table-card .el-table__body-wrapper .el-scrollbar__thumb) {
+  border-radius: 999px;
+  background: #98a2b3;
 }
 </style>

@@ -49,6 +49,16 @@ export function updateRecord(
   });
 }
 
+export function assignExperimentNumbers(
+  recordIds: string[],
+  prefix: string,
+): Promise<ProjectRecord[]> {
+  return apiRequest<ProjectRecord[]>("/records/experiment-numbers", {
+    method: "POST",
+    body: jsonBody({ record_ids: recordIds, prefix }),
+  });
+}
+
 export function setRecordLock(
   recordId: string,
   locked: boolean,

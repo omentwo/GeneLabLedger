@@ -132,11 +132,6 @@ class ProjectRecord(Base, TimestampMixin):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
-    experiment_plan_items: Mapped[list[ExperimentPlanItem]] = relationship(
-        back_populates="record",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-    )
 
 
 class RecordValue(Base, TimestampMixin):
@@ -158,45 +153,6 @@ class RecordValue(Base, TimestampMixin):
 
     record: Mapped[ProjectRecord] = relationship(back_populates="values")
     field: Mapped[FieldDefinition] = relationship(back_populates="values")
-
-
-class ExperimentPlan(Base, TimestampMixin):
-    __tablename__ = "experiment_plans"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
-    prefix: Mapped[str] = mapped_column(String(80), nullable=False, default="")
-    last_applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-
-    items: Mapped[list[ExperimentPlanItem]] = relationship(
-        back_populates="plan",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-        order_by="ExperimentPlanItem.position",
-    )
-
-
-class ExperimentPlanItem(Base, TimestampMixin):
-    __tablename__ = "experiment_plan_items"
-    __table_args__ = (
-        UniqueConstraint("plan_id", "position", name="uq_plan_position"),
-        UniqueConstraint("plan_id", "record_id", name="uq_plan_record"),
-        Index("ix_plan_item_record_created", "record_id", "created_at"),
-    )
-
-    plan: Mapped[ExperimentPlan] = relationship(back_populates="items")
-    record: Mapped[ProjectRecord] = relationship(back_populates="experiment_plan_items")
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
-    plan_id: Mapped[str] = mapped_column(
-        ForeignKey("experiment_plans.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    record_id: Mapped[str] = mapped_column(
-        ForeignKey("project_records.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    position: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 class ReportTemplate(Base, TimestampMixin):

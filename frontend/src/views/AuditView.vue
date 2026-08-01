@@ -7,6 +7,8 @@ import type { AuditLog } from "@/types/api";
 
 const search = ref("");
 const logs = ref<AuditLog[]>([]);
+const offset = ref(0);
+const hasMore = ref(false);
 const loading = ref(false);
 const errorMessage = ref("");
 
@@ -25,13 +27,14 @@ const actionLabels: Record<string, string> = {
   "record.lock": "锁定台账记录",
   "record.unlock": "解锁台账记录",
   "record.assign_project": "分配到其他项目",
-  "experiment.plan.create": "新建实验编排单",
-  "experiment.plan.update": "修改实验编号前缀",
-  "experiment.plan.delete": "删除实验编排单",
-  "experiment.plan.item.add": "加入实验编排",
-  "experiment.plan.item.delete": "移出实验编排",
-  "experiment.plan.reorder": "调整实验顺序",
-  "experiment.plan.apply": "回写实验编号",
+  "experiment.plan.create": "创建旧版编号队列",
+  "experiment.plan.update": "修改旧版编号队列",
+  "experiment.plan.delete": "删除旧版编号队列",
+  "experiment.plan.item.add": "加入旧版编号队列",
+  "experiment.plan.item.delete": "移出旧版编号队列",
+  "experiment.plan.reorder": "调整旧版编号队列",
+  "experiment.plan.apply": "回写旧版编号队列",
+  "record.experiment_number.update": "回写实验编号",
   "record.bulk_delete": "按日期批量删除台账记录",
   "record.import.create": "导入新增台账记录",
   "record.import.update": "导入更新台账记录",
@@ -52,8 +55,8 @@ const entityLabels: Record<string, string> = {
   project: "检测项目",
   field: "台账表头",
   project_record: "台账记录",
-  experiment_plan: "实验编排单",
-  experiment_plan_item: "实验编排条目",
+  experiment_plan: "历史编号队列",
+  experiment_plan_item: "历史编号条目",
   report_template: "报告模板",
   report_template_version: "模板版本",
   auto_export_task: "自动导出任务",
@@ -71,11 +74,19 @@ function formatTime(value: string): string {
       });
 }
 
-async function loadLogs(): Promise<void> {
+async function loadLogs(reset = true): Promise<void> {
   loading.value = true;
   errorMessage.value = "";
   try {
-    logs.value = await listAuditLogs(search.value);
+    if (reset) {
+      offset.value = 0;
+      logs.value = [];
+      hasMore.value = false;
+    }
+    const page = await listAuditLogs(search.value, 101, offset.value);
+    hasMore.value = page.length > 100;
+    logs.value = [...logs.value, ...page.slice(0, 100)];
+    offset.value += Math.min(page.length, 100);
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : "日志读取失败";
   } finally {
@@ -86,6 +97,10 @@ async function loadLogs(): Promise<void> {
 function resetSearch(): void {
   search.value = "";
   void loadLogs();
+}
+
+function loadMore(): void {
+  if (!loading.value && hasMore.value) void loadLogs(false);
 }
 
 onMounted(() => {
@@ -101,7 +116,9 @@ onMounted(() => {
           <h2 class="page-card-title">日志审计</h2>
           <p class="page-description">按最新操作优先，支持搜索操作人、病理号、对象编号和详情。</p>
         </div>
-        <span class="muted">{{ loading ? "正在查询" : `${logs.length} 条日志` }}</span>
+        <span class="muted">
+          {{ loading ? "正在查询" : `${logs.length}${hasMore ? "+" : ""} 条日志` }}
+        </span>
       </div>
       <div class="page-card-body">
         <div class="toolbar">
@@ -173,6 +190,9 @@ onMounted(() => {
           </template>
         </el-table-column>
       </el-table>
+      <div v-if="hasMore" class="load-more-row">
+        <el-button :loading="loading" @click="loadMore">加载更多日志</el-button>
+      </div>
     </section>
   </div>
 </template>
@@ -185,6 +205,12 @@ onMounted(() => {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-size: 12px;
+}
+
+.load-more-row {
+  display: flex;
+  justify-content: center;
+  padding: 12px;
 }
 
 code {

@@ -8,12 +8,11 @@ import {
   Notebook,
   Setting,
 } from "@element-plus/icons-vue";
-import { computed, onMounted } from "vue";
-import { RouterLink, RouterView, useRoute } from "vue-router";
+import { onMounted } from "vue";
+import { RouterLink, RouterView } from "vue-router";
 
 import { useAppStore } from "@/stores/app";
 
-const route = useRoute();
 const appStore = useAppStore();
 
 const navigation = [
@@ -26,27 +25,31 @@ const navigation = [
   { to: "/settings", label: "数据与设置", icon: Setting },
 ];
 
-const currentTitle = computed(() =>
-  typeof route.meta.title === "string" ? route.meta.title : "基因检测台账管理系统",
-);
-
 onMounted(() => {
   void appStore.bootstrap();
 });
 </script>
 
 <template>
-  <div class="grid min-h-screen grid-cols-[220px_minmax(0,1fr)] bg-slate-50 text-slate-900">
+  <div class="grid min-h-screen grid-cols-[180px_minmax(0,1fr)] bg-slate-50 text-slate-900">
     <aside
-      class="sticky top-0 flex h-screen flex-col border-r border-slate-200 bg-white px-3 py-4 shadow-[1px_0_0_rgba(15,23,42,0.02)]"
+      class="sticky top-0 flex h-screen flex-col border-r border-slate-200 bg-white px-2.5 py-3 shadow-[1px_0_0_rgba(15,23,42,0.02)]"
     >
       <div class="flex min-h-16 items-center gap-3 px-3 pb-4">
-        <div class="grid size-10 place-items-center rounded-xl bg-blue-50 text-xl ring-1 ring-blue-100">
-          🧬
-        </div>
-        <div>
-          <div class="font-bold tracking-tight text-slate-900">基因检测台账</div>
-          <div class="mt-0.5 text-xs text-slate-500">本机实验室管理系统</div>
+        <svg
+          class="size-8 shrink-0"
+          viewBox="0 0 64 64"
+          role="img"
+          aria-label="基因检测台账"
+        >
+          <rect x="2" y="2" width="60" height="60" rx="18" fill="#e8f3ff" stroke="#b9d7f5" stroke-width="2" />
+          <path d="M22 16c14 4 14 28 28 32M42 16c-14 4-14 28-28 32" fill="none" stroke="#1677ff" stroke-width="4" stroke-linecap="round" />
+          <path d="M24 22h16M22 32h20M24 42h16" stroke="#16a36a" stroke-width="3" stroke-linecap="round" />
+          <circle cx="22" cy="16" r="3" fill="#f59e0b" />
+          <circle cx="42" cy="16" r="3" fill="#f59e0b" />
+        </svg>
+        <div class="whitespace-nowrap text-[13px] font-bold leading-tight tracking-tight text-slate-900">
+          基因检测台账
         </div>
       </div>
 
@@ -73,16 +76,7 @@ onMounted(() => {
     </aside>
 
     <main class="min-w-0">
-      <header
-        class="sticky top-0 z-20 flex min-h-[76px] items-center justify-between border-b border-slate-200 bg-white/90 px-6 py-3 backdrop-blur"
-      >
-        <div>
-          <h1 class="m-0 text-xl font-bold tracking-tight text-slate-900">{{ currentTitle }}</h1>
-          <p class="mt-1 text-xs text-slate-500">所有业务数据以当前选定的本机数据库为准</p>
-        </div>
-      </header>
-
-      <section class="px-5 pb-8 pt-4">
+      <section class="min-w-0 px-3 pb-5 pt-3">
         <RouterView />
       </section>
     </main>

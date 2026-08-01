@@ -133,6 +133,7 @@ class RecordCreate(BaseModel):
     pathology_number: str = Field(min_length=1, max_length=160)
     status: RecordStatus = "待实验"
     experiment_date: date | None = None
+    experiment_number: str | None = Field(default=None, max_length=80)
     values: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("pathology_number")
@@ -140,17 +141,41 @@ class RecordCreate(BaseModel):
     def clean_pathology_number(cls, value: str) -> str:
         return value.strip()
 
+    @field_validator("experiment_number")
+    @classmethod
+    def clean_experiment_number(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None and value.strip() else None
+
 
 class RecordUpdate(BaseModel):
     pathology_number: str | None = Field(default=None, min_length=1, max_length=160)
     status: RecordStatus | None = None
     experiment_date: date | None = None
+    experiment_number: str | None = Field(default=None, max_length=80)
     values: dict[str, str] | None = None
 
     @field_validator("pathology_number")
     @classmethod
     def clean_optional_pathology_number(cls, value: str | None) -> str | None:
         return value.strip() if value is not None else None
+
+    @field_validator("experiment_number")
+    @classmethod
+    def clean_optional_experiment_number(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
+
+
+class RecordExperimentNumberBatch(BaseModel):
+    record_ids: list[str] = Field(min_length=1, max_length=1000)
+    prefix: str = Field(min_length=1, max_length=80)
+
+    @field_validator("prefix")
+    @classmethod
+    def clean_prefix(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("实验编号前缀不能为空")
+        return cleaned
 
 
 class RecordLockUpdate(BaseModel):
@@ -186,56 +211,6 @@ class RecordList(BaseModel):
     total: int
     limit: int
     offset: int
-
-
-class ExperimentPlanCreate(BaseModel):
-    prefix: str = Field(default="", max_length=80)
-
-    @field_validator("prefix")
-    @classmethod
-    def clean_prefix(cls, value: str) -> str:
-        return value.strip()
-
-
-class ExperimentPlanUpdate(ExperimentPlanCreate):
-    pass
-
-
-class ExperimentPlanItemAdd(BaseModel):
-    record_id: str
-
-
-class ExperimentPlanReorder(BaseModel):
-    item_ids: list[str] = Field(min_length=1)
-
-
-class ExperimentPlanItemRead(BaseModel):
-    id: str
-    plan_id: str
-    record_id: str
-    project_id: str
-    project_name: str
-    pathology_number: str
-    experiment_date: date | None
-    previous_experiment_number: str | None
-    position: int
-    experiment_number: str
-    status: str
-
-
-class ExperimentPlanRead(BaseModel):
-    id: str
-    prefix: str
-    last_applied_at: datetime | None
-    items: list[ExperimentPlanItemRead]
-    created_at: datetime
-    updated_at: datetime
-
-
-class ExperimentApplyRead(BaseModel):
-    plan_id: str
-    updated_records: int
-    applied_at: datetime
 
 
 class ReportMappingInput(BaseModel):

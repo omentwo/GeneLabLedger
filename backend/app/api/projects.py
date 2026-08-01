@@ -261,6 +261,7 @@ def replace_field_options(
             detail="状态核心字段固定使用“待实验、已完成”",
         )
     field.options.clear()
+    session.flush()
     for index, value in enumerate(payload.options):
         field.options.append(FieldOption(value=value, sort_order=index))
     audit(

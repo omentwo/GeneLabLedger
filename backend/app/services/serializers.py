@@ -1,13 +1,6 @@
 from __future__ import annotations
 
-from app.models import (
-    ExperimentPlan,
-    ExperimentPlanItem,
-    ProjectRecord,
-    ReportMapping,
-    ReportTemplate,
-    ReportTemplateVersion,
-)
+from app.models import ProjectRecord, ReportMapping, ReportTemplate, ReportTemplateVersion
 
 
 def record_dict(record: ProjectRecord) -> dict:
@@ -24,34 +17,6 @@ def record_dict(record: ProjectRecord) -> dict:
         "values": {value.field_id: value.value_text for value in record.values},
         "created_at": record.created_at,
         "updated_at": record.updated_at,
-    }
-
-
-def experiment_plan_item_dict(item: ExperimentPlanItem) -> dict:
-    number = f"{item.plan.prefix}-{item.position}" if item.plan.prefix else ""
-    return {
-        "id": item.id,
-        "plan_id": item.plan_id,
-        "record_id": item.record_id,
-        "project_id": item.record.project_id,
-        "project_name": item.record.project.name,
-        "pathology_number": item.record.pathology_number,
-        "experiment_date": item.record.experiment_date,
-        "previous_experiment_number": item.record.experiment_number,
-        "position": item.position,
-        "experiment_number": number,
-        "status": item.record.status,
-    }
-
-
-def experiment_plan_dict(plan: ExperimentPlan) -> dict:
-    return {
-        "id": plan.id,
-        "prefix": plan.prefix,
-        "last_applied_at": plan.last_applied_at,
-        "items": [experiment_plan_item_dict(item) for item in plan.items],
-        "created_at": plan.created_at,
-        "updated_at": plan.updated_at,
     }
 
 

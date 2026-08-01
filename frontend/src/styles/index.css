@@ -24,7 +24,8 @@
 html,
 body,
 #app {
-  min-width: 1120px;
+  width: 100%;
+  min-width: 0;
   min-height: 100%;
   margin: 0;
 }
@@ -55,12 +56,12 @@ textarea {
 
 .page-card-header {
   display: flex;
-  min-height: 52px;
+  min-height: 44px;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   border-bottom: 1px solid var(--app-border);
-  padding: 10px 14px;
+  padding: 8px 12px;
 }
 
 .page-card-title {

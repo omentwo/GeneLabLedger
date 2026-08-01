@@ -63,7 +63,6 @@ Project
   ├─ ProjectRecord ── RecordValue
   └─ ReportTemplate ── ReportTemplateVersion ── ReportMapping
 
-ExperimentPlan ── ExperimentPlanItem ── ProjectRecord
 AutoExportTask ── AutoExportRun
 AuditLog
 AppSetting
@@ -78,23 +77,15 @@ AppSetting
 | `pathology_number` | 普通可重复字段，带查询索引 |
 | `status` | 待实验/已完成，用户手工维护 |
 | `experiment_date` | 台账实验日期，与编排无关联 |
-| `experiment_number` | 可空、全局唯一；台账 UI 只读 |
+| `experiment_number` | 可空、全局唯一；台账可手动修改，编号编排也可覆盖 |
 | `report_generated` | 独立人工标记 |
 | `locked` | 写入和删除保护 |
 
 不存在 `Case` 表或 `(case_id, project_id)` 唯一关系。同病理号记录之间没有数据库关联。
 
-### ExperimentPlan / ExperimentPlanItem
+### 临时实验编号队列
 
-`ExperimentPlan` 保存自由 `prefix` 和最近回写时间。条目通过 `(plan_id, record_id)` 与 `(plan_id, position)` 唯一约束维护顺序。显示编号在序列化时计算为 `{prefix}-{position}`，计划表不另存一份实验编号。
-
-回写事务：
-
-1. 再次确认所有条目状态为“待实验”；
-2. 计算编号长度与编排外冲突；
-3. 将目标记录旧编号暂置 NULL 并 flush，避免交换顺序触发唯一约束；
-4. 写入最终编号、更新时间与审计；
-5. 不修改状态、日期或编排条目。
+前端保留选择记录和编号预览的左右两栏，队列只存在于当前页面，不写入数据库。`POST /api/records/experiment-numbers` 在一次事务中确认 UUID、锁定状态、待实验状态和完整编号冲突后回写编号。目标记录旧编号先暂置 NULL 并 flush，避免交换顺序触发唯一约束；状态、日期和锁定状态不变。
 
 ## 5. API
 
@@ -108,14 +99,10 @@ AppSetting
 - `POST /api/records/bulk-delete/preview`
 - `POST /api/records/bulk-delete/execute`
 
-### Experiment plans
+### Experiment numbering
 
-- `GET/POST /api/experiments/plans`
-- `GET/PATCH/DELETE /api/experiments/plans/{plan_id}`
-- `POST /api/experiments/plans/{plan_id}/items`
-- `DELETE /api/experiments/plans/{plan_id}/items/{item_id}`
-- `PUT /api/experiments/plans/{plan_id}/order`
-- `POST /api/experiments/plans/{plan_id}/apply`
+- `POST /api/records/experiment-numbers`：按 UUID 顺序生成前缀编号并原子回写。
+- `PATCH /api/records/{record_id}`：允许台账直接修改或清空 `experiment_number`。
 
 ### Import/export
 
@@ -140,6 +127,12 @@ AppSetting
 
 自动任务 API 保留 CRUD、立即执行、运行历史和 Cron 校验。后端不再提供 tkinter 目录选择；目录由 Electron IPC 获取后作为普通字符串保存。
 
+自动任务运行在 Electron 启动的 Python sidecar 中。关闭 Electron 应用会停止 sidecar，因此应用关闭期间不会执行任务。
+
+### Audit retention
+
+`AuditLog` 默认保留最近 365 天且最多 100,000 条（按 UUID、详情 JSON 和索引估算约数百 MB 以内）。后端每次启动时删除过期日志，再删除超出上限的最旧日志；可用 `GENE_LEDGER_AUDIT_LOG_RETENTION_DAYS` 与 `GENE_LEDGER_AUDIT_LOG_MAX_ROWS` 调整。
+
 ## 6. Excel 保存边界
 
 `/api/exports/workbook` 只生成 XLSX 字节。前端调用 `exportWorkbook`：
@@ -157,7 +150,7 @@ AppSetting
 
 ## 8. 数据库迁移
 
-`f3b7c9d2e410` 是测试阶段的破坏性结构迁移：删除旧 ExperimentBatch/ExperimentRun，复制 Case 病理号到 ProjectRecord，移除 Case，并创建 ExperimentPlan 表。旧测试数据库会在本次重构后删除；该迁移不提供 downgrade，禁止把它直接用于未备份的生产数据。
+`f3b7c9d2e410` 是测试阶段的破坏性结构迁移：删除旧 ExperimentBatch/ExperimentRun，复制 Case 病理号到 ProjectRecord，移除 Case；当前编号编排不再创建或使用持久化队列表。旧测试数据库会在本次重构后删除。该迁移不提供 downgrade，禁止把它直接用于未备份的生产数据。
 
 新安装由 `auto_create_schema=True` 创建当前结构。开发环境可使用 Alembic：
 
@@ -195,7 +188,7 @@ GitHub 工作流：
 ```text
 backend/app/models.py                 ORM
 backend/app/api/records.py            台账与批删
-backend/app/api/experiments.py        实验编排单
+backend/app/api/records.py            编号批量回写
 backend/app/api/imports.py            Excel 导入
 backend/app/api/exports.py            Excel 字节流
 backend/app/api/reports.py            模板与直接打印

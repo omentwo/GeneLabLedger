@@ -29,9 +29,6 @@ const pending = computed(
 const completed = computed(
   () => records.value.filter((record) => record.status === "已完成").length,
 );
-const completionRate = computed(() =>
-  total.value ? Math.round((completed.value / total.value) * 100) : 0,
-);
 const recentThirtyDays = computed(() => {
   const endKey = shanghaiDateKey();
   const startKey = shiftDateKey(endKey, -29);
@@ -54,7 +51,20 @@ const projectStats = computed(() =>
   }),
 );
 const projectChartStats = computed(() =>
-  projectStats.value.slice().sort((a, b) => b.total - a.total || a.name.localeCompare(b.name)),
+  projectStats.value
+    .map((project) => {
+      const endKey = shanghaiDateKey();
+      const previousMonthKey = shiftMonthKey(endKey.slice(0, 7), -1);
+      const startKey = `${previousMonthKey}-01`;
+      const nextMonthKey = shiftMonthKey(previousMonthKey, 1);
+      const endDate = `${nextMonthKey}-01`;
+      const previousMonthCount = records.value.filter((record) => {
+        const date = record.experiment_date ?? "";
+        return record.project_id === project.id && date >= startKey && date < endDate;
+      }).length;
+      return { ...project, previousMonth: previousMonthCount };
+    })
+    .sort((a, b) => b.total - a.total || a.name.localeCompare(b.name)),
 );
 const projectMax = computed(() =>
   Math.max(1, ...projectChartStats.value.map((project) => project.total)),
@@ -301,34 +311,11 @@ watch(
         </div>
       </article>
 
-      <article class="chart-card status-card">
-        <div class="chart-heading">
-          <div>
-            <h2>总体完成率</h2>
-            <p>全部项目当前状态</p>
-          </div>
-        </div>
-        <strong class="completion-number">{{ completionRate }}%</strong>
-        <div class="completion-track">
-          <span :style="{ width: `${completionRate}%` }" />
-        </div>
-        <div class="status-breakdown">
-          <div>
-            <span>已完成</span>
-            <strong>{{ completed }}</strong>
-          </div>
-          <div>
-            <span>待实验</span>
-            <strong>{{ pending }}</strong>
-          </div>
-        </div>
-      </article>
-
       <article class="chart-card project-volume-card">
         <div class="chart-heading">
           <div>
             <h2>项目工作量分布</h2>
-            <p>横向长度代表各项目记录总量</p>
+            <p>横向长度代表总记录量，右侧显示上个月工作量</p>
           </div>
         </div>
         <div class="project-bars">
@@ -358,7 +345,10 @@ watch(
                 />
               </span>
             </div>
-            <strong>{{ project.total }}</strong>
+            <div class="project-bar-counts">
+              <strong>{{ project.total }}</strong>
+              <small>上月 {{ project.previousMonth }}</small>
+            </div>
           </RouterLink>
         </div>
       </article>
@@ -543,13 +533,14 @@ watch(
 }
 
 .monthly-card {
+  grid-column: 1 / -1;
   overflow-x: auto;
 }
 
 .month-column {
   display: grid;
   min-width: 0;
-  grid-template-rows: 18px 150px 30px;
+  grid-template-rows: 18px 175px 30px;
   align-items: end;
   justify-items: center;
   gap: 5px;
@@ -563,7 +554,7 @@ watch(
 .month-track {
   display: flex;
   width: 100%;
-  height: 150px;
+  height: 175px;
   align-items: end;
   justify-content: center;
   border-bottom: 1px solid #d0d5dd;
@@ -593,58 +584,6 @@ watch(
   white-space: nowrap;
 }
 
-.status-card {
-  display: flex;
-  flex-direction: column;
-}
-
-.completion-number {
-  margin-top: 28px;
-  color: #182230;
-  font-size: 42px;
-  line-height: 1;
-}
-
-.completion-track {
-  height: 10px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: #edf1f5;
-  margin-top: 16px;
-}
-
-.completion-track span {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, #409eff, #12b76a);
-}
-
-.status-breakdown {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
-  margin-top: auto;
-  padding-top: 24px;
-}
-
-.status-breakdown div {
-  display: grid;
-  gap: 5px;
-  border-radius: 8px;
-  background: #f8fafc;
-  padding: 10px;
-}
-
-.status-breakdown span {
-  color: var(--app-muted);
-  font-size: 12px;
-}
-
-.status-breakdown strong {
-  font-size: 20px;
-}
-
 .project-volume-card {
   grid-column: 1 / -1;
 }
@@ -657,7 +596,7 @@ watch(
 
 .project-bar-row {
   display: grid;
-  grid-template-columns: minmax(90px, 150px) minmax(140px, 1fr) 36px;
+  grid-template-columns: minmax(90px, 150px) minmax(140px, 1fr) 84px;
   align-items: center;
   gap: 10px;
   color: inherit;
@@ -673,6 +612,23 @@ watch(
   font-size: 13px;
   font-weight: 600;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-bar-counts {
+  display: grid;
+  justify-items: end;
+  gap: 3px;
+}
+
+.project-bar-counts strong {
+  color: #344054;
+  font-size: 13px;
+}
+
+.project-bar-counts small {
+  color: var(--app-muted);
+  font-size: 11px;
   white-space: nowrap;
 }
 
@@ -703,7 +659,7 @@ watch(
 
 .project-overview-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -785,6 +741,10 @@ watch(
 
   .project-volume-card {
     grid-column: auto;
+  }
+
+  .project-overview-grid {
+    grid-template-columns: 1fr;
   }
 }
 </style>

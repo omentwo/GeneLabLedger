@@ -3,6 +3,8 @@ $BackendRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = Split-Path -Parent $BackendRoot
 $FrontendRoot = Join-Path $ProjectRoot "frontend"
 $FrontendIndex = Join-Path $FrontendRoot "dist\index.html"
+$FrontendSource = Join-Path $FrontendRoot "src"
+$FrontendPublic = Join-Path $FrontendRoot "public"
 Set-Location -LiteralPath $BackendRoot
 $env:UV_CACHE_DIR = Join-Path $BackendRoot ".uv-cache"
 
@@ -14,7 +16,20 @@ if (-not (Test-Path -LiteralPath $Uvicorn)) {
     uv sync --dev
 }
 
-if (-not (Test-Path -LiteralPath $FrontendIndex)) {
+$NeedsFrontendBuild = -not (Test-Path -LiteralPath $FrontendIndex)
+if (-not $NeedsFrontendBuild) {
+    $DistStamp = (Get-Item -LiteralPath $FrontendIndex).LastWriteTimeUtc
+    $SourceFiles = @(
+        Get-ChildItem -LiteralPath $FrontendSource -Recurse -File
+        Get-ChildItem -LiteralPath $FrontendPublic -Recurse -File -ErrorAction SilentlyContinue
+        Get-Item -LiteralPath (Join-Path $FrontendRoot "index.html")
+        Get-Item -LiteralPath (Join-Path $FrontendRoot "package.json")
+        Get-Item -LiteralPath (Join-Path $FrontendRoot "package-lock.json")
+    )
+    $NeedsFrontendBuild = $null -ne ($SourceFiles | Where-Object { $_.LastWriteTimeUtc -gt $DistStamp } | Select-Object -First 1)
+}
+
+if ($NeedsFrontendBuild) {
     $Npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
     if ($null -eq $Npm) {
         throw "Modern frontend build is missing. Install Node.js, then run npm.cmd install and npm.cmd run build in the frontend directory."

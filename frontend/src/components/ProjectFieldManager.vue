@@ -43,7 +43,7 @@ const saving = ref(false);
 const fieldDialogVisible = ref(false);
 const optionsDialogVisible = ref(false);
 const editingOptionsField = ref<FieldDefinition | null>(null);
-const optionsText = ref("");
+const optionsDraft = ref<string[]>([]);
 const newField = reactive<{
   label: string;
   data_type: DataType;
@@ -275,12 +275,21 @@ async function addField(): Promise<void> {
 
 function editOptions(field: FieldDefinition): void {
   editingOptionsField.value = field;
-  optionsText.value = field.options
+  optionsDraft.value = field.options
     .slice()
     .sort((a, b) => a.sort_order - b.sort_order)
     .map((option) => option.value)
-    .join("\n");
+  if (!optionsDraft.value.length) optionsDraft.value.push("");
   optionsDialogVisible.value = true;
+}
+
+function addOptionDraft(): void {
+  optionsDraft.value.push("");
+}
+
+function removeOptionDraft(index: number): void {
+  optionsDraft.value.splice(index, 1);
+  if (!optionsDraft.value.length) optionsDraft.value.push("");
 }
 
 async function saveOptions(): Promise<void> {
@@ -289,7 +298,7 @@ async function saveOptions(): Promise<void> {
   try {
     await replaceFieldOptions(
       editingOptionsField.value.id,
-      parseOptions(optionsText.value),
+      parseOptions(optionsDraft.value.join("\n")),
     );
     optionsDialogVisible.value = false;
     await reloadAndNotify();
@@ -347,7 +356,7 @@ watch(
   <el-dialog
     :model-value="modelValue"
     title="管理检测项目与独立表头"
-    width="1040px"
+    width="min(1120px, 94vw)"
     destroy-on-close
     @update:model-value="emit('update:modelValue', $event)"
   >
@@ -360,7 +369,9 @@ watch(
             :key="project.id"
             :index="project.id"
           >
+            <span class="project-symbol" aria-hidden="true">🧬</span>
             <span class="project-list-name">{{ project.name }}</span>
+            <span class="project-count">{{ project.fields.length }}</span>
             <span class="project-order-actions">
               <el-button
                 link
@@ -556,13 +567,14 @@ watch(
     width="520px"
     append-to-body
   >
-    <el-input
-      v-model="optionsText"
-      type="textarea"
-      :rows="8"
-      placeholder="每行一个备选项"
-    />
-    <p class="form-help">可以为空；表格输入框始终允许直接输入和粘贴。</p>
+    <div class="options-editor">
+      <div v-for="(_, index) in optionsDraft" :key="index" class="option-row">
+        <el-input v-model="optionsDraft[index]" :placeholder="`备选项 ${index + 1}`" />
+        <el-button link type="danger" @click="removeOptionDraft(index)">删除</el-button>
+      </div>
+      <el-button plain :icon="Plus" @click="addOptionDraft">添加备选项</el-button>
+    </div>
+    <p class="form-help">每行一个；可以留空。表格输入框仍允许直接输入和粘贴其他内容。</p>
     <template #footer>
       <el-button @click="optionsDialogVisible = false">取消</el-button>
       <el-button type="primary" :loading="saving" @click="saveOptions">保存备选项</el-button>
@@ -573,18 +585,19 @@ watch(
 <style scoped>
 .manager-layout {
   display: grid;
-  grid-template-columns: 190px minmax(0, 1fr);
-  min-height: 520px;
-  gap: 18px;
+  grid-template-columns: 250px minmax(0, 1fr);
+  min-height: 600px;
+  gap: 22px;
 }
 
 .project-panel {
   display: flex;
   min-width: 0;
+  max-height: 600px;
   flex-direction: column;
   gap: 10px;
   border-right: 1px solid var(--app-border);
-  padding-right: 16px;
+  padding-right: 20px;
 }
 
 .section-label {
@@ -594,14 +607,45 @@ watch(
 }
 
 .project-panel :deep(.el-menu) {
+  min-height: 0;
+  flex: 1;
   border-right: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 6px;
 }
 
 .project-panel :deep(.el-menu-item) {
   display: flex;
-  height: 40px;
-  border-radius: 7px;
-  line-height: 40px;
+  height: 52px;
+  margin-bottom: 8px;
+  border: 1px solid #eaecf0;
+  border-radius: 12px;
+  background: #fff;
+  line-height: 52px;
+}
+
+.project-panel :deep(.el-menu-item.is-active) {
+  border-color: #b2ddff;
+  color: #1570ef;
+  background: #eff8ff;
+}
+
+.project-symbol {
+  margin-right: 8px;
+  font-size: 18px;
+}
+
+.project-count {
+  min-width: 24px;
+  height: 24px;
+  margin-left: 8px;
+  border-radius: 999px;
+  color: #475467;
+  background: #f2f4f7;
+  font-size: 12px;
+  line-height: 24px;
+  text-align: center;
 }
 
 .project-list-name {
@@ -666,5 +710,17 @@ watch(
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
+}
+
+.options-editor {
+  display: grid;
+  gap: 8px;
+}
+
+.option-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
 }
 </style>

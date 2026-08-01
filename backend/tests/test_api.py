@@ -102,7 +102,7 @@ def test_pathology_number_is_plain_record_data_and_duplicates_are_independent(
     assert client.get(f"/api/records/{assigned['id']}").json()["pathology_number"] == "26-00001"
 
 
-def test_experiment_plan_only_applies_numbers_and_remains_editable(
+def test_experiment_numbering_only_updates_numbers_and_remains_editable(
     client: TestClient,
     seeded_projects: dict[str, dict],
 ) -> None:
@@ -132,32 +132,22 @@ def test_experiment_plan_only_applies_numbers_and_remains_editable(
         },
     ).json()
 
-    plan = client.post("/api/experiments/plans", json={"prefix": "20260801"}).json()
-    first_item = client.post(
-        f"/api/experiments/plans/{plan['id']}/items",
-        json={"record_id": first["id"]},
-    ).json()
-    second_item = client.post(
-        f"/api/experiments/plans/{plan['id']}/items",
-        json={"record_id": second["id"]},
-    ).json()
-    rejected = client.post(
-        f"/api/experiments/plans/{plan['id']}/items",
-        json={"record_id": completed["id"]},
-    )
-    assert rejected.status_code == 409
-
-    reordered = client.put(
-        f"/api/experiments/plans/{plan['id']}/order",
-        json={"item_ids": [second_item["id"], first_item["id"]]},
-    )
-    assert reordered.status_code == 200
     assert client.put(f"/api/records/{first['id']}/lock", json={"locked": True}).status_code == 200
-    assert client.post(f"/api/experiments/plans/{plan['id']}/apply").status_code == 409
+    blocked = client.post(
+        "/api/records/experiment-numbers",
+        json={"record_ids": [second["id"], first["id"]], "prefix": "20260801"},
+    )
+    assert blocked.status_code == 409
     assert client.put(f"/api/records/{first['id']}/lock", json={"locked": False}).status_code == 200
-    applied = client.post(f"/api/experiments/plans/{plan['id']}/apply")
+    applied = client.post(
+        "/api/records/experiment-numbers",
+        json={"record_ids": [second["id"], first["id"]], "prefix": "20260801"},
+    )
     assert applied.status_code == 200
-    assert applied.json()["updated_records"] == 2
+    assert [record["experiment_number"] for record in applied.json()] == [
+        "20260801-1",
+        "20260801-2",
+    ]
 
     refreshed_first = client.get(f"/api/records/{first['id']}").json()
     refreshed_second = client.get(f"/api/records/{second['id']}").json()
@@ -168,16 +158,18 @@ def test_experiment_plan_only_applies_numbers_and_remains_editable(
     assert refreshed_first["status"] == refreshed_second["status"] == "待实验"
 
     changed = client.patch(
-        f"/api/experiments/plans/{plan['id']}",
-        json={"prefix": "CUSTOM"},
+        f"/api/records/{second['id']}",
+        json={"experiment_number": "MANUAL-1"},
     )
     assert changed.status_code == 200
-    assert client.post(f"/api/experiments/plans/{plan['id']}/apply").status_code == 200
-    assert client.get(f"/api/records/{second['id']}").json()["experiment_number"] == "CUSTOM-1"
-    assert client.get(f"/api/experiments/plans/{plan['id']}").json()["items"]
-
-    same_prefix = client.post("/api/experiments/plans", json={"prefix": "CUSTOM"})
-    assert same_prefix.status_code == 201
+    assert changed.json()["experiment_number"] == "MANUAL-1"
+    assert client.get(f"/api/records/{first['id']}").json()["experiment_date"] == "2026-07-30"
+    assert client.get(f"/api/records/{second['id']}").json()["status"] == "待实验"
+    rejected = client.post(
+        "/api/records/experiment-numbers",
+        json={"record_ids": [completed["id"]], "prefix": "CUSTOM"},
+    )
+    assert rejected.status_code == 409
 
 
 def test_records_are_listed_oldest_first_and_custom_fields_are_independent(
@@ -364,12 +356,10 @@ def test_direct_print_uses_temporary_docx_and_document_download_is_removed(
         "/api/records",
         json={"project_id": tb["id"], "pathology_number": "REPORT-001"},
     ).json()
-    plan = client.post("/api/experiments/plans", json={"prefix": "RPT"}).json()
-    client.post(
-        f"/api/experiments/plans/{plan['id']}/items",
-        json={"record_id": record["id"]},
-    )
-    client.post(f"/api/experiments/plans/{plan['id']}/apply")
+    assert client.patch(
+        f"/api/records/{record['id']}",
+        json={"experiment_number": "RPT-1"},
+    ).status_code == 200
 
     uploaded = client.post(
         "/api/report-templates",
@@ -437,8 +427,15 @@ def test_audit_logs_support_new_experiment_and_import_labels(
     client: TestClient,
     seeded_projects: dict[str, dict],
 ) -> None:
-    created = client.post("/api/experiments/plans", json={"prefix": "AUDIT"})
-    assert created.status_code == 201
-    by_label = client.get("/api/audit-logs?search=新建实验编排单&limit=100")
-    assert any(log["entity_id"] == created.json()["id"] for log in by_label.json())
+    record = client.post(
+        "/api/records",
+        json={"project_id": seeded_projects["TB"]["id"], "pathology_number": "AUDIT-001"},
+    ).json()
+    updated = client.post(
+        "/api/records/experiment-numbers",
+        json={"record_ids": [record["id"]], "prefix": "AUDIT"},
+    )
+    assert updated.status_code == 200
+    by_label = client.get("/api/audit-logs?search=回写实验编号&limit=100")
+    assert any(log["entity_id"] == record["id"] for log in by_label.json())
     assert client.get("/api/audit-logs?search=完全不存在的关键词&limit=100").json() == []

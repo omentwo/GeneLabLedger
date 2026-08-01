@@ -16,6 +16,7 @@ from app.schemas import (
     BulkDeleteResult,
     RecordAssignProject,
     RecordCreate,
+    RecordExperimentNumberBatch,
     RecordList,
     RecordLockUpdate,
     RecordRead,
@@ -114,6 +115,74 @@ def list_records(
     }
 
 
+@router.post("/experiment-numbers", response_model=list[RecordRead])
+def assign_experiment_numbers(
+    payload: RecordExperimentNumberBatch,
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    record_ids = list(dict.fromkeys(payload.record_ids))
+    records = list(
+        session.scalars(
+            select(ProjectRecord)
+            .where(ProjectRecord.id.in_(record_ids))
+            .options(*record_load_options())
+        )
+    )
+    by_id = {record.id: record for record in records}
+    missing = [record_id for record_id in record_ids if record_id not in by_id]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"部分台账记录不存在：{', '.join(missing)}",
+        )
+    ordered = [by_id[record_id] for record_id in record_ids]
+    locked = [record.pathology_number for record in ordered if record.locked]
+    if locked:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"记录已锁定，请先解锁：{', '.join(locked[:20])}",
+        )
+    not_pending = [record.pathology_number for record in ordered if record.status != "待实验"]
+    if not_pending:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"只有“待实验”记录可以编号：{', '.join(not_pending[:20])}",
+        )
+    numbers = [f"{payload.prefix}-{index}" for index in range(1, len(ordered) + 1)]
+    conflicts = list(
+        session.scalars(
+            select(ProjectRecord)
+            .where(
+                ProjectRecord.experiment_number.in_(numbers),
+                ~ProjectRecord.id.in_(record_ids),
+            )
+        )
+    )
+    if conflicts:
+        conflict_numbers = sorted(
+            {record.experiment_number for record in conflicts if record.experiment_number}
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"实验编号已存在：{', '.join(conflict_numbers)}",
+        )
+    before = {record.id: record.experiment_number for record in ordered}
+    for record in ordered:
+        record.experiment_number = None
+    session.flush()
+    for record, number in zip(ordered, numbers, strict=True):
+        record.experiment_number = number
+        audit(
+            session,
+            "record.experiment_number.update",
+            "project_record",
+            record.id,
+            {"before": before[record.id], "after": number, "source": "experiment_numbering"},
+        )
+    session.commit()
+    return [record_dict(require_record(session, record.id, include_values=True)) for record in ordered]
+
+
 @router.get("/{record_id}", response_model=RecordRead)
 def get_record(record_id: str, session: Session = Depends(get_session)) -> dict:
     return record_dict(require_record(session, record_id, include_values=True))
@@ -122,11 +191,18 @@ def get_record(record_id: str, session: Session = Depends(get_session)) -> dict:
 @router.post("", response_model=RecordRead, status_code=status.HTTP_201_CREATED)
 def create_record(payload: RecordCreate, session: Session = Depends(get_session)) -> dict:
     require_project(session, payload.project_id)
+    if payload.experiment_number:
+        existing = session.scalar(
+            select(ProjectRecord).where(ProjectRecord.experiment_number == payload.experiment_number)
+        )
+        if existing:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="实验编号已存在")
     record = ProjectRecord(
         project_id=payload.project_id,
         pathology_number=payload.pathology_number,
         status=payload.status,
         experiment_date=payload.experiment_date,
+        experiment_number=payload.experiment_number,
     )
     session.add(record)
     session.flush()
@@ -140,6 +216,7 @@ def create_record(payload: RecordCreate, session: Session = Depends(get_session)
             "project_id": record.project_id,
             "pathology_number": record.pathology_number,
             "status": record.status,
+            "experiment_number": record.experiment_number,
         },
     )
     session.commit()
@@ -159,6 +236,7 @@ def update_record(
         "pathology_number": record.pathology_number,
         "status": record.status,
         "experiment_date": record.experiment_date.isoformat() if record.experiment_date else None,
+        "experiment_number": record.experiment_number,
     }
     if payload.pathology_number is not None:
         record.pathology_number = payload.pathology_number
@@ -166,6 +244,16 @@ def update_record(
         record.status = payload.status
     if "experiment_date" in payload.model_fields_set:
         record.experiment_date = payload.experiment_date
+    if "experiment_number" in payload.model_fields_set:
+        existing = session.scalar(
+            select(ProjectRecord).where(
+                ProjectRecord.experiment_number == payload.experiment_number,
+                ProjectRecord.id != record.id,
+            )
+        ) if payload.experiment_number else None
+        if existing:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="实验编号已存在")
+        record.experiment_number = payload.experiment_number or None
     if payload.values is not None:
         replace_record_values(session, record, payload.values)
     audit(
@@ -181,6 +269,7 @@ def update_record(
                 "experiment_date": (
                     record.experiment_date.isoformat() if record.experiment_date else None
                 ),
+                "experiment_number": record.experiment_number,
             },
         },
     )

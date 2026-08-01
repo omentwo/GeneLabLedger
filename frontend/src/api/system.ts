@@ -5,8 +5,8 @@ export function getHealth(): Promise<HealthStatus> {
   return apiRequest<HealthStatus>("/health");
 }
 
-export function listAuditLogs(search = "", limit = 500): Promise<AuditLog[]> {
-  const params = new URLSearchParams({ limit: String(limit) });
+export function listAuditLogs(search = "", limit = 100, offset = 0): Promise<AuditLog[]> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
   if (search.trim()) params.set("search", search.trim());
   return apiRequest<AuditLog[]>(`/audit-logs?${params.toString()}`);
 }
