@@ -1,37 +1,41 @@
 from __future__ import annotations
 
-import threading
-import urllib.request
 from pathlib import Path
 
 from desktop import launcher
 
 
-def test_desktop_window_lifecycle_stops_backend_and_releases_database(
+def test_sidecar_requires_explicit_port_and_data_directory(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    captured: dict[str, str] = {}
-
-    def fake_create_window(_: str, url: str, **_kwargs: object) -> object:
-        captured["url"] = url
-        return object()
-
-    def fake_start(**_kwargs: object) -> None:
-        with urllib.request.urlopen(captured["url"], timeout=5) as response:
-            assert response.status == 200
-
+    captured: dict[str, object] = {}
     data_directory = tmp_path / "desktop-data"
-    monkeypatch.setattr(launcher, "application_data_directory", lambda: data_directory)
-    monkeypatch.setattr(launcher.webview, "create_window", fake_create_window)
-    monkeypatch.setattr(launcher.webview, "start", fake_start)
 
-    launcher.main()
+    def fake_run(app, **kwargs: object) -> None:
+        captured["settings"] = app.state.settings
+        captured["kwargs"] = kwargs
 
-    assert not any(
-        thread.name == "gene-ledger-backend" for thread in threading.enumerate()
+    monkeypatch.setenv("GENE_LEDGER_DESKTOP_MODE", "0")
+    monkeypatch.setattr(launcher.uvicorn, "run", fake_run)
+    launcher.main(
+        [
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "54321",
+            "--data-dir",
+            str(data_directory),
+        ]
     )
-    database_path = data_directory / "ledger.db"
-    moved_path = data_directory / "ledger-closed.db"
-    database_path.rename(moved_path)
-    assert moved_path.is_file()
+
+    settings = captured["settings"]
+    assert settings.data_dir == data_directory.resolve()
+    assert settings.database_url == f"sqlite:///{(data_directory / 'ledger.db').as_posix()}"
+    assert settings.auto_create_schema is True
+    assert captured["kwargs"] == {
+        "host": "127.0.0.1",
+        "port": 54321,
+        "log_level": "warning",
+        "access_log": False,
+    }

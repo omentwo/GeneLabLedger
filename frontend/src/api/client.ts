@@ -1,3 +1,5 @@
+import { apiBaseUrl } from "@/utils/desktop";
+
 export class ApiError extends Error {
   readonly status: number;
   readonly detail: unknown;
@@ -43,7 +45,7 @@ export async function apiRequest<T>(
     headers.set("Content-Type", "application/json");
   }
 
-  const response = await fetch(`/api${path}`, {
+  const response = await fetch(`${apiBaseUrl()}/api${path}`, {
     ...options,
     body,
     headers,
@@ -77,7 +79,7 @@ export async function apiRequestBlob(
     headers.set("Content-Type", "application/json");
   }
 
-  const response = await fetch(`/api${path}`, {
+  const response = await fetch(`${apiBaseUrl()}/api${path}`, {
     ...options,
     body,
     headers,

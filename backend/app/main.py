@@ -8,10 +8,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import auto_exports, experiments, exports, projects, records, reports, system
+from app.api import auto_exports, experiments, exports, imports, projects, records, reports, system
 from app.config import Settings
 from app.database import Database
 from app.seed import seed_initial_data
@@ -48,6 +49,13 @@ def create_app(
         version="0.1.0",
         lifespan=lifespan,
     )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["null", "http://127.0.0.1:5173", "http://localhost:5173"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     app.state.settings = app_settings
     app.state.database = database
     app.state.printer_service = office_printer
@@ -59,6 +67,7 @@ def create_app(
     app.include_router(experiments.router, prefix="/api")
     app.include_router(reports.router, prefix="/api")
     app.include_router(auto_exports.router, prefix="/api")
+    app.include_router(imports.router, prefix="/api")
     app.include_router(exports.router, prefix="/api")
 
     project_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))

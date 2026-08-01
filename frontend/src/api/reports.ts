@@ -1,4 +1,4 @@
-import { apiRequest, apiRequestBlob, jsonBody } from "@/api/client";
+import { apiRequest, jsonBody } from "@/api/client";
 import type {
   MappingSourceType,
   PrintEngine,
@@ -64,32 +64,6 @@ export function replaceReportMappings(
   );
 }
 
-export async function generateReportDocuments(
-  templateVersionId: string,
-  recordIds: string[],
-): Promise<string> {
-  const { blob, filename } = await apiRequestBlob("/reports/documents", {
-    method: "POST",
-    body: jsonBody({
-      template_version_id: templateVersionId,
-      items: recordIds.map((projectRecordId) => ({
-        project_record_id: projectRecordId,
-        experiment_run_id: null,
-      })),
-    }),
-  });
-  const resolvedFilename = filename ?? (recordIds.length === 1 ? "报告.docx" : "报告.zip");
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = resolvedFilename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 500);
-  return resolvedFilename;
-}
-
 export function listPrinters(): Promise<Printer[]> {
   return apiRequest<Printer[]>("/printers");
 }
@@ -110,7 +84,6 @@ export function printReports(
       template_version_id: templateVersionId,
       items: recordIds.map((projectRecordId) => ({
         project_record_id: projectRecordId,
-        experiment_run_id: null,
       })),
       printer_name: printerName,
       print_engine: printEngine,

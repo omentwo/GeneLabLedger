@@ -1,3 +1,4 @@
+import { desktopBridge } from "@/utils/desktop";
 import { apiRequestBlob } from "@/api/client";
 
 export type WorkbookFormat = "xlsx";
@@ -6,6 +7,7 @@ export interface WorkbookSheet {
   name: string;
   headers: string[];
   rows: Array<Array<string | number | null | undefined>>;
+  hiddenColumns?: number[];
 }
 
 function downloadBlob(filename: string, blob: Blob): void {
@@ -22,7 +24,7 @@ function downloadBlob(filename: string, blob: Blob): void {
 export async function exportWorkbook(
   sheets: WorkbookSheet[],
   filenameBase: string,
-): Promise<void> {
+): Promise<boolean> {
   const { blob, filename } = await apiRequestBlob("/exports/workbook", {
     method: "POST",
     body: JSON.stringify({
@@ -33,8 +35,18 @@ export async function exportWorkbook(
         rows: sheet.rows.map((row) =>
           row.map((value) => (value == null ? "" : String(value))),
         ),
+        hidden_columns: sheet.hiddenColumns ?? [],
       })),
     }),
   });
+  const bridge = desktopBridge();
+  if (bridge) {
+    const result = await bridge.saveWorkbook(
+      filename ?? `${filenameBase}.xlsx`,
+      await blob.arrayBuffer(),
+    );
+    return result.saved;
+  }
   downloadBlob(filename ?? `${filenameBase}.xlsx`, blob);
+  return true;
 }

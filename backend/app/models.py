@@ -110,43 +110,29 @@ class FieldOption(Base):
     field: Mapped[FieldDefinition] = relationship(back_populates="options")
 
 
-class Case(Base, TimestampMixin):
-    __tablename__ = "cases"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
-    pathology_number: Mapped[str] = mapped_column(String(160), unique=True, nullable=False, index=True)
-
-    project_records: Mapped[list[ProjectRecord]] = relationship(
-        back_populates="case",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-    )
-
-
 class ProjectRecord(Base, TimestampMixin):
     __tablename__ = "project_records"
     __table_args__ = (
-        UniqueConstraint("case_id", "project_id", name="uq_record_case_project"),
+        UniqueConstraint("experiment_number", name="uq_record_experiment_number"),
         Index("ix_record_project_status", "project_id", "status"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
-    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id", ondelete="CASCADE"), nullable=False)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="待实验", nullable=False)
-    current_experiment_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    experiment_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    pathology_number: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
     experiment_number: Mapped[str | None] = mapped_column(String(80), nullable=True)
     report_generated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     locked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    case: Mapped[Case] = relationship(back_populates="project_records")
     project: Mapped[Project] = relationship(back_populates="records")
     values: Mapped[list[RecordValue]] = relationship(
         back_populates="record",
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
-    experiment_runs: Mapped[list[ExperimentRun]] = relationship(
+    experiment_plan_items: Mapped[list[ExperimentPlanItem]] = relationship(
         back_populates="record",
         cascade="all, delete-orphan",
         passive_deletes=True,
@@ -174,31 +160,34 @@ class RecordValue(Base, TimestampMixin):
     field: Mapped[FieldDefinition] = relationship(back_populates="values")
 
 
-class ExperimentBatch(Base, TimestampMixin):
-    __tablename__ = "experiment_batches"
+class ExperimentPlan(Base, TimestampMixin):
+    __tablename__ = "experiment_plans"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
-    experiment_date: Mapped[date] = mapped_column(Date, unique=True, nullable=False, index=True)
+    prefix: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    last_applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    runs: Mapped[list[ExperimentRun]] = relationship(
-        back_populates="batch",
+    items: Mapped[list[ExperimentPlanItem]] = relationship(
+        back_populates="plan",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        order_by="ExperimentRun.position",
+        order_by="ExperimentPlanItem.position",
     )
 
 
-class ExperimentRun(Base, TimestampMixin):
-    __tablename__ = "experiment_runs"
+class ExperimentPlanItem(Base, TimestampMixin):
+    __tablename__ = "experiment_plan_items"
     __table_args__ = (
-        UniqueConstraint("batch_id", "position", name="uq_batch_position"),
-        UniqueConstraint("experiment_number", name="uq_experiment_number"),
-        Index("ix_run_record_created", "record_id", "created_at"),
+        UniqueConstraint("plan_id", "position", name="uq_plan_position"),
+        UniqueConstraint("plan_id", "record_id", name="uq_plan_record"),
+        Index("ix_plan_item_record_created", "record_id", "created_at"),
     )
 
+    plan: Mapped[ExperimentPlan] = relationship(back_populates="items")
+    record: Mapped[ProjectRecord] = relationship(back_populates="experiment_plan_items")
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
-    batch_id: Mapped[str] = mapped_column(
-        ForeignKey("experiment_batches.id", ondelete="CASCADE"),
+    plan_id: Mapped[str] = mapped_column(
+        ForeignKey("experiment_plans.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -208,11 +197,6 @@ class ExperimentRun(Base, TimestampMixin):
         index=True,
     )
     position: Mapped[int] = mapped_column(Integer, nullable=False)
-    experiment_number: Mapped[str] = mapped_column(String(80), nullable=False)
-    is_repeat: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-
-    batch: Mapped[ExperimentBatch] = relationship(back_populates="runs")
-    record: Mapped[ProjectRecord] = relationship(back_populates="experiment_runs")
 
 
 class ReportTemplate(Base, TimestampMixin):

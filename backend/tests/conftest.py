@@ -11,6 +11,9 @@ from app.main import create_app
 
 
 class FakeOfficePrintService:
+    def __init__(self) -> None:
+        self.printed_document_xml: list[str] = []
+
     def list_printers(self) -> list[dict[str, object]]:
         return [{"name": "测试打印机", "is_default": True}]
 
@@ -45,6 +48,14 @@ class FakeOfficePrintService:
         assert printer_name == "测试打印机"
         assert input_documents
         assert all(path.is_file() for path in input_documents)
+        import zipfile
+
+        self.printed_document_xml = []
+        for document in input_documents:
+            with zipfile.ZipFile(document) as archive:
+                self.printed_document_xml.append(
+                    archive.read("word/document.xml").decode("utf-8")
+                )
         return "word" if engine == "auto" else engine
 
     def shutdown(self) -> None:

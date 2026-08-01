@@ -10,18 +10,6 @@ export function getAutoExportConfig(): Promise<AutoExportConfig> {
   return apiRequest<AutoExportConfig>("/auto-export/config");
 }
 
-export function chooseAutoExportDirectory(
-  initialDirectory: string,
-): Promise<{ selected: boolean; directory: string }> {
-  return apiRequest<{ selected: boolean; directory: string }>(
-    "/auto-export/choose-directory",
-    {
-      method: "POST",
-      body: jsonBody({ initial_directory: initialDirectory }),
-    },
-  );
-}
-
 export function listAutoExportTasks(): Promise<AutoExportTask[]> {
   return apiRequest<AutoExportTask[]>("/auto-export/tasks");
 }

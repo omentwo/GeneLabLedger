@@ -18,14 +18,13 @@ backend/tools/
 # Frontend dependencies and build output
 frontend/node_modules/
 frontend/dist/
-frontend/playwright-report/
-frontend/test-results/
 frontend/*.tsbuildinfo
 
 # Desktop packaging output
 build/
 dist/
 installer-output/
+release/
 *.spec.bak
 
 # Generated documents

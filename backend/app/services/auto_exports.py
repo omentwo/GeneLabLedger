@@ -4,7 +4,7 @@ import asyncio
 import calendar
 import re
 from contextlib import suppress
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
@@ -23,8 +23,9 @@ from app.models import (
     RecordValue,
 )
 from app.services.workbooks import write_xlsx
+from app.timezones import ASIA_SHANGHAI
 
-LOCAL_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
+LOCAL_TIMEZONE = ASIA_SHANGHAI
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 CRON_FIELD_NAMES = ("分钟", "小时", "日期", "月份", "星期")
 
@@ -242,9 +243,9 @@ def _safe_filename(value: str) -> str:
 
 def _field_value(record: ProjectRecord, field: FieldDefinition, values: dict[str, str]) -> str:
     if field.system_key == "experiment_date":
-        return record.current_experiment_date.isoformat() if record.current_experiment_date else ""
+        return record.experiment_date.isoformat() if record.experiment_date else ""
     if field.system_key == "pathology_number":
-        return record.case.pathology_number
+        return record.pathology_number
     if field.system_key == "status":
         return record.status
     if field.system_key == "experiment_number":
@@ -278,7 +279,6 @@ def create_export_file(session: Session, task: AutoExportTask) -> Path:
                 select(ProjectRecord)
                 .where(ProjectRecord.project_id == project.id)
                 .options(
-                    selectinload(ProjectRecord.case),
                     selectinload(ProjectRecord.values).selectinload(RecordValue.field),
                 )
                 .order_by(ProjectRecord.created_at, ProjectRecord.id)
@@ -486,23 +486,3 @@ def disable_tasks_for_deleted_project(session: Session, project_id: str) -> None
 
 def clear_next_runs(session: Session) -> None:
     session.execute(update(AutoExportTask).values(next_run_at=None))
-
-
-def choose_windows_directory(initial_directory: str | None = None) -> str | None:
-    import tkinter as tk
-    from tkinter import filedialog
-
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    root.update()
-    try:
-        selected = filedialog.askdirectory(
-            parent=root,
-            initialdir=initial_directory if initial_directory and Path(initial_directory).exists() else None,
-            title="选择自动导出目录",
-            mustexist=True,
-        )
-        return selected or None
-    finally:
-        root.destroy()

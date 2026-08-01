@@ -1,4 +1,4 @@
-import { createRouter, createWebHistory, type RouteRecordRaw } from "vue-router";
+import { createRouter, createWebHashHistory, createWebHistory, type RouteRecordRaw } from "vue-router";
 
 import AppLayout from "@/layouts/AppLayout.vue";
 
@@ -47,12 +47,18 @@ const routes: RouteRecordRaw[] = [
         component: () => import("@/views/AuditView.vue"),
         meta: { title: "日志审计" },
       },
+      {
+        path: "settings",
+        name: "settings",
+        component: () => import("@/views/SettingsView.vue"),
+        meta: { title: "数据与设置" },
+      },
     ],
   },
 ];
 
 const router = createRouter({
-  history: createWebHistory("/"),
+  history: window.geneLedgerDesktop ? createWebHashHistory() : createWebHistory("/"),
   routes,
   scrollBehavior: () => ({ top: 0 }),
 });

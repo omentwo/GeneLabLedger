@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
-  addExperimentRun,
-  deleteExperimentRun,
-  reorderExperimentRuns,
+  addExperimentPlanItem,
+  applyExperimentPlan,
+  deleteExperimentPlanItem,
+  reorderExperimentPlan,
+  updateExperimentPlan,
 } from "@/api/experiments";
 
 function jsonResponse(payload: unknown, status = 200): Response {
@@ -13,66 +15,61 @@ function jsonResponse(payload: unknown, status = 200): Response {
   });
 }
 
-describe("experiment API identity safety", () => {
+describe("experiment plan API", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
 
-  it("adds the selected project record by its record id only", async () => {
+  it("adds a record to an editable plan by UUID without a date or repeat flag", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       jsonResponse({
-        id: "run-braf-1",
-        batch_id: "batch-1",
+        id: "item-1",
+        plan_id: "plan-1",
         record_id: "record-braf-1",
         project_id: "project-braf",
         project_name: "BRAFV600E",
         pathology_number: "26-00001",
+        experiment_date: "2026-07-30",
+        previous_experiment_number: null,
         position: 1,
-        experiment_number: "20260730-01",
-        is_repeat: false,
+        experiment_number: "20260801-1",
         status: "待实验",
       }),
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await addExperimentRun("2026-07-30", "record-braf-1", false);
+    await addExperimentPlanItem("plan-1", "record-braf-1");
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("/api/experiments/batches/2026-07-30/runs");
+    const [url, options] = fetchMock.mock.calls[0]! as [string, RequestInit];
+    expect(url).toBe("/api/experiments/plans/plan-1/items");
     expect(options.method).toBe("POST");
-    expect(JSON.parse(String(options.body))).toEqual({
-      record_id: "record-braf-1",
-      allow_repeat: false,
-    });
+    expect(JSON.parse(String(options.body))).toEqual({ record_id: "record-braf-1" });
   });
 
-  it("removes only the experiment run and never calls a record creation endpoint", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+  it("persists item order and applies only through explicit plan actions", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(jsonResponse({ id: "plan-1", prefix: "20260801", items: [] })),
+      );
     vi.stubGlobal("fetch", fetchMock);
 
-    await deleteExperimentRun("run-braf-1");
+    await reorderExperimentPlan("plan-1", ["item-2", "item-1"]);
+    await updateExperimentPlan("plan-1", "CUSTOM");
+    await applyExperimentPlan("plan-1");
+    await deleteExperimentPlanItem("plan-1", "item-1");
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("/api/experiments/runs/run-braf-1");
-    expect(options.method).toBe("DELETE");
-  });
-
-  it("persists the exact ordered run id list for the selected date", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      jsonResponse({ id: "batch-1", experiment_date: "2026-07-30", runs: [] }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    await reorderExperimentRuns("2026-07-30", ["run-2", "run-1"]);
-
-    const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("/api/experiments/batches/2026-07-30/order");
-    expect(options.method).toBe("PUT");
-    expect(JSON.parse(String(options.body))).toEqual({
-      run_ids: ["run-2", "run-1"],
+    const calls = fetchMock.mock.calls as [string, RequestInit][];
+    expect(calls[0]![0]).toBe("/api/experiments/plans/plan-1/order");
+    expect(JSON.parse(String(calls[0]![1].body))).toEqual({
+      item_ids: ["item-2", "item-1"],
     });
+    expect(calls[1]![0]).toBe("/api/experiments/plans/plan-1");
+    expect(calls[1]![1].method).toBe("PATCH");
+    expect(JSON.parse(String(calls[1]![1].body))).toEqual({ prefix: "CUSTOM" });
+    expect(calls[2]![0]).toBe("/api/experiments/plans/plan-1/apply");
+    expect(calls[2]![1].method).toBe("POST");
+    expect(calls[3]![0]).toBe("/api/experiments/plans/plan-1/items/item-1");
+    expect(calls[3]![1].method).toBe("DELETE");
   });
 });
-

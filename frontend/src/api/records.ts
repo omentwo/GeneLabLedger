@@ -1,6 +1,7 @@
 import { apiRequest, jsonBody } from "@/api/client";
 import type {
-  ExperimentRun,
+  BulkDeleteFilter,
+  BulkDeletePreview,
   ProjectRecord,
   RecordCreateInput,
   RecordList,
@@ -68,16 +69,6 @@ export function assignRecordProject(
   });
 }
 
-export function repeatRecord(
-  recordId: string,
-  experimentDate: string,
-): Promise<ExperimentRun> {
-  return apiRequest<ExperimentRun>(`/records/${recordId}/repeat`, {
-    method: "POST",
-    body: jsonBody({ experiment_date: experimentDate }),
-  });
-}
-
 export function deleteRecord(recordId: string): Promise<void> {
   return apiRequest<void>(`/records/${recordId}`, { method: "DELETE" });
 }
@@ -91,6 +82,29 @@ export function setRecordsReportGenerated(
     body: jsonBody({
       record_ids: recordIds,
       report_generated: reportGenerated,
+    }),
+  });
+}
+
+
+export function previewBulkDelete(
+  filter: BulkDeleteFilter,
+): Promise<BulkDeletePreview> {
+  return apiRequest<BulkDeletePreview>("/records/bulk-delete/preview", {
+    method: "POST",
+    body: jsonBody(filter),
+  });
+}
+
+export function executeBulkDelete(
+  filter: BulkDeleteFilter,
+  expectedRecordIds: string[],
+): Promise<{ deleted: number }> {
+  return apiRequest<{ deleted: number }>("/records/bulk-delete/execute", {
+    method: "POST",
+    body: jsonBody({
+      filter,
+      expected_record_ids: expectedRecordIds,
     }),
   });
 }

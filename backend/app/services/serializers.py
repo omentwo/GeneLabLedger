@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from app.models import (
-    ExperimentBatch,
-    ExperimentRun,
+    ExperimentPlan,
+    ExperimentPlanItem,
     ProjectRecord,
     ReportMapping,
     ReportTemplate,
@@ -13,12 +13,11 @@ from app.models import (
 def record_dict(record: ProjectRecord) -> dict:
     return {
         "id": record.id,
-        "case_id": record.case_id,
         "project_id": record.project_id,
         "project_name": record.project.name,
-        "pathology_number": record.case.pathology_number,
+        "pathology_number": record.pathology_number,
         "status": record.status,
-        "experiment_date": record.current_experiment_date,
+        "experiment_date": record.experiment_date,
         "experiment_number": record.experiment_number,
         "report_generated": record.report_generated,
         "locked": record.locked,
@@ -28,26 +27,31 @@ def record_dict(record: ProjectRecord) -> dict:
     }
 
 
-def experiment_run_dict(run: ExperimentRun) -> dict:
+def experiment_plan_item_dict(item: ExperimentPlanItem) -> dict:
+    number = f"{item.plan.prefix}-{item.position}" if item.plan.prefix else ""
     return {
-        "id": run.id,
-        "batch_id": run.batch_id,
-        "record_id": run.record_id,
-        "project_id": run.record.project_id,
-        "project_name": run.record.project.name,
-        "pathology_number": run.record.case.pathology_number,
-        "position": run.position,
-        "experiment_number": run.experiment_number,
-        "is_repeat": run.is_repeat,
-        "status": run.record.status,
+        "id": item.id,
+        "plan_id": item.plan_id,
+        "record_id": item.record_id,
+        "project_id": item.record.project_id,
+        "project_name": item.record.project.name,
+        "pathology_number": item.record.pathology_number,
+        "experiment_date": item.record.experiment_date,
+        "previous_experiment_number": item.record.experiment_number,
+        "position": item.position,
+        "experiment_number": number,
+        "status": item.record.status,
     }
 
 
-def experiment_batch_dict(batch: ExperimentBatch | None, experiment_date: object) -> dict:
+def experiment_plan_dict(plan: ExperimentPlan) -> dict:
     return {
-        "id": batch.id if batch else None,
-        "experiment_date": experiment_date,
-        "runs": [experiment_run_dict(run) for run in batch.runs] if batch else [],
+        "id": plan.id,
+        "prefix": plan.prefix,
+        "last_applied_at": plan.last_applied_at,
+        "items": [experiment_plan_item_dict(item) for item in plan.items],
+        "created_at": plan.created_at,
+        "updated_at": plan.updated_at,
     }
 
 

@@ -7,6 +7,7 @@ import { listRecords } from "@/api/records";
 import EditableDateInput from "@/components/EditableDateInput.vue";
 import { useAppStore } from "@/stores/app";
 import type { FieldDefinition, ProjectRecord } from "@/types/api";
+import { shanghaiDateKey, shiftDateKey, shiftMonthKey } from "@/utils/datetime";
 import { exportWorkbook } from "@/utils/workbook";
 
 const appStore = useAppStore();
@@ -32,19 +33,8 @@ const completionRate = computed(() =>
   total.value ? Math.round((completed.value / total.value) * 100) : 0,
 );
 const recentThirtyDays = computed(() => {
-  const end = new Date();
-  const start = new Date(end);
-  start.setDate(start.getDate() - 29);
-  const startKey = [
-    start.getFullYear(),
-    String(start.getMonth() + 1).padStart(2, "0"),
-    String(start.getDate()).padStart(2, "0"),
-  ].join("-");
-  const endKey = [
-    end.getFullYear(),
-    String(end.getMonth() + 1).padStart(2, "0"),
-    String(end.getDate()).padStart(2, "0"),
-  ].join("-");
+  const endKey = shanghaiDateKey();
+  const startKey = shiftDateKey(endKey, -29);
   return records.value.filter((record) => {
     const date = record.experiment_date ?? "";
     return date >= startKey && date <= endKey;
@@ -75,10 +65,11 @@ const monthlyProjectName = computed(
     "全部项目",
 );
 const monthlyStats = computed(() => {
-  const current = new Date();
+  const currentMonthKey = shanghaiDateKey().slice(0, 7);
   return Array.from({ length: 12 }, (_item, index) => {
-    const month = new Date(current.getFullYear(), current.getMonth() - 11 + index, 1);
-    const key = `${month.getFullYear()}-${String(month.getMonth() + 1).padStart(2, "0")}`;
+    const key = shiftMonthKey(currentMonthKey, index - 11);
+    const year = Number(key.slice(0, 4));
+    const month = Number(key.slice(5, 7));
     const monthRecords = records.value.filter(
       (record) =>
         (!monthlyProjectId.value || record.project_id === monthlyProjectId.value) &&
@@ -87,9 +78,9 @@ const monthlyStats = computed(() => {
     return {
       key,
       label:
-        month.getMonth() === 0
-          ? `${month.getFullYear()}年1月`
-          : `${month.getMonth() + 1}月`,
+        month === 1
+          ? `${year}年1月`
+          : `${month}月`,
       total: monthRecords.length,
       pending: monthRecords.filter((record) => record.status === "待实验").length,
       completed: monthRecords.filter((record) => record.status === "已完成").length,
@@ -155,14 +146,18 @@ async function exportStatistics(): Promise<void> {
       });
       return {
         name: project.name,
-        headers: fields.map((field) => field.label),
-        rows: projectRecords.map((record) =>
-          fields.map((field) => fieldValue(record, field)),
-        ),
+        headers: ["_record_id", "_project_id", ...fields.map((field) => field.label)],
+        hiddenColumns: [1, 2],
+        rows: projectRecords.map((record) => [
+          record.id,
+          record.project_id,
+          ...fields.map((field) => fieldValue(record, field)),
+        ]),
       };
     });
-    await exportWorkbook(sheets, "统计筛选台账");
+    const saved = await exportWorkbook(sheets, "统计筛选台账");
     const count = sheets.reduce((sum, sheet) => sum + sheet.rows.length, 0);
+    if (!saved) return;
     ElMessage.success(`正在按 ${sheets.length} 个项目分工作表导出 ${count} 条记录`);
   } catch (error) {
     ElMessage.warning(error instanceof Error ? error.message : "导出条件无效");

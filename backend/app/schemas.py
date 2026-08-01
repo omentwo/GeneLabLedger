@@ -42,14 +42,14 @@ class FieldRead(BaseModel):
     hidden: bool
     sort_order: int
     width: int
-    options: list[FieldOptionRead] = []
+    options: list[FieldOptionRead] = Field(default_factory=list)
 
 
 class FieldCreate(BaseModel):
     label: str = Field(min_length=1, max_length=120)
     data_type: DataType = "text"
     width: int = Field(default=120, ge=58, le=600)
-    options: list[str] = []
+    options: list[str] = Field(default_factory=list)
 
     @field_validator("label")
     @classmethod
@@ -125,7 +125,7 @@ class ProjectRead(BaseModel):
     name: str
     sort_order: int
     experiment_enabled: bool
-    fields: list[FieldRead] = []
+    fields: list[FieldRead] = Field(default_factory=list)
 
 
 class RecordCreate(BaseModel):
@@ -133,8 +133,7 @@ class RecordCreate(BaseModel):
     pathology_number: str = Field(min_length=1, max_length=160)
     status: RecordStatus = "待实验"
     experiment_date: date | None = None
-    experiment_number: str | None = Field(default=None, max_length=80)
-    values: dict[str, str] = {}
+    values: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("pathology_number")
     @classmethod
@@ -146,7 +145,6 @@ class RecordUpdate(BaseModel):
     pathology_number: str | None = Field(default=None, min_length=1, max_length=160)
     status: RecordStatus | None = None
     experiment_date: date | None = None
-    experiment_number: str | None = Field(default=None, max_length=80)
     values: dict[str, str] | None = None
 
     @field_validator("pathology_number")
@@ -168,13 +166,8 @@ class RecordAssignProject(BaseModel):
     target_project_id: str
 
 
-class RecordRepeat(BaseModel):
-    experiment_date: date
-
-
 class RecordRead(BaseModel):
     id: str
-    case_id: str
     project_id: str
     project_name: str
     pathology_number: str
@@ -195,37 +188,54 @@ class RecordList(BaseModel):
     offset: int
 
 
-class ExperimentRunAdd(BaseModel):
+class ExperimentPlanCreate(BaseModel):
+    prefix: str = Field(default="", max_length=80)
+
+    @field_validator("prefix")
+    @classmethod
+    def clean_prefix(cls, value: str) -> str:
+        return value.strip()
+
+
+class ExperimentPlanUpdate(ExperimentPlanCreate):
+    pass
+
+
+class ExperimentPlanItemAdd(BaseModel):
     record_id: str
-    allow_repeat: bool = False
 
 
-class ExperimentRunReorder(BaseModel):
-    run_ids: list[str]
+class ExperimentPlanReorder(BaseModel):
+    item_ids: list[str] = Field(min_length=1)
 
 
-class ExperimentRunRead(BaseModel):
+class ExperimentPlanItemRead(BaseModel):
     id: str
-    batch_id: str
+    plan_id: str
     record_id: str
     project_id: str
     project_name: str
     pathology_number: str
+    experiment_date: date | None
+    previous_experiment_number: str | None
     position: int
     experiment_number: str
-    is_repeat: bool
     status: str
 
 
-class ExperimentBatchRead(BaseModel):
-    id: str | None
-    experiment_date: date
-    runs: list[ExperimentRunRead]
+class ExperimentPlanRead(BaseModel):
+    id: str
+    prefix: str
+    last_applied_at: datetime | None
+    items: list[ExperimentPlanItemRead]
+    created_at: datetime
+    updated_at: datetime
 
 
-class ExperimentCommitRead(BaseModel):
-    experiment_date: date
+class ExperimentApplyRead(BaseModel):
+    plan_id: str
     updated_records: int
+    applied_at: datetime
 
 
 class ReportMappingInput(BaseModel):
@@ -272,12 +282,6 @@ class ReportTemplateRead(BaseModel):
 
 class ReportBatchItem(BaseModel):
     project_record_id: str
-    experiment_run_id: str | None = None
-
-
-class ReportDocumentsCreate(BaseModel):
-    template_version_id: str
-    items: list[ReportBatchItem] = Field(min_length=1, max_length=100)
 
 
 class PrinterRead(BaseModel):
@@ -339,11 +343,14 @@ class WorkbookSheetInput(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     headers: list[str] = Field(min_length=1, max_length=200)
     rows: list[list[WorkbookCell]] = Field(default_factory=list, max_length=10000)
+    hidden_columns: list[int] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_rows(self) -> WorkbookSheetInput:
         if any(len(row) > len(self.headers) for row in self.rows):
             raise ValueError("工作表数据列数不能超过表头列数")
+        if any(index < 1 or index > len(self.headers) for index in self.hidden_columns):
+            raise ValueError("隐藏列序号必须位于表头范围内")
         return self
 
 
@@ -357,6 +364,83 @@ class WorkbookExportCreate(BaseModel):
         if cell_count > 2_000_000:
             raise ValueError("导出内容过大，请缩小项目或时间范围")
         return self
+
+
+class WorkbookImportRow(BaseModel):
+    row_number: int = Field(ge=2)
+    record_id: str | None = None
+    pathology_number: str = Field(min_length=1, max_length=160)
+    status: RecordStatus = "待实验"
+    experiment_date: date | None = None
+    experiment_number: str | None = Field(default=None, max_length=80)
+    values: dict[str, str] = Field(default_factory=dict)
+
+
+class WorkbookImportPreviewRow(WorkbookImportRow):
+    action: Literal["create", "update"]
+    errors: list[str] = Field(default_factory=list)
+
+
+class WorkbookImportPreviewRead(BaseModel):
+    filename: str
+    project_id: str
+    selected_sheet: str
+    available_sheets: list[str]
+    rows: list[WorkbookImportPreviewRow]
+    create_count: int
+    update_count: int
+    errors: list[str]
+
+
+class WorkbookImportCommit(BaseModel):
+    project_id: str
+    rows: list[WorkbookImportRow] = Field(min_length=1, max_length=10000)
+
+
+class WorkbookImportResult(BaseModel):
+    created: int
+    updated: int
+    record_ids: list[str]
+
+
+class BulkDeleteFilter(BaseModel):
+    project_id: str
+    date_field: Literal["experiment_date", "created_at", "updated_at"] = "experiment_date"
+    start_date: date
+    end_date: date
+
+    @model_validator(mode="after")
+    def validate_range(self) -> BulkDeleteFilter:
+        if self.start_date > self.end_date:
+            raise ValueError("开始日期不能晚于结束日期")
+        return self
+
+
+class BulkDeletePreviewItem(BaseModel):
+    id: str
+    pathology_number: str
+    status: str
+    experiment_date: date | None
+    created_at: datetime
+    updated_at: datetime
+    locked: bool
+
+
+class BulkDeletePreviewRead(BaseModel):
+    total: int
+    locked_count: int
+    record_ids: list[str]
+    items: list[BulkDeletePreviewItem]
+
+
+class BulkDeleteExecute(BaseModel):
+    filter: BulkDeleteFilter
+    expected_record_ids: list[str] = Field(min_length=1, max_length=10000)
+
+
+class BulkDeleteResult(BaseModel):
+    deleted: int
+
 
 
 class AutoExportTaskInput(BaseModel):

@@ -8,7 +8,10 @@ from pathlib import Path
 
 INVALID_XML_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
-WorkbookSheet = tuple[str, list[str], list[list[object]]]
+WorkbookSheet = (
+    tuple[str, list[str], list[list[object]]]
+    | tuple[str, list[str], list[list[object]], list[int]]
+)
 
 
 def _column_name(column_index: int) -> str:
@@ -41,7 +44,7 @@ def _column_width(values: list[object]) -> float:
     return float(min(42, max(10, longest + 2)))
 
 
-def _worksheet_xml(headers: list[str], rows: list[list[object]]) -> str:
+def _worksheet_xml(headers: list[str], rows: list[list[object]], hidden_columns: list[int]) -> str:
     width_count = max([len(headers), *(len(row) for row in rows)], default=0)
     columns = []
     for index in range(width_count):
@@ -49,8 +52,10 @@ def _worksheet_xml(headers: list[str], rows: list[list[object]]) -> str:
             headers[index] if index < len(headers) else "",
             *(row[index] if index < len(row) else "" for row in rows[:500]),
         ]
+        hidden = ' hidden="1"' if index + 1 in hidden_columns else ""
         columns.append(
-            f'<col min="{index + 1}" max="{index + 1}" width="{_column_width(values):.1f}" customWidth="1"/>'
+            f'<col min="{index + 1}" max="{index + 1}" '
+            f'width="{_column_width(values):.1f}" customWidth="1"{hidden}/>'
         )
 
     def row_xml(values: list[object], row_number: int) -> str:
@@ -87,7 +92,13 @@ def build_xlsx(sheets: list[WorkbookSheet]) -> bytes:
     if not sheets:
         raise ValueError("工作簿至少需要一个工作表")
     used_names: set[str] = set()
-    normalized = [(_sheet_name(name, used_names), headers, rows) for name, headers, rows in sheets]
+    normalized = []
+    for sheet in sheets:
+        name, headers, rows = sheet[:3]
+        hidden_columns = sheet[3] if len(sheet) == 4 else []
+        normalized.append(
+            (_sheet_name(name, used_names), headers, rows, hidden_columns)
+        )
     content_types = [
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
         '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
@@ -121,7 +132,7 @@ def build_xlsx(sheets: list[WorkbookSheet]) -> bytes:
     content_types.append("</Types>")
     workbook_sheets = "".join(
         f'<sheet name="{escape(name, quote=True)}" sheetId="{index}" r:id="rId{index}"/>'
-        for index, (name, _, _) in enumerate(normalized, start=1)
+        for index, (name, _, _, _) in enumerate(normalized, start=1)
     )
     workbook_relationships = "".join(
         f'<Relationship Id="rId{index}" '
@@ -197,10 +208,10 @@ def build_xlsx(sheets: list[WorkbookSheet]) -> bytes:
             'Target="styles.xml"/></Relationships>',
         )
         archive.writestr("xl/styles.xml", styles_xml)
-        for index, (_, headers, rows) in enumerate(normalized, start=1):
+        for index, (_, headers, rows, hidden_columns) in enumerate(normalized, start=1):
             archive.writestr(
                 f"xl/worksheets/sheet{index}.xml",
-                _worksheet_xml(headers, rows),
+                _worksheet_xml(headers, rows, hidden_columns),
             )
     return stream.getvalue()
 

@@ -1,39 +1,37 @@
-# 新版前端
+# 前端与 Electron
 
-这是与旧版 `index-v2.html` 并行运行的 Vue 3 前端。业务数据全部通过同一个
-FastAPI 后端读写，不使用浏览器本地存储保存台账。
+Vue 3 前端保留 Element Plus 的表格、表单、对话框和通知能力；Tailwind CSS 负责应用壳、间距、布局和轻量视觉微调。Tailwind Preflight 已关闭，避免重置 Element Plus 的核心样式。
 
-## 技术栈
-
-- Vue 3 + TypeScript
-- Vite
-- Vue Router
-- Pinia
-- Element Plus
-- Vitest
-
-## 开发与检查
+## 命令
 
 ```powershell
-npm.cmd install
-npm.cmd run typecheck
-npm.cmd run test
-npm.cmd run build
+npm install
+npm run dev
+npm run desktop
+npm run typecheck
+npm run test
+npm run build
 ```
 
-开发服务器默认运行在 `http://127.0.0.1:5173/app/`，并把 `/api` 代理到
-`http://127.0.0.1:8000`。
+- `npm run dev`：浏览器开发模式，`/api` 代理到 `127.0.0.1:8000`。
+- `npm run desktop`：Electron 开发壳，Electron 启动 Python sidecar。
+- `npm run desktop:package`：仅供 GitHub Actions 使用，不在本地执行。
 
-生产构建写入 `frontend/dist/`。FastAPI 启动时如果发现该目录，会提供：
+## 桌面桥接
 
-- 新版入口：`http://127.0.0.1:8000/app/`
-- 旧版回退入口：`http://127.0.0.1:8000/`
+沙箱 preload 仅暴露：
 
-## 迁移保护
+- 后端随机端口 URL 与当前数据目录
+- Windows Excel“另存为”
+- 自动导出目录选择
+- 数据目录切换与应用重启
 
-- 旧版文件不由新版构建覆盖。
-- 实验编排只使用后端返回的项目记录 ID 和实验运行 ID，不根据病理号或当前项目猜测归属。
-- 锁定记录使用只读控件，因此可选择、复制，但不能修改。
-- Excel 多单元格粘贴直接保存，不创建浏览器确认框。
-- 不同项目导出到独立工作表，使用各自项目表头。
+生产构建使用 hash 路由从 `file://` 加载。浏览器开发模式没有 Electron bridge，因此手动导出回退为浏览器下载。
 
+## 数据安全边界
+
+- 台账记录只按 UUID 更新；病理号相同不建立关联。
+- 导入必须先预览，存在全局或逐行错误时前端不允许提交。
+- 批量删除必须先预览；锁定记录或集合变化时后端拒绝执行。
+- 实验编号在台账只读，由实验编排回写或 Excel 数据恢复导入。
+- 报告页面只提供直接打印，不提供 DOCX/ZIP 下载。

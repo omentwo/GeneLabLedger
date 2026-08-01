@@ -24,6 +24,7 @@ def export_workbook(payload: WorkbookExportCreate) -> Response:
                 sheet.name,
                 sheet.headers,
                 [list(row) for row in sheet.rows],
+                sheet.hidden_columns,
             )
             for sheet in payload.sheets
         ]

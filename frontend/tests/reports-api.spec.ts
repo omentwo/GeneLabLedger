@@ -78,8 +78,8 @@ describe("report placeholder mappings", () => {
     expect(JSON.parse(String(options.body))).toEqual({
       template_version_id: "version-1",
       items: [
-        { project_record_id: "record-1", experiment_run_id: null },
-        { project_record_id: "record-2", experiment_run_id: null },
+        { project_record_id: "record-1" },
+        { project_record_id: "record-2" },
       ],
       printer_name: "实验室打印机",
       print_engine: "word",

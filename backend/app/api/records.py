@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime, time, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, or_, select
@@ -8,59 +8,54 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.audit import audit
 from app.database import get_session
-from app.models import Case, ProjectRecord, RecordValue
+from app.models import ProjectRecord, RecordValue
 from app.schemas import (
-    ExperimentRunRead,
+    BulkDeleteExecute,
+    BulkDeleteFilter,
+    BulkDeletePreviewRead,
+    BulkDeleteResult,
     RecordAssignProject,
     RecordCreate,
     RecordList,
     RecordLockUpdate,
     RecordRead,
-    RecordRepeat,
     RecordReportStatusUpdate,
     RecordUpdate,
 )
 from app.services.records import (
-    assign_case_to_project,
-    create_experiment_run,
-    delete_orphan_case,
-    get_or_create_case,
-    move_latest_experiment_date,
+    assign_record_to_project,
     replace_record_values,
     require_project,
     require_record,
 )
-from app.services.serializers import experiment_run_dict, record_dict
+from app.services.serializers import record_dict
+from app.timezones import ASIA_SHANGHAI
 
 router = APIRouter(prefix="/records", tags=["台账记录"])
 
 
 def record_load_options() -> tuple:
     return (
-        selectinload(ProjectRecord.case),
         selectinload(ProjectRecord.project),
         selectinload(ProjectRecord.values),
     )
 
 
-@router.get("", response_model=RecordList)
-def list_records(
+def record_filters(
+    *,
     project_id: str | None = None,
-    record_status: str | None = Query(default=None, alias="status"),
+    record_status: str | None = None,
     search: str | None = None,
     experiment_date: date | None = None,
     report_generated: bool | None = None,
-    limit: int = Query(default=100, ge=1, le=1000),
-    offset: int = Query(default=0, ge=0),
-    session: Session = Depends(get_session),
-) -> dict:
+) -> list:
     filters = []
     if project_id:
         filters.append(ProjectRecord.project_id == project_id)
     if record_status:
         filters.append(ProjectRecord.status == record_status)
     if experiment_date:
-        filters.append(ProjectRecord.current_experiment_date == experiment_date)
+        filters.append(ProjectRecord.experiment_date == experiment_date)
     if report_generated is not None:
         filters.append(ProjectRecord.report_generated == report_generated)
     if search and search.strip():
@@ -75,13 +70,33 @@ def list_records(
         )
         filters.append(
             or_(
-                Case.pathology_number.like(term),
+                ProjectRecord.pathology_number.like(term),
                 ProjectRecord.experiment_number.like(term),
                 value_match,
             )
         )
+    return filters
 
-    base = select(ProjectRecord).join(ProjectRecord.case).where(*filters)
+
+@router.get("", response_model=RecordList)
+def list_records(
+    project_id: str | None = None,
+    record_status: str | None = Query(default=None, alias="status"),
+    search: str | None = None,
+    experiment_date: date | None = None,
+    report_generated: bool | None = None,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    session: Session = Depends(get_session),
+) -> dict:
+    filters = record_filters(
+        project_id=project_id,
+        record_status=record_status,
+        search=search,
+        experiment_date=experiment_date,
+        report_generated=report_generated,
+    )
+    base = select(ProjectRecord).where(*filters)
     total = session.scalar(select(func.count()).select_from(base.subquery())) or 0
     records = list(
         session.scalars(
@@ -107,24 +122,11 @@ def get_record(record_id: str, session: Session = Depends(get_session)) -> dict:
 @router.post("", response_model=RecordRead, status_code=status.HTTP_201_CREATED)
 def create_record(payload: RecordCreate, session: Session = Depends(get_session)) -> dict:
     require_project(session, payload.project_id)
-    case = get_or_create_case(session, payload.pathology_number)
-    existing = session.scalar(
-        select(ProjectRecord).where(
-            ProjectRecord.case_id == case.id,
-            ProjectRecord.project_id == payload.project_id,
-        )
-    )
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="该病理号已存在于当前项目；可直接使用原记录或创建重复实验",
-        )
     record = ProjectRecord(
-        case_id=case.id,
         project_id=payload.project_id,
+        pathology_number=payload.pathology_number,
         status=payload.status,
-        current_experiment_date=payload.experiment_date,
-        experiment_number=payload.experiment_number.strip() if payload.experiment_number else None,
+        experiment_date=payload.experiment_date,
     )
     session.add(record)
     session.flush()
@@ -136,7 +138,7 @@ def create_record(payload: RecordCreate, session: Session = Depends(get_session)
         record.id,
         {
             "project_id": record.project_id,
-            "pathology_number": case.pathology_number,
+            "pathology_number": record.pathology_number,
             "status": record.status,
         },
     )
@@ -154,34 +156,16 @@ def update_record(
     if record.locked:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="记录已锁定，不能修改")
     before = {
-        "pathology_number": record.case.pathology_number,
+        "pathology_number": record.pathology_number,
         "status": record.status,
-        "experiment_date": (
-            record.current_experiment_date.isoformat() if record.current_experiment_date else None
-        ),
-        "experiment_number": record.experiment_number,
+        "experiment_date": record.experiment_date.isoformat() if record.experiment_date else None,
     }
-    if payload.pathology_number is not None and payload.pathology_number != record.case.pathology_number:
-        duplicate = session.scalar(
-            select(Case).where(
-                Case.pathology_number == payload.pathology_number,
-                Case.id != record.case_id,
-            )
-        )
-        if duplicate:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="病理号在系统中已存在，不能通过编辑自动合并病例",
-            )
-        record.case.pathology_number = payload.pathology_number
+    if payload.pathology_number is not None:
+        record.pathology_number = payload.pathology_number
     if payload.status is not None:
         record.status = payload.status
     if "experiment_date" in payload.model_fields_set:
-        move_latest_experiment_date(session, record, payload.experiment_date)
-    if "experiment_number" in payload.model_fields_set:
-        record.experiment_number = (
-            payload.experiment_number.strip() if payload.experiment_number else None
-        )
+        record.experiment_date = payload.experiment_date
     if payload.values is not None:
         replace_record_values(session, record, payload.values)
     audit(
@@ -192,12 +176,11 @@ def update_record(
         {
             "before": before,
             "after": {
-                "pathology_number": record.case.pathology_number,
+                "pathology_number": record.pathology_number,
                 "status": record.status,
                 "experiment_date": (
-                    record.current_experiment_date.isoformat() if record.current_experiment_date else None
+                    record.experiment_date.isoformat() if record.experiment_date else None
                 ),
-                "experiment_number": record.experiment_number,
             },
         },
     )
@@ -225,7 +208,7 @@ def update_report_status(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"部分台账记录不存在：{', '.join(missing)}",
         )
-    locked = [record.case.pathology_number for record in records if record.locked]
+    locked = [record.pathology_number for record in records if record.locked]
     if locked:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -240,7 +223,7 @@ def update_report_status(
             record.id,
             {
                 "project_id": record.project_id,
-                "pathology_number": record.case.pathology_number,
+                "pathology_number": record.pathology_number,
             },
         )
     session.commit()
@@ -275,7 +258,7 @@ def assign_record_project(
     session: Session = Depends(get_session),
 ) -> dict:
     source = require_record(session, record_id)
-    target, created = assign_case_to_project(session, source, payload.target_project_id)
+    target = assign_record_to_project(session, source, payload.target_project_id)
     audit(
         session,
         "record.assign_project",
@@ -284,45 +267,10 @@ def assign_record_project(
         {
             "source_record_id": source.id,
             "target_project_id": payload.target_project_id,
-            "created": created,
         },
     )
     session.commit()
     return record_dict(require_record(session, target.id, include_values=True))
-
-
-@router.post("/{record_id}/repeat", response_model=ExperimentRunRead)
-def repeat_experiment(
-    record_id: str,
-    payload: RecordRepeat,
-    session: Session = Depends(get_session),
-) -> dict:
-    record = require_record(session, record_id)
-    record.status = "待实验"
-    run = create_experiment_run(
-        session,
-        record,
-        payload.experiment_date,
-        allow_repeat=True,
-    )
-    audit(
-        session,
-        "experiment.repeat",
-        "experiment_run",
-        run.id,
-        {"record_id": record.id, "experiment_date": payload.experiment_date.isoformat()},
-    )
-    session.commit()
-    return experiment_run_dict(
-        session.scalar(
-            select(type(run))
-            .where(type(run).id == run.id)
-            .options(
-                selectinload(type(run).record).selectinload(ProjectRecord.case),
-                selectinload(type(run).record).selectinload(ProjectRecord.project),
-            )
-        )
-    )
 
 
 @router.delete("/{record_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -330,16 +278,129 @@ def delete_record(record_id: str, session: Session = Depends(get_session)) -> Re
     record = require_record(session, record_id)
     if record.locked:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="记录已锁定，不能删除")
-    case_id = record.case_id
     audit(
         session,
         "record.delete",
         "project_record",
         record.id,
-        {"project_id": record.project_id, "pathology_number": record.case.pathology_number},
+        {"project_id": record.project_id, "pathology_number": record.pathology_number},
     )
     session.delete(record)
-    session.flush()
-    delete_orphan_case(session, case_id)
     session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def bulk_delete_conditions(payload: BulkDeleteFilter) -> list:
+    conditions = [ProjectRecord.project_id == payload.project_id]
+    if payload.date_field == "experiment_date":
+        conditions.extend(
+            [
+                ProjectRecord.experiment_date >= payload.start_date,
+                ProjectRecord.experiment_date <= payload.end_date,
+            ]
+        )
+    else:
+        start_at = datetime.combine(
+            payload.start_date, time.min, tzinfo=ASIA_SHANGHAI
+        ).astimezone(UTC)
+        end_at = (
+            datetime.combine(payload.end_date, time.min, tzinfo=ASIA_SHANGHAI) + timedelta(days=1)
+        ).astimezone(UTC)
+        column = (
+            ProjectRecord.created_at
+            if payload.date_field == "created_at"
+            else ProjectRecord.updated_at
+        )
+        conditions.extend([column >= start_at, column < end_at])
+    return conditions
+
+
+def bulk_delete_records(session: Session, payload: BulkDeleteFilter) -> list[ProjectRecord]:
+    return list(
+        session.scalars(
+            select(ProjectRecord)
+            .where(*bulk_delete_conditions(payload))
+            .order_by(ProjectRecord.created_at, ProjectRecord.id)
+        )
+    )
+
+
+@router.post("/bulk-delete/preview", response_model=BulkDeletePreviewRead)
+def preview_bulk_delete(
+    payload: BulkDeleteFilter,
+    session: Session = Depends(get_session),
+) -> dict:
+    require_project(session, payload.project_id)
+    records = bulk_delete_records(session, payload)
+    if len(records) > 10000:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="一次最多批量删除 10000 条记录，请缩小日期范围",
+        )
+    return {
+        "total": len(records),
+        "locked_count": sum(record.locked for record in records),
+        "record_ids": [record.id for record in records],
+        "items": [
+            {
+                "id": record.id,
+                "pathology_number": record.pathology_number,
+                "status": record.status,
+                "experiment_date": record.experiment_date,
+                "created_at": record.created_at,
+                "updated_at": record.updated_at,
+                "locked": record.locked,
+            }
+            for record in records[:200]
+        ],
+    }
+
+
+@router.post("/bulk-delete/execute", response_model=BulkDeleteResult)
+def execute_bulk_delete(
+    payload: BulkDeleteExecute,
+    session: Session = Depends(get_session),
+) -> dict:
+    require_project(session, payload.filter.project_id)
+    records = bulk_delete_records(session, payload.filter)
+    actual_ids = [record.id for record in records]
+    if set(actual_ids) != set(payload.expected_record_ids) or len(actual_ids) != len(
+        payload.expected_record_ids
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="待删除记录已发生变化，请重新预览后再删除",
+        )
+    locked = [record.pathology_number for record in records if record.locked]
+    if locked:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"包含锁定记录，请先解锁：{', '.join(locked[:20])}",
+        )
+    for record in records:
+        audit(
+            session,
+            "record.delete",
+            "project_record",
+            record.id,
+            {
+                "project_id": record.project_id,
+                "pathology_number": record.pathology_number,
+                "bulk": True,
+            },
+        )
+        session.delete(record)
+    audit(
+        session,
+        "record.bulk_delete",
+        "project",
+        payload.filter.project_id,
+        {
+            "date_field": payload.filter.date_field,
+            "start_date": payload.filter.start_date.isoformat(),
+            "end_date": payload.filter.end_date.isoformat(),
+            "record_ids": actual_ids,
+        },
+    )
+    session.commit()
+    return {"deleted": len(records)}

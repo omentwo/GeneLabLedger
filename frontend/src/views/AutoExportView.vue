@@ -12,7 +12,6 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { computed, onMounted, reactive, ref } from "vue";
 
 import {
-  chooseAutoExportDirectory,
   createAutoExportTask,
   deleteAutoExportTask,
   getAutoExportConfig,
@@ -30,6 +29,7 @@ import type {
   AutoExportTask,
   AutoExportTaskInput,
 } from "@/types/api";
+import { chooseNativeDirectory } from "@/utils/desktop";
 
 const appStore = useAppStore();
 const loading = ref(false);
@@ -179,7 +179,7 @@ async function selectTask(task: AutoExportTask): Promise<void> {
 async function chooseDirectory(): Promise<void> {
   loading.value = true;
   try {
-    const result = await chooseAutoExportDirectory(form.output_directory);
+    const result = await chooseNativeDirectory(form.output_directory);
     if (result.selected) {
       form.output_directory = result.directory;
       ElMessage.success("已选择本机导出目录");

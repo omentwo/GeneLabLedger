@@ -1,40 +1,64 @@
 import { apiRequest, jsonBody } from "@/api/client";
-import type { ExperimentBatch, ExperimentRun } from "@/types/api";
+import type { ExperimentPlan, ExperimentPlanItem } from "@/types/api";
 
-export function getExperimentBatch(experimentDate: string): Promise<ExperimentBatch> {
-  return apiRequest<ExperimentBatch>(`/experiments/batches/${experimentDate}`);
+export function listExperimentPlans(): Promise<ExperimentPlan[]> {
+  return apiRequest<ExperimentPlan[]>("/experiments/plans");
 }
 
-export function addExperimentRun(
-  experimentDate: string,
-  recordId: string,
-  allowRepeat = false,
-): Promise<ExperimentRun> {
-  return apiRequest<ExperimentRun>(`/experiments/batches/${experimentDate}/runs`, {
+export function createExperimentPlan(prefix = ""): Promise<ExperimentPlan> {
+  return apiRequest<ExperimentPlan>("/experiments/plans", {
     method: "POST",
-    body: jsonBody({ record_id: recordId, allow_repeat: allowRepeat }),
+    body: jsonBody({ prefix }),
   });
 }
 
-export function reorderExperimentRuns(
-  experimentDate: string,
-  runIds: string[],
-): Promise<ExperimentBatch> {
-  return apiRequest<ExperimentBatch>(`/experiments/batches/${experimentDate}/order`, {
+export function updateExperimentPlan(
+  planId: string,
+  prefix: string,
+): Promise<ExperimentPlan> {
+  return apiRequest<ExperimentPlan>(`/experiments/plans/${planId}`, {
+    method: "PATCH",
+    body: jsonBody({ prefix }),
+  });
+}
+
+export function deleteExperimentPlan(planId: string): Promise<void> {
+  return apiRequest<void>(`/experiments/plans/${planId}`, {
+    method: "DELETE",
+  });
+}
+
+export function addExperimentPlanItem(
+  planId: string,
+  recordId: string,
+): Promise<ExperimentPlanItem> {
+  return apiRequest<ExperimentPlanItem>(`/experiments/plans/${planId}/items`, {
+    method: "POST",
+    body: jsonBody({ record_id: recordId }),
+  });
+}
+
+export function reorderExperimentPlan(
+  planId: string,
+  itemIds: string[],
+): Promise<ExperimentPlan> {
+  return apiRequest<ExperimentPlan>(`/experiments/plans/${planId}/order`, {
     method: "PUT",
-    body: jsonBody({ run_ids: runIds }),
+    body: jsonBody({ item_ids: itemIds }),
   });
 }
 
-export function deleteExperimentRun(runId: string): Promise<void> {
-  return apiRequest<void>(`/experiments/runs/${runId}`, { method: "DELETE" });
+export function deleteExperimentPlanItem(
+  planId: string,
+  itemId: string,
+): Promise<void> {
+  return apiRequest<void>(`/experiments/plans/${planId}/items/${itemId}`, {
+    method: "DELETE",
+  });
 }
 
-export function commitExperimentBatch(
-  experimentDate: string,
-): Promise<{ experiment_date: string; updated_records: number }> {
-  return apiRequest<{ experiment_date: string; updated_records: number }>(
-    `/experiments/batches/${experimentDate}/commit`,
-    { method: "POST" },
-  );
+export function applyExperimentPlan(
+  planId: string,
+): Promise<{ plan_id: string; updated_records: number; applied_at: string }> {
+  return apiRequest(`/experiments/plans/${planId}/apply`, { method: "POST" });
 }

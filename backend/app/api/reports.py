@@ -3,10 +3,8 @@ from __future__ import annotations
 import re
 import shutil
 import uuid
-import zipfile
-from datetime import date
+from datetime import datetime
 from pathlib import Path
-from urllib.parse import quote
 
 from fastapi import (
     APIRouter,
@@ -19,16 +17,13 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
-from starlette.background import BackgroundTask
 
 from app.audit import audit
 from app.config import Settings
 from app.database import get_session
 from app.models import (
-    ExperimentRun,
     FieldDefinition,
     Project,
     ProjectRecord,
@@ -39,7 +34,6 @@ from app.models import (
 from app.schemas import (
     PrintEngineRead,
     PrinterRead,
-    ReportDocumentsCreate,
     ReportMappingsReplace,
     ReportPrintCreate,
     ReportPrintRead,
@@ -56,6 +50,7 @@ from app.services.office_printing import (
     OfficePrintService,
 )
 from app.services.serializers import template_dict, template_version_dict
+from app.timezones import ASIA_SHANGHAI
 
 router = APIRouter(tags=["报告模板与直接打印"])
 
@@ -106,7 +101,6 @@ def load_report_record(session: Session, record_id: str) -> ProjectRecord:
         select(ProjectRecord)
         .where(ProjectRecord.id == record_id)
         .options(
-            selectinload(ProjectRecord.case),
             selectinload(ProjectRecord.project),
             selectinload(ProjectRecord.values),
         )
@@ -114,29 +108,6 @@ def load_report_record(session: Session, record_id: str) -> ProjectRecord:
     if not record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="台账记录不存在")
     return record
-
-
-def load_report_run(
-    session: Session,
-    record: ProjectRecord,
-    run_id: str | None,
-) -> ExperimentRun | None:
-    statement = (
-        select(ExperimentRun)
-        .where(ExperimentRun.record_id == record.id)
-        .options(selectinload(ExperimentRun.batch))
-    )
-    if run_id:
-        run = session.scalar(statement.where(ExperimentRun.id == run_id))
-        if not run:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="指定实验记录不属于当前台账记录",
-            )
-        return run
-    return session.scalar(
-        statement.order_by(ExperimentRun.created_at.desc(), ExperimentRun.id.desc()).limit(1)
-    )
 
 
 async def read_docx_upload(file: UploadFile, settings: Settings) -> bytes:
@@ -384,14 +355,13 @@ def replace_report_mappings(
 
 
 def resolve_mapping_values(
-    session: Session,
     version: ReportTemplateVersion,
     record: ProjectRecord,
-    run: ExperimentRun | None,
 ) -> dict[str, str]:
     values_by_field = {value.field_id: value.value_text for value in record.values}
     replacements: dict[str, str] = {}
     invalid: list[str] = []
+    current_date = datetime.now(ASIA_SHANGHAI).date().isoformat()
     for mapping in version.mappings:
         if mapping.source_type == "unmapped":
             invalid.append(mapping.placeholder)
@@ -401,27 +371,24 @@ def resolve_mapping_values(
         elif mapping.source_type == "fixed":
             replacements[mapping.placeholder] = mapping.fixed_value or ""
         elif mapping.source_type == "current_date":
-            replacements[mapping.placeholder] = date.today().isoformat()
+            replacements[mapping.placeholder] = current_date
         elif mapping.source_type == "experiment_number":
-            replacements[mapping.placeholder] = (
-                run.experiment_number if run else record.experiment_number or ""
-            )
+            replacements[mapping.placeholder] = record.experiment_number or ""
         elif mapping.source_type == "field":
             field = mapping.field
             if not field:
                 invalid.append(mapping.placeholder)
                 continue
             if field.system_key == "pathology_number":
-                replacements[mapping.placeholder] = record.case.pathology_number
+                replacements[mapping.placeholder] = record.pathology_number
             elif field.system_key == "status":
                 replacements[mapping.placeholder] = record.status
             elif field.system_key == "experiment_date":
-                chosen_date = run.batch.experiment_date if run else record.current_experiment_date
-                replacements[mapping.placeholder] = chosen_date.isoformat() if chosen_date else ""
-            elif field.system_key == "experiment_number":
                 replacements[mapping.placeholder] = (
-                    run.experiment_number if run else record.experiment_number or ""
+                    record.experiment_date.isoformat() if record.experiment_date else ""
                 )
+            elif field.system_key == "experiment_number":
+                replacements[mapping.placeholder] = record.experiment_number or ""
             else:
                 replacements[mapping.placeholder] = values_by_field.get(field.id, "")
     if invalid:
@@ -447,10 +414,9 @@ def render_report_documents(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="模板所属项目与台账记录不一致",
             )
-        run = load_report_run(session, record, item.experiment_run_id)
-        replacements = resolve_mapping_values(session, version, record, run)
+        replacements = resolve_mapping_values(version, record)
         base_name = safe_filename(
-            f"{index:03d}_{record.case.pathology_number}",
+            f"{index:03d}_{record.pathology_number}",
             fallback=f"report_{index:03d}",
         )
         output_path = output_directory / f"{base_name}.docx"
@@ -458,78 +424,6 @@ def render_report_documents(
         documents.append(output_path)
         record_ids.append(record.id)
     return documents, record_ids
-
-
-@router.post("/reports/documents")
-def generate_report_documents(
-    payload: ReportDocumentsCreate,
-    request: Request,
-    session: Session = Depends(get_session),
-) -> FileResponse:
-    version = load_version(session, payload.template_version_id)
-    settings = settings_from(request)
-    workspace = settings.report_work_dir / f"word-{uuid.uuid4().hex}"
-    workspace.mkdir(parents=True, exist_ok=False)
-    try:
-        documents, record_ids = render_report_documents(
-            session,
-            version,
-            payload.items,
-            workspace,
-        )
-        audit(
-            session,
-            "report.documents.generate",
-            "report_template_version",
-            version.id,
-            {
-                "record_ids": record_ids,
-                "generated_reports": len(documents),
-            },
-        )
-        session.commit()
-        cleanup_task = BackgroundTask(shutil.rmtree, workspace, ignore_errors=True)
-        if len(documents) == 1:
-            filename = f"{safe_filename(version.template.name)}_{documents[0].name}"
-            return FileResponse(
-                documents[0],
-                media_type=(
-                    "application/vnd.openxmlformats-officedocument."
-                    "wordprocessingml.document"
-                ),
-                headers={
-                    "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
-                    "Cache-Control": "no-store",
-                },
-                background=cleanup_task,
-            )
-        archive_name = f"{safe_filename(version.template.name)}_{len(documents)}份报告.zip"
-        archive_path = workspace / archive_name
-        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            for document in documents:
-                archive.write(document, document.name)
-        return FileResponse(
-            archive_path,
-            media_type="application/zip",
-            headers={
-                "Content-Disposition": (
-                    f"attachment; filename*=UTF-8''{quote(archive_name)}"
-                ),
-                "Cache-Control": "no-store",
-            },
-            background=cleanup_task,
-        )
-    except InvalidDocxTemplate as error:
-        session.rollback()
-        shutil.rmtree(workspace, ignore_errors=True)
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=str(error),
-        ) from error
-    except Exception:
-        session.rollback()
-        shutil.rmtree(workspace, ignore_errors=True)
-        raise
 
 
 @router.get("/printers", response_model=list[PrinterRead])

@@ -10,17 +10,20 @@ import {
   Search,
   Setting,
   Unlock,
+  Upload,
 } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
+import { commitWorkbookImport, previewWorkbookImport } from "@/api/imports";
 import {
   assignRecordProject,
   createRecord,
   deleteRecord,
+  executeBulkDelete,
+  previewBulkDelete,
   listRecords,
-  repeatRecord,
   setRecordLock,
   setRecordsReportGenerated,
   updateRecord,
@@ -32,6 +35,9 @@ import { updateField } from "@/api/projects";
 import { useAppStore } from "@/stores/app";
 import type {
   FieldDefinition,
+  BulkDeleteFilter,
+  BulkDeletePreview,
+  WorkbookImportPreview,
   ProjectRecord,
   RecordStatus,
   RecordUpdateInput,
@@ -50,10 +56,8 @@ const savingIds = ref(new Set<string>());
 const managerVisible = ref(false);
 const exportVisible = ref(false);
 const assignDialogVisible = ref(false);
-const repeatDialogVisible = ref(false);
 const operationRecord = ref<ProjectRecord | null>(null);
 const assignProjectId = ref("");
-const repeatDate = ref("");
 const searchText = ref("");
 const searchStatus = ref("");
 const searchDate = ref("");
@@ -68,6 +72,21 @@ const exportFilter = reactive({
 });
 type LedgerRow = ProjectRecord & { _draft?: true };
 const draftRows = ref<LedgerRow[]>([]);
+const importFileInput = ref<HTMLInputElement | null>(null);
+const importFile = ref<File | null>(null);
+const importSheetName = ref("");
+const importPreview = ref<WorkbookImportPreview | null>(null);
+const importDialogVisible = ref(false);
+const importLoading = ref(false);
+const bulkDeleteDialogVisible = ref(false);
+const bulkDeleteLoading = ref(false);
+const bulkDeletePreview = ref<BulkDeletePreview | null>(null);
+const bulkDeleteFilter = reactive<BulkDeleteFilter>({
+  project_id: "",
+  date_field: "experiment_date",
+  start_date: "",
+  end_date: "",
+});
 const persistedValues = new Map<string, string>();
 let draftSequence = 0;
 let loadSequence = 0;
@@ -82,6 +101,11 @@ const fields = computed(() =>
 );
 const selectedCount = computed(() => selectedRecords.value.length);
 const tableRows = computed<LedgerRow[]>(() => [...records.value, ...draftRows.value]);
+const importHasErrors = computed(
+  () =>
+    Boolean(importPreview.value?.errors.length) ||
+    Boolean(importPreview.value?.rows.some((row) => row.errors.length)),
+);
 
 function isDraft(record: LedgerRow): boolean {
   return record._draft === true;
@@ -93,7 +117,6 @@ function makeDraftRow(): LedgerRow {
   return {
     id: `draft-${draftSequence}`,
     _draft: true,
-    case_id: "",
     project_id: activeProjectId.value,
     project_name: currentProject.value?.name ?? "",
     pathology_number: "",
@@ -133,13 +156,15 @@ function setValue(record: ProjectRecord, field: FieldDefinition, value: string):
     record.pathology_number = value;
   } else if (field.system_key === "experiment_date") {
     record.experiment_date = value || null;
-  } else if (field.system_key === "experiment_number") {
-    record.experiment_number = value || null;
   } else if (field.system_key === "status") {
     record.status = value as RecordStatus;
   } else {
     record.values[field.id] = value;
   }
+}
+
+function isEditableField(field: FieldDefinition): boolean {
+  return field.system_key !== "experiment_number";
 }
 
 function persistedKey(recordId: string, fieldId: string): string {
@@ -199,9 +224,6 @@ function payloadForField(
     }
     return { status: value };
   }
-  if (field.system_key === "experiment_number") {
-    return { experiment_number: value || null };
-  }
   return { values: { [field.id]: value } };
 }
 
@@ -236,7 +258,6 @@ async function persistDraft(record: LedgerRow, notify = true): Promise<boolean> 
       pathology_number: pathologyNumber,
       status: record.status,
       experiment_date: experimentDate || null,
-      experiment_number: record.experiment_number,
       values,
     });
     const draftIndex = draftRows.value.findIndex((item) => item.id === record.id);
@@ -256,6 +277,7 @@ async function persistDraft(record: LedgerRow, notify = true): Promise<boolean> 
 }
 
 async function saveField(record: LedgerRow, field: FieldDefinition): Promise<void> {
+  if (!isEditableField(field)) return;
   if (isDraft(record)) {
     if (field.system_key === "experiment_date") {
       try {
@@ -379,9 +401,6 @@ function mergePayload(
   }
   if (incoming.status !== undefined) target.status = incoming.status;
   if ("experiment_date" in incoming) target.experiment_date = incoming.experiment_date;
-  if ("experiment_number" in incoming) {
-    target.experiment_number = incoming.experiment_number;
-  }
   if (incoming.values) target.values = { ...(target.values ?? {}), ...incoming.values };
   return target;
 }
@@ -417,6 +436,7 @@ async function pasteGrid(
       }
       rowValues.forEach((rawValue, columnOffset) => {
         const field = fields.value[startColumnIndex + columnOffset];
+        if (field && !isEditableField(field)) return;
         if (!field) return;
         const value = rawValue.trim();
         setValue(record, field, value);
@@ -497,7 +517,7 @@ async function updateSelectedLock(locked: boolean): Promise<void> {
 
 function generateSelectedReports(): void {
   if (!selectedRecords.value.length) {
-    ElMessage.warning("请先勾选需要生成报告的记录");
+    ElMessage.warning("请先勾选需要打印报告的记录");
     return;
   }
   void router.push({
@@ -582,6 +602,161 @@ async function deleteSelectedRecords(): Promise<void> {
   }
 }
 
+function chooseWorkbookImport(): void {
+  importFileInput.value?.click();
+}
+
+async function loadWorkbookImportPreview(sheetName = ""): Promise<void> {
+  const file = importFile.value;
+  const projectId = activeProjectId.value;
+  if (!file || !projectId) return;
+  importLoading.value = true;
+  try {
+    const preview = await previewWorkbookImport(projectId, file, sheetName);
+    if (activeProjectId.value !== projectId) return;
+    importPreview.value = preview;
+    importSheetName.value = preview.selected_sheet;
+    importDialogVisible.value = true;
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "Excel 导入预览失败");
+  } finally {
+    importLoading.value = false;
+  }
+}
+
+async function handleWorkbookFile(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0] ?? null;
+  input.value = "";
+  if (!file) return;
+  if (!file.name.toLowerCase().endsWith(".xlsx")) {
+    ElMessage.warning("请选择 .xlsx 文件");
+    return;
+  }
+  importFile.value = file;
+  importSheetName.value = "";
+  importPreview.value = null;
+  await loadWorkbookImportPreview();
+}
+
+async function changeImportSheet(sheetName: string): Promise<void> {
+  if (sheetName === importPreview.value?.selected_sheet) return;
+  await loadWorkbookImportPreview(sheetName);
+}
+
+async function confirmWorkbookImport(): Promise<void> {
+  const preview = importPreview.value;
+  if (!preview || !preview.rows.length || importHasErrors.value) return;
+  const rows = preview.rows.map(({ action: _action, errors: _errors, ...row }) => row);
+  try {
+    await ElMessageBox.confirm(
+      `将新建 ${preview.create_count} 条、更新 ${preview.update_count} 条记录。记录 UUID 是唯一匹配依据，确认导入？`,
+      "确认导入 Excel",
+      {
+        confirmButtonText: "确认导入",
+        cancelButtonText: "取消",
+        type: "warning",
+      },
+    );
+  } catch (error) {
+    if (error === "cancel" || error === "close") return;
+    throw error;
+  }
+
+  importLoading.value = true;
+  try {
+    const result = await commitWorkbookImport(activeProjectId.value, rows);
+    importDialogVisible.value = false;
+    importFile.value = null;
+    importPreview.value = null;
+    await loadRecords();
+    ElMessage.success(`导入完成：新建 ${result.created} 条，更新 ${result.updated} 条`);
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "Excel 导入失败");
+  } finally {
+    importLoading.value = false;
+  }
+}
+
+function openBulkDeleteDialog(): void {
+  Object.assign(bulkDeleteFilter, {
+    project_id: activeProjectId.value,
+    date_field: "experiment_date",
+    start_date: appliedSearch.date,
+    end_date: appliedSearch.date,
+  });
+  bulkDeletePreview.value = null;
+  bulkDeleteDialogVisible.value = true;
+}
+
+function invalidateBulkDeletePreview(): void {
+  bulkDeletePreview.value = null;
+}
+
+function formatShanghaiDateTime(value: string): string {
+  return new Date(value).toLocaleString("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    hour12: false,
+  });
+}
+
+async function previewDateRangeDelete(): Promise<void> {
+  if (!bulkDeleteFilter.project_id) return;
+  try {
+    const start = normalizeDate(bulkDeleteFilter.start_date);
+    const end = normalizeDate(bulkDeleteFilter.end_date);
+    if (!start || !end) throw new Error("请选择开始日期和结束日期");
+    if (start > end) throw new Error("开始日期不能晚于结束日期");
+    bulkDeleteFilter.start_date = start;
+    bulkDeleteFilter.end_date = end;
+    bulkDeleteLoading.value = true;
+    bulkDeletePreview.value = await previewBulkDelete({ ...bulkDeleteFilter });
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "批量删除预览失败");
+  } finally {
+    bulkDeleteLoading.value = false;
+  }
+}
+
+async function confirmDateRangeDelete(): Promise<void> {
+  const preview = bulkDeletePreview.value;
+  if (!preview?.total) return;
+  if (preview.locked_count) {
+    ElMessage.warning(`范围内有 ${preview.locked_count} 条锁定记录，请先解锁后重新预览`);
+    return;
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确认永久删除预览中的 ${preview.total} 条记录？系统会在执行前再次核对记录清单，删除后无法恢复。`,
+      "按日期批量删除",
+      {
+        confirmButtonText: "确认永久删除",
+        cancelButtonText: "取消",
+        type: "warning",
+        confirmButtonClass: "el-button--danger",
+      },
+    );
+  } catch (error) {
+    if (error === "cancel" || error === "close") return;
+    throw error;
+  }
+
+  bulkDeleteLoading.value = true;
+  try {
+    const result = await executeBulkDelete(
+      { ...bulkDeleteFilter },
+      preview.record_ids,
+    );
+    bulkDeleteDialogVisible.value = false;
+    bulkDeletePreview.value = null;
+    await loadRecords();
+    ElMessage.success(`已删除 ${result.deleted} 条记录`);
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "按日期批量删除失败");
+  } finally {
+    bulkDeleteLoading.value = false;
+  }
+}
 async function toggleRecordLock(record: ProjectRecord): Promise<void> {
   try {
     replaceRecord(await setRecordLock(record.id, !record.locked));
@@ -606,26 +781,6 @@ async function confirmAssign(): Promise<void> {
     ElMessage.success("已在目标项目建立独立台账记录");
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "加入其他项目失败");
-  }
-}
-
-function openRepeat(record: ProjectRecord): void {
-  operationRecord.value = record;
-  repeatDate.value = record.experiment_date ?? new Date().toISOString().slice(0, 10);
-  repeatDialogVisible.value = true;
-}
-
-async function confirmRepeat(): Promise<void> {
-  if (!operationRecord.value) return;
-  try {
-    const date = normalizeDate(repeatDate.value);
-    if (!date) throw new Error("请选择或输入实验日期");
-    await repeatRecord(operationRecord.value.id, date);
-    repeatDialogVisible.value = false;
-    await loadRecords();
-    ElMessage.success("重复实验已加入对应日期的实验编排");
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "重复实验创建失败");
   }
 }
 
@@ -665,16 +820,22 @@ async function exportCurrentProject(): Promise<void> {
       const date = record.experiment_date ?? "";
       return (!start || date >= start) && (!end || date <= end);
     });
-    await exportWorkbook(
+    const saved = await exportWorkbook(
       [
         {
           name: currentProject.value.name,
-          headers: fields.value.map((field) => field.label),
-          rows: items.map((record) => fields.value.map((field) => valueFor(record, field))),
+          headers: ["_record_id", "_project_id", ...fields.value.map((field) => field.label)],
+          hiddenColumns: [1, 2],
+          rows: items.map((record) => [
+            record.id,
+            record.project_id,
+            ...fields.value.map((field) => valueFor(record, field)),
+          ]),
         },
       ],
       `${currentProject.value.name}_台账`,
     );
+    if (!saved) return;
     ElMessage.success(`已导出 ${items.length} 条记录`);
   } catch (error) {
     ElMessage.warning(error instanceof Error ? error.message : "导出条件无效");
@@ -697,6 +858,11 @@ watch(activeProjectId, async (projectId, previousProjectId) => {
   records.value = [];
   draftRows.value = [];
   selectedRecords.value = [];
+  importDialogVisible.value = false;
+  importFile.value = null;
+  importPreview.value = null;
+  bulkDeleteDialogVisible.value = false;
+  bulkDeletePreview.value = null;
   persistedValues.clear();
   void router.replace({ query: { ...route.query, project: projectId } });
   await loadRecords(projectId);
@@ -781,6 +947,19 @@ onMounted(() => {
           <el-button :icon="Download" @click="exportVisible = !exportVisible">
             导出 Excel
           </el-button>
+          <input
+            ref="importFileInput"
+            class="hidden-file-input"
+            type="file"
+            accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            @change="handleWorkbookFile"
+          />
+          <el-button :icon="Upload" :loading="importLoading" @click="chooseWorkbookImport">
+            导入 Excel
+          </el-button>
+          <el-button type="danger" plain :icon="Delete" @click="openBulkDeleteDialog">
+            按日期批量删除
+          </el-button>
         </div>
       </div>
     </section>
@@ -822,7 +1001,7 @@ onMounted(() => {
         解锁所选
       </el-button>
       <el-button size="small" :icon="Document" @click="generateSelectedReports">
-        生成报告
+        打印报告
       </el-button>
       <el-button size="small" @click="updateSelectedReportStatus(true)">
         标记已生成报告
@@ -895,8 +1074,11 @@ onMounted(() => {
           resizable
         >
           <template #default="{ row, $index }: { row: LedgerRow; $index: number }">
+            <span v-if="field.system_key === 'experiment_number'" class="readonly-cell">
+              {{ valueFor(row, field) || "—" }}
+            </span>
             <EditableDateInput
-              v-if="field.data_type === 'date' || field.system_key === 'experiment_date'"
+              v-else-if="field.data_type === 'date' || field.system_key === 'experiment_date'"
               :model-value="valueFor(row, field)"
               :readonly="row.locked"
               @update:model-value="setValue(row, field, $event)"
@@ -957,15 +1139,12 @@ onMounted(() => {
                     <el-dropdown-item :icon="CopyDocument" @click="openAssign(row)">
                       加入其他项目
                     </el-dropdown-item>
-                    <el-dropdown-item :icon="Refresh" @click="openRepeat(row)">
-                      重复实验
-                    </el-dropdown-item>
                     <el-dropdown-item :icon="Document">
                       <RouterLink
                         class="dropdown-router-link"
                         :to="{ path: '/reports', query: { project: row.project_id, record: row.id } }"
                       >
-                        生成报告
+                        打印报告
                       </RouterLink>
                     </el-dropdown-item>
                     <el-dropdown-item
@@ -993,9 +1172,9 @@ onMounted(() => {
     @select-project="selectProject"
   />
 
-  <el-dialog v-model="assignDialogVisible" title="把同一病理号加入其他项目" width="480px">
+  <el-dialog v-model="assignDialogVisible" title="复制为其他项目记录" width="480px">
     <p class="dialog-note">
-      病理号保持唯一；目标项目会建立独立台账记录，不会复制或增加当前项目记录。
+      目标项目会建立一个全新的记录 UUID。病理号只是普通字段，相同病理号之间不会联动。
     </p>
     <el-form label-position="top">
       <el-form-item label="病理号">
@@ -1020,23 +1199,224 @@ onMounted(() => {
     </template>
   </el-dialog>
 
-  <el-dialog v-model="repeatDialogVisible" title="创建重复实验" width="460px">
-    <p class="dialog-note">
-      不复制台账记录，只为当前项目记录新增一次实验编排。
-    </p>
-    <el-form label-position="top">
-      <el-form-item label="实验日期">
-        <EditableDateInput v-model="repeatDate" />
-      </el-form-item>
-    </el-form>
+  <el-dialog
+    v-model="importDialogVisible"
+    title="导入 Excel 台账"
+    width="980px"
+    destroy-on-close
+  >
+    <div v-loading="importLoading" class="import-dialog-body">
+      <div v-if="importPreview" class="import-summary">
+        <span>文件：{{ importPreview.filename }}</span>
+        <el-select
+          v-if="importPreview.available_sheets.length > 1"
+          v-model="importSheetName"
+          class="sheet-select"
+          @change="changeImportSheet"
+        >
+          <el-option
+            v-for="sheet in importPreview.available_sheets"
+            :key="sheet"
+            :label="sheet"
+            :value="sheet"
+          />
+        </el-select>
+        <el-tag type="success">新建 {{ importPreview.create_count }}</el-tag>
+        <el-tag type="warning">更新 {{ importPreview.update_count }}</el-tag>
+      </div>
+      <el-alert
+        v-if="importPreview?.errors.length"
+        type="error"
+        :closable="false"
+        :title="importPreview.errors.join('；')"
+        show-icon
+      />
+      <p class="dialog-note">
+        新版导出文件通过隐藏的记录 UUID 匹配并更新；没有 UUID 的旧版 Excel 每一行都新建独立记录，绝不按病理号合并。
+      </p>
+      <el-table
+        v-if="importPreview"
+        :data="importPreview.rows"
+        border
+        height="380"
+        empty-text="工作表中没有可导入的数据行"
+      >
+        <el-table-column prop="row_number" label="行" width="64" />
+        <el-table-column label="操作" width="82">
+          <template #default="{ row }">
+            <el-tag :type="row.action === 'create' ? 'success' : 'warning'" size="small">
+              {{ row.action === "create" ? "新建" : "更新" }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="pathology_number" label="病理号" min-width="160" />
+        <el-table-column prop="status" label="状态" width="90" />
+        <el-table-column prop="experiment_date" label="实验日期" width="120" />
+        <el-table-column prop="experiment_number" label="实验编号" min-width="150" />
+        <el-table-column label="校验" min-width="240">
+          <template #default="{ row }">
+            <span v-if="!row.errors.length" class="valid-row-text">可导入</span>
+            <span v-else class="invalid-row-text">{{ row.errors.join("；") }}</span>
+          </template>
+        </el-table-column>
+      </el-table>
+    </div>
     <template #footer>
-      <el-button @click="repeatDialogVisible = false">取消</el-button>
-      <el-button type="primary" @click="confirmRepeat">加入实验编排</el-button>
+      <el-button @click="importDialogVisible = false">取消</el-button>
+      <el-button
+        type="primary"
+        :loading="importLoading"
+        :disabled="!importPreview?.rows.length || importHasErrors"
+        @click="confirmWorkbookImport"
+      >
+        确认导入
+      </el-button>
+    </template>
+  </el-dialog>
+
+  <el-dialog
+    v-model="bulkDeleteDialogVisible"
+    title="按日期批量删除记录"
+    width="900px"
+    destroy-on-close
+  >
+    <div v-loading="bulkDeleteLoading">
+      <el-form label-position="top" class="bulk-delete-form">
+        <el-form-item label="日期依据">
+          <el-select
+            v-model="bulkDeleteFilter.date_field"
+            @change="invalidateBulkDeletePreview"
+          >
+            <el-option label="台账实验日期" value="experiment_date" />
+            <el-option label="记录创建时间" value="created_at" />
+            <el-option label="记录更新时间" value="updated_at" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="开始日期">
+          <EditableDateInput
+            v-model="bulkDeleteFilter.start_date"
+            @change="invalidateBulkDeletePreview"
+          />
+        </el-form-item>
+        <el-form-item label="结束日期">
+          <EditableDateInput
+            v-model="bulkDeleteFilter.end_date"
+            @change="invalidateBulkDeletePreview"
+          />
+        </el-form-item>
+        <el-button type="primary" plain @click="previewDateRangeDelete">
+          预览删除范围
+        </el-button>
+      </el-form>
+      <el-alert
+        type="warning"
+        :closable="false"
+        show-icon
+        title="仅删除当前项目中落入日期范围的记录。预览后若记录清单变化，执行会被拒绝并要求重新预览。"
+      />
+      <div v-if="bulkDeletePreview" class="delete-preview-summary">
+        <strong>将删除 {{ bulkDeletePreview.total }} 条记录</strong>
+        <el-tag v-if="bulkDeletePreview.locked_count" type="danger">
+          含 {{ bulkDeletePreview.locked_count }} 条锁定记录，不能执行
+        </el-tag>
+        <span v-if="bulkDeletePreview.total > bulkDeletePreview.items.length">
+          表格仅展示前 {{ bulkDeletePreview.items.length }} 条
+        </span>
+      </div>
+      <el-table
+        v-if="bulkDeletePreview"
+        :data="bulkDeletePreview.items"
+        border
+        height="320"
+        empty-text="该范围内没有记录"
+      >
+        <el-table-column prop="pathology_number" label="病理号" min-width="160" />
+        <el-table-column prop="status" label="状态" width="90" />
+        <el-table-column label="匹配日期/时间" min-width="180">
+          <template #default="{ row }">
+            <span v-if="bulkDeleteFilter.date_field === 'experiment_date'">
+              {{ row.experiment_date || "—" }}
+            </span>
+            <span v-else>
+              {{ formatShanghaiDateTime(row[bulkDeleteFilter.date_field]) }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="锁定" width="80">
+          <template #default="{ row }">{{ row.locked ? "是" : "否" }}</template>
+        </el-table-column>
+      </el-table>
+    </div>
+    <template #footer>
+      <el-button @click="bulkDeleteDialogVisible = false">取消</el-button>
+      <el-button
+        type="danger"
+        :loading="bulkDeleteLoading"
+        :disabled="!bulkDeletePreview?.total || Boolean(bulkDeletePreview?.locked_count)"
+        @click="confirmDateRangeDelete"
+      >
+        确认永久删除
+      </el-button>
     </template>
   </el-dialog>
 </template>
 
 <style scoped>
+.hidden-file-input {
+  display: none;
+}
+
+.readonly-cell {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  color: #475467;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.import-dialog-body {
+  min-height: 180px;
+}
+
+.import-summary,
+.delete-preview-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.sheet-select {
+  width: 220px;
+}
+
+.valid-row-text {
+  color: #067647;
+}
+
+.invalid-row-text {
+  color: #b42318;
+}
+
+.bulk-delete-form {
+  display: grid;
+  grid-template-columns: 180px minmax(180px, 1fr) minmax(180px, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.bulk-delete-form :deep(.el-form-item) {
+  margin-bottom: 12px;
+}
+
+.bulk-delete-form > .el-button {
+  margin-bottom: 12px;
+}
+
+.delete-preview-summary {
+  margin-top: 14px;
+}
 .project-strip {
   display: flex;
   align-items: stretch;

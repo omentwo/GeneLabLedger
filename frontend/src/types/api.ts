@@ -38,7 +38,6 @@ export interface Project {
 
 export interface ProjectRecord {
   id: string;
-  case_id: string;
   project_id: string;
   project_name: string;
   pathology_number: string;
@@ -64,7 +63,6 @@ export interface RecordCreateInput {
   pathology_number: string;
   status: RecordStatus;
   experiment_date: string | null;
-  experiment_number: string | null;
   values: Record<string, string>;
 }
 
@@ -72,27 +70,72 @@ export interface RecordUpdateInput {
   pathology_number?: string;
   status?: RecordStatus;
   experiment_date?: string | null;
-  experiment_number?: string | null;
   values?: Record<string, string>;
 }
 
-export interface ExperimentRun {
+export interface ExperimentPlanItem {
   id: string;
-  batch_id: string;
+  plan_id: string;
   record_id: string;
   project_id: string;
   project_name: string;
   pathology_number: string;
+  experiment_date: string | null;
+  previous_experiment_number: string | null;
   position: number;
   experiment_number: string;
-  is_repeat: boolean;
   status: RecordStatus;
 }
 
-export interface ExperimentBatch {
-  id: string | null;
-  experiment_date: string;
-  runs: ExperimentRun[];
+export interface ExperimentPlan {
+  id: string;
+  prefix: string;
+  last_applied_at: string | null;
+  items: ExperimentPlanItem[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkbookImportRow {
+  row_number: number;
+  record_id: string | null;
+  pathology_number: string;
+  status: RecordStatus;
+  experiment_date: string | null;
+  experiment_number: string | null;
+  values: Record<string, string>;
+}
+
+export interface WorkbookImportPreviewRow extends WorkbookImportRow {
+  action: "create" | "update";
+  errors: string[];
+}
+
+export interface WorkbookImportPreview {
+  filename: string;
+  project_id: string;
+  selected_sheet: string;
+  available_sheets: string[];
+  rows: WorkbookImportPreviewRow[];
+  create_count: number;
+  update_count: number;
+  errors: string[];
+}
+
+export type BulkDeleteDateField = "experiment_date" | "created_at" | "updated_at";
+
+export interface BulkDeleteFilter {
+  project_id: string;
+  date_field: BulkDeleteDateField;
+  start_date: string;
+  end_date: string;
+}
+
+export interface BulkDeletePreview {
+  total: number;
+  locked_count: number;
+  record_ids: string[];
+  items: Array<Pick<ProjectRecord, "id" | "pathology_number" | "status" | "experiment_date" | "created_at" | "updated_at" | "locked">>;
 }
 
 export interface ReportMapping {

@@ -2,7 +2,6 @@
 import {
   Delete,
   DocumentAdd,
-  Files,
   Plus,
   Printer,
   Refresh,
@@ -17,7 +16,6 @@ import {
   addReportTemplateVersion,
   createReportTemplate,
   deleteReportTemplate,
-  generateReportDocuments,
   listPrintEngines,
   listPrinters,
   listReportTemplates,
@@ -58,7 +56,6 @@ const printEngines = ref<PrintEngineStatus[]>([]);
 const selectedPrintEngine = ref<PrintEngine>("auto");
 const selectedPrinterName = ref("");
 const printing = ref(false);
-const generatingDocuments = ref(false);
 const createDialogVisible = ref(false);
 const createProjectId = ref("");
 const createName = ref("");
@@ -373,29 +370,6 @@ async function saveMappings(): Promise<void> {
   }
 }
 
-async function generateDocuments(): Promise<void> {
-  if (!activeVersion.value) {
-    ElMessage.warning("请先选择报告模板版本");
-    return;
-  }
-  if (!selectedRecords.value.length) {
-    ElMessage.warning("请先勾选一条或多条台账记录");
-    return;
-  }
-  generatingDocuments.value = true;
-  try {
-    const filename = await generateReportDocuments(
-      activeVersion.value.id,
-      selectedRecords.value.map((record) => record.id),
-    );
-    ElMessage.success(`Word 报告已生成：${filename}`);
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "报告生成失败");
-  } finally {
-    generatingDocuments.value = false;
-  }
-}
-
 async function removeTemplate(): Promise<void> {
   if (!activeTemplate.value) return;
   try {
@@ -432,7 +406,7 @@ onMounted(() => {
           都可对应当前项目的任意台账表头、固定文字、当前日期或实验编号，不依赖显示名称。
         </p>
       </div>
-      <el-tag effect="plain">生成 Word 或由本机 Office 直接打印</el-tag>
+      <el-tag effect="plain">由本机 Office 直接打印</el-tag>
     </section>
 
     <div class="report-layout">
@@ -512,7 +486,7 @@ onMounted(() => {
         <template v-if="activeVersion">
           <div class="mapping-help">
             当前版本共识别 {{ activeVersion.placeholders.length }} 个占位符。
-            所有占位符完成映射或明确设为“留空”后，才能生成报告。
+            所有占位符完成映射或明确设为“留空”后，才能直接打印报告。
           </div>
           <el-table :data="mappings" row-key="placeholder" border max-height="430">
             <el-table-column prop="placeholder" label="Word 占位符" min-width="190">
@@ -570,9 +544,9 @@ onMounted(() => {
     <section v-if="activeTemplate" class="page-card">
       <div class="page-card-header">
         <div>
-          <h2 class="page-card-title">逐条或批量生成报告</h2>
+          <h2 class="page-card-title">逐条或批量直接打印</h2>
           <p class="page-description">
-            当前项目：{{ activeTemplate.project_name }}。单条生成 DOCX，多条打包为 ZIP。
+            当前项目：{{ activeTemplate.project_name }}。打印时临时生成 DOCX，提交打印后立即清理，不提供文件下载。
           </p>
         </div>
         <div class="toolbar">
@@ -584,15 +558,6 @@ onMounted(() => {
           />
           <el-checkbox v-model="showGenerated">显示已生成报告</el-checkbox>
           <el-button :icon="Refresh" @click="loadRecordsForTemplate">刷新记录</el-button>
-          <el-button
-            type="primary"
-            :icon="Files"
-            :loading="generatingDocuments"
-            :disabled="!selectedRecords.length"
-            @click="generateDocuments"
-          >
-            生成 {{ selectedRecords.length || "" }} 份 Word
-          </el-button>
           <el-select
             v-model="selectedPrintEngine"
             aria-label="打印引擎"

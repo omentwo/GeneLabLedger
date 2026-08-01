@@ -1,204 +1,306 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.audit import audit
 from app.database import get_session
-from app.models import ExperimentBatch, ExperimentRun, ProjectRecord
+from app.models import ExperimentPlan, ExperimentPlanItem, ProjectRecord
 from app.schemas import (
-    ExperimentBatchRead,
-    ExperimentCommitRead,
-    ExperimentRunAdd,
-    ExperimentRunRead,
-    ExperimentRunReorder,
+    ExperimentApplyRead,
+    ExperimentPlanCreate,
+    ExperimentPlanItemAdd,
+    ExperimentPlanItemRead,
+    ExperimentPlanRead,
+    ExperimentPlanReorder,
+    ExperimentPlanUpdate,
 )
-from app.services.records import (
-    create_experiment_run,
-    renumber_batch,
-    require_record,
-)
-from app.services.serializers import (
-    experiment_batch_dict,
-    experiment_run_dict,
-)
+from app.services.records import require_record
+from app.services.serializers import experiment_plan_dict, experiment_plan_item_dict
 
 router = APIRouter(prefix="/experiments", tags=["实验编排"])
 
 
-def load_batch(session: Session, experiment_date: date) -> ExperimentBatch | None:
-    return session.scalar(
-        select(ExperimentBatch)
-        .where(ExperimentBatch.experiment_date == experiment_date)
-        .options(
-            selectinload(ExperimentBatch.runs)
-            .selectinload(ExperimentRun.record)
-            .selectinload(ProjectRecord.case),
-            selectinload(ExperimentBatch.runs)
-            .selectinload(ExperimentRun.record)
-            .selectinload(ProjectRecord.project),
-        )
+def plan_load_options() -> tuple:
+    return (
+        selectinload(ExperimentPlan.items)
+        .selectinload(ExperimentPlanItem.record)
+        .selectinload(ProjectRecord.project),
     )
 
 
-def load_run(session: Session, run_id: str) -> ExperimentRun:
-    run = session.scalar(
-        select(ExperimentRun)
-        .where(ExperimentRun.id == run_id)
-        .options(
-            selectinload(ExperimentRun.record).selectinload(ProjectRecord.case),
-            selectinload(ExperimentRun.record).selectinload(ProjectRecord.project),
-            selectinload(ExperimentRun.batch),
+def require_plan(session: Session, plan_id: str) -> ExperimentPlan:
+    plan = session.scalar(
+        select(ExperimentPlan)
+        .where(ExperimentPlan.id == plan_id)
+        .options(*plan_load_options())
+        .execution_options(populate_existing=True)
+    )
+    if not plan:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="实验编排单不存在")
+    return plan
+
+
+def require_item(session: Session, plan_id: str, item_id: str) -> ExperimentPlanItem:
+    item = session.scalar(
+        select(ExperimentPlanItem).where(
+            ExperimentPlanItem.id == item_id,
+            ExperimentPlanItem.plan_id == plan_id,
         )
     )
-    if not run:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="实验执行记录不存在")
-    return run
+    if not item:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="实验编排条目不存在")
+    return item
 
 
-@router.get("/batches/{experiment_date}", response_model=ExperimentBatchRead)
-def get_batch(experiment_date: date, session: Session = Depends(get_session)) -> dict:
-    return experiment_batch_dict(load_batch(session, experiment_date), experiment_date)
+def rewrite_positions(session: Session, items: list[ExperimentPlanItem]) -> None:
+    for index, item in enumerate(items, start=1):
+        item.position = 100000 + index
+    session.flush()
+    for index, item in enumerate(items, start=1):
+        item.position = index
+
+
+@router.get("/plans", response_model=list[ExperimentPlanRead])
+def list_plans(session: Session = Depends(get_session)) -> list[dict]:
+    plans = list(
+        session.scalars(
+            select(ExperimentPlan)
+            .options(*plan_load_options())
+            .order_by(ExperimentPlan.updated_at.desc(), ExperimentPlan.created_at.desc())
+        )
+    )
+    return [experiment_plan_dict(plan) for plan in plans]
+
+
+@router.post("/plans", response_model=ExperimentPlanRead, status_code=status.HTTP_201_CREATED)
+def create_plan(
+    payload: ExperimentPlanCreate,
+    session: Session = Depends(get_session),
+) -> dict:
+    plan = ExperimentPlan(prefix=payload.prefix)
+    session.add(plan)
+    session.flush()
+    audit(session, "experiment.plan.create", "experiment_plan", plan.id, {"prefix": plan.prefix})
+    session.commit()
+    return experiment_plan_dict(require_plan(session, plan.id))
+
+
+@router.get("/plans/{plan_id}", response_model=ExperimentPlanRead)
+def get_plan(plan_id: str, session: Session = Depends(get_session)) -> dict:
+    return experiment_plan_dict(require_plan(session, plan_id))
+
+
+@router.patch("/plans/{plan_id}", response_model=ExperimentPlanRead)
+def update_plan(
+    plan_id: str,
+    payload: ExperimentPlanUpdate,
+    session: Session = Depends(get_session),
+) -> dict:
+    plan = require_plan(session, plan_id)
+    before = plan.prefix
+    plan.prefix = payload.prefix
+    audit(
+        session,
+        "experiment.plan.update",
+        "experiment_plan",
+        plan.id,
+        {"before_prefix": before, "after_prefix": plan.prefix},
+    )
+    session.commit()
+    return experiment_plan_dict(require_plan(session, plan.id))
+
+
+@router.delete("/plans/{plan_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_plan(plan_id: str, session: Session = Depends(get_session)) -> Response:
+    plan = require_plan(session, plan_id)
+    audit(
+        session,
+        "experiment.plan.delete",
+        "experiment_plan",
+        plan.id,
+        {"prefix": plan.prefix, "item_count": len(plan.items)},
+    )
+    session.delete(plan)
+    session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post(
-    "/batches/{experiment_date}/runs",
-    response_model=ExperimentRunRead,
+    "/plans/{plan_id}/items",
+    response_model=ExperimentPlanItemRead,
     status_code=status.HTTP_201_CREATED,
 )
-def add_run(
-    experiment_date: date,
-    payload: ExperimentRunAdd,
+def add_plan_item(
+    plan_id: str,
+    payload: ExperimentPlanItemAdd,
     session: Session = Depends(get_session),
 ) -> dict:
+    plan = require_plan(session, plan_id)
     record = require_record(session, payload.record_id)
-    if record.status != "待实验" and not payload.allow_repeat:
+    if record.status != "待实验":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="只有待实验记录可直接加入编排；已完成记录请使用重复实验操作",
+            detail="只有待实验记录可以加入实验编排",
         )
-    run = create_experiment_run(
-        session,
-        record,
-        experiment_date,
-        allow_repeat=payload.allow_repeat,
+    existing = session.scalar(
+        select(ExperimentPlanItem).where(
+            ExperimentPlanItem.plan_id == plan.id,
+            ExperimentPlanItem.record_id == record.id,
+        )
     )
-    if payload.allow_repeat:
-        record.status = "待实验"
+    if existing:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该记录已在当前编排单中")
+    position = (
+        session.scalar(
+            select(func.max(ExperimentPlanItem.position)).where(
+                ExperimentPlanItem.plan_id == plan.id
+            )
+        )
+        or 0
+    ) + 1
+    item = ExperimentPlanItem(plan_id=plan.id, record_id=record.id, position=position)
+    session.add(item)
+    session.flush()
     audit(
         session,
-        "experiment.run.add",
-        "experiment_run",
-        run.id,
-        {
-            "record_id": record.id,
-            "experiment_date": experiment_date.isoformat(),
-            "is_repeat": run.is_repeat,
-        },
+        "experiment.plan.item.add",
+        "experiment_plan_item",
+        item.id,
+        {"plan_id": plan.id, "record_id": record.id},
     )
     session.commit()
-    return experiment_run_dict(load_run(session, run.id))
+    return experiment_plan_item_dict(require_plan(session, plan.id).items[-1])
 
 
-@router.put("/batches/{experiment_date}/order", response_model=ExperimentBatchRead)
-def reorder_runs(
-    experiment_date: date,
-    payload: ExperimentRunReorder,
+@router.put("/plans/{plan_id}/order", response_model=ExperimentPlanRead)
+def reorder_plan(
+    plan_id: str,
+    payload: ExperimentPlanReorder,
     session: Session = Depends(get_session),
 ) -> dict:
-    batch = load_batch(session, experiment_date)
-    if not batch:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="当天没有实验编排")
-    current_ids = [run.id for run in batch.runs]
-    if set(current_ids) != set(payload.run_ids) or len(current_ids) != len(payload.run_ids):
+    plan = require_plan(session, plan_id)
+    current_ids = [item.id for item in plan.items]
+    if len(payload.item_ids) != len(current_ids) or set(payload.item_ids) != set(current_ids):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="排序必须包含当天全部实验条目，且不能重复",
+            detail="排序必须包含当前编排单的全部条目，且不能重复",
         )
-    by_id = {run.id: run for run in batch.runs}
-    for index, run_id in enumerate(payload.run_ids, start=1):
-        by_id[run_id].position = 100000 + index
-        by_id[run_id].experiment_number = f"tmp-{run_id}"
-    session.flush()
-    for index, run_id in enumerate(payload.run_ids, start=1):
-        run = by_id[run_id]
-        run.position = index
-        run.experiment_number = f"{experiment_date:%Y%m%d}-{index:02d}"
+    by_id = {item.id: item for item in plan.items}
+    rewrite_positions(session, [by_id[item_id] for item_id in payload.item_ids])
     audit(
         session,
-        "experiment.batch.reorder",
-        "experiment_batch",
-        batch.id,
-        {"run_ids": payload.run_ids},
+        "experiment.plan.reorder",
+        "experiment_plan",
+        plan.id,
+        {"item_ids": payload.item_ids},
     )
     session.commit()
-    return experiment_batch_dict(load_batch(session, experiment_date), experiment_date)
+    return experiment_plan_dict(require_plan(session, plan.id))
 
 
-@router.post(
-    "/batches/{experiment_date}/commit",
-    response_model=ExperimentCommitRead,
-)
-def commit_batch_to_ledger(
-    experiment_date: date,
+@router.delete("/plans/{plan_id}/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_plan_item(
+    plan_id: str,
+    item_id: str,
     session: Session = Depends(get_session),
-) -> dict:
-    batch = load_batch(session, experiment_date)
-    if not batch or not batch.runs:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="当天没有可回写的实验编排")
-    updated_record_ids: set[str] = set()
-    for run in batch.runs:
-        run.record.experiment_number = run.experiment_number
-        updated_record_ids.add(run.record_id)
+) -> Response:
+    plan = require_plan(session, plan_id)
+    item = require_item(session, plan_id, item_id)
     audit(
         session,
-        "experiment.batch.commit",
-        "experiment_batch",
-        batch.id,
+        "experiment.plan.item.delete",
+        "experiment_plan_item",
+        item.id,
+        {"plan_id": plan.id, "record_id": item.record_id},
+    )
+    session.delete(item)
+    session.flush()
+    remaining = list(
+        session.scalars(
+            select(ExperimentPlanItem)
+            .where(ExperimentPlanItem.plan_id == plan.id)
+            .order_by(ExperimentPlanItem.position, ExperimentPlanItem.created_at)
+        )
+    )
+    rewrite_positions(session, remaining)
+    session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/plans/{plan_id}/apply", response_model=ExperimentApplyRead)
+def apply_plan(
+    plan_id: str,
+    session: Session = Depends(get_session),
+) -> dict:
+    plan = require_plan(session, plan_id)
+    if not plan.prefix:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="请先填写实验编号前缀")
+    if not plan.items:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="当前编排单没有可回写记录")
+
+    invalid = [item.record.pathology_number for item in plan.items if item.record.status != "待实验"]
+    if invalid:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"以下记录已不是待实验状态：{', '.join(invalid)}",
+        )
+    locked = [item.record.pathology_number for item in plan.items if item.record.locked]
+    if locked:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"以下记录已锁定，不能回写实验编号：{', '.join(locked)}",
+        )
+
+    numbers = [f"{plan.prefix}-{item.position}" for item in plan.items]
+    if any(len(number) > 80 for number in numbers):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="实验编号过长，请缩短编号前缀",
+        )
+    selected_ids = [item.record_id for item in plan.items]
+    conflicts = list(
+        session.scalars(
+            select(ProjectRecord).where(
+                ProjectRecord.experiment_number.in_(numbers),
+                ProjectRecord.id.not_in(selected_ids),
+            )
+        )
+    )
+    if conflicts:
+        details = ", ".join(
+            f"{record.experiment_number}（{record.pathology_number}）" for record in conflicts
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"实验编号已被其他记录使用：{details}",
+        )
+
+    for item in plan.items:
+        item.record.experiment_number = None
+    session.flush()
+    for item in plan.items:
+        item.record.experiment_number = f"{plan.prefix}-{item.position}"
+
+    applied_at = datetime.now(UTC)
+    plan.last_applied_at = applied_at
+    audit(
+        session,
+        "experiment.plan.apply",
+        "experiment_plan",
+        plan.id,
         {
-            "experiment_date": experiment_date.isoformat(),
-            "updated_record_ids": sorted(updated_record_ids),
+            "prefix": plan.prefix,
+            "updated_record_ids": selected_ids,
+            "experiment_numbers": numbers,
         },
     )
     session.commit()
     return {
-        "experiment_date": experiment_date,
-        "updated_records": len(updated_record_ids),
+        "plan_id": plan.id,
+        "updated_records": len(selected_ids),
+        "applied_at": applied_at,
     }
-
-
-@router.delete("/runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_run(run_id: str, session: Session = Depends(get_session)) -> Response:
-    run = load_run(session, run_id)
-    batch = run.batch
-    record = run.record
-    removed_experiment_number = run.experiment_number
-    audit(
-        session,
-        "experiment.run.delete",
-        "experiment_run",
-        run.id,
-        {
-            "record_id": record.id,
-            "experiment_date": batch.experiment_date.isoformat(),
-            "experiment_number": run.experiment_number,
-        },
-    )
-    session.delete(run)
-    session.flush()
-    renumber_batch(session, batch)
-    latest_remaining = session.scalar(
-        select(ExperimentRun)
-        .where(ExperimentRun.record_id == record.id)
-        .options(selectinload(ExperimentRun.batch))
-        .order_by(ExperimentRun.created_at.desc(), ExperimentRun.id.desc())
-        .limit(1)
-    )
-    record.current_experiment_date = latest_remaining.batch.experiment_date if latest_remaining else None
-    if record.experiment_number == removed_experiment_number:
-        record.experiment_number = None
-    session.commit()
-    return Response(status_code=status.HTTP_204_NO_CONTENT)

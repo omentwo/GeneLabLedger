@@ -13,18 +13,24 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { computed, onMounted, ref } from "vue";
 
 import {
-  addExperimentRun,
-  commitExperimentBatch,
-  deleteExperimentRun,
-  getExperimentBatch,
-  reorderExperimentRuns,
+  addExperimentPlanItem,
+  applyExperimentPlan,
+  createExperimentPlan,
+  deleteExperimentPlan,
+  deleteExperimentPlanItem,
+  listExperimentPlans,
+  reorderExperimentPlan,
+  updateExperimentPlan,
 } from "@/api/experiments";
 import { updateProject } from "@/api/projects";
 import { listRecords } from "@/api/records";
 import { getSetting, putSetting } from "@/api/system";
-import EditableDateInput from "@/components/EditableDateInput.vue";
 import { useAppStore } from "@/stores/app";
-import type { ExperimentRun, ProjectRecord } from "@/types/api";
+import type {
+  ExperimentPlan,
+  ExperimentPlanItem,
+  ProjectRecord,
+} from "@/types/api";
 import { comparePathologyNumbers } from "@/utils/pathologySort";
 import { exportWorkbook } from "@/utils/workbook";
 
@@ -53,32 +59,26 @@ interface CandidateTableRef {
 
 const defaultQueueColumns: QueueColumn[] = [
   { key: "sequence", name: "序号", export: true, source: "sequence" },
-  {
-    key: "expNo",
-    name: "实验编号",
-    export: true,
-    source: "experiment_number",
-  },
-  { key: "caseId", name: "病理号", export: true, source: "pathology_number" },
+  { key: "expNo", name: "实验编号", export: true, source: "experiment_number" },
+  { key: "pathology", name: "病理号", export: true, source: "pathology_number" },
   { key: "diagnosis", name: "诊断", export: true, source: "diagnosis" },
-  { key: "test", name: "项目", export: true, source: "project" },
-  { key: "actions", name: "顺序与项目调整", export: false, source: "actions" },
+  { key: "project", name: "项目", export: true, source: "project" },
+  { key: "actions", name: "顺序调整", export: false, source: "actions" },
 ];
 
 const defaultCandidateColumns: QueueColumn[] = [
-  { key: "candidateCase", name: "病理号", export: false, source: "pathology_number" },
+  { key: "candidatePathology", name: "病理号", export: false, source: "pathology_number" },
   { key: "candidateDiagnosis", name: "诊断", export: false, source: "diagnosis" },
-  { key: "candidateWax", name: "蜡块号", export: false, source: "field:蜡块号" },
+  { key: "candidateNumber", name: "原实验编号", export: false, source: "experiment_number" },
   { key: "candidateProject", name: "项目", export: false, source: "project" },
 ];
 
 const appStore = useAppStore();
 const loading = ref(false);
-const experimentDate = ref(
-  new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Shanghai" }),
-);
+const plans = ref<ExperimentPlan[]>([]);
+const activePlanId = ref("");
+const prefixDraft = ref("");
 const records = ref<ProjectRecord[]>([]);
-const runs = ref<ExperimentRun[]>([]);
 const selectedCandidates = ref<ProjectRecord[]>([]);
 const candidateSearch = ref("");
 const candidateProjectId = ref("");
@@ -94,32 +94,39 @@ const newQueueColumnName = ref("");
 const newCandidateColumnName = ref("");
 const candidateTableRef = ref<CandidateTableRef>();
 
+const activePlan = computed(
+  () => plans.value.find((plan) => plan.id === activePlanId.value) ?? null,
+);
+const planItems = computed(() =>
+  (activePlan.value?.items ?? []).slice().sort((a, b) => a.position - b.position),
+);
 const recordById = computed(
   () => new Map(records.value.map((record) => [record.id, record])),
 );
-const queuedRecordIds = computed(() => new Set(runs.value.map((run) => run.record_id)));
+const queuedRecordIds = computed(
+  () => new Set(planItems.value.map((item) => item.record_id)),
+);
+const experimentProjects = computed(() =>
+  appStore.projects.filter((project) => project.experiment_enabled),
+);
 const pendingCandidates = computed(() => {
   const keyword = candidateSearch.value.trim().toLocaleLowerCase();
   return records.value.filter((record) => {
     if (record.status !== "待实验" || queuedRecordIds.value.has(record.id)) return false;
     if (!appStore.projectById(record.project_id)?.experiment_enabled) return false;
-    if (candidateProjectId.value && record.project_id !== candidateProjectId.value) {
-      return false;
-    }
+    if (candidateProjectId.value && record.project_id !== candidateProjectId.value) return false;
     if (!keyword) return true;
-    const content = [
+    return [
       record.pathology_number,
+      record.experiment_number ?? "",
       record.project_name,
       ...Object.values(record.values),
     ]
       .join(" ")
-      .toLocaleLowerCase();
-    return content.includes(keyword);
+      .toLocaleLowerCase()
+      .includes(keyword);
   });
 });
-const experimentProjects = computed(() =>
-  appStore.projects.filter((project) => project.experiment_enabled),
-);
 const availableFieldLabels = computed(() => {
   const labels = new Set<string>();
   appStore.projects.forEach((project) => {
@@ -128,93 +135,27 @@ const availableFieldLabels = computed(() => {
   return Array.from(labels).sort((a, b) => a.localeCompare(b, "zh-CN"));
 });
 
-function normalizeDate(value: string): string {
-  const cleaned = value.trim().replace(/[/.]/g, "-");
-  const match = cleaned.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
-  if (!match) throw new Error("实验日期格式应为 YYYY-MM-DD");
-  const [, year, month, day] = match;
-  const normalized = `${year}-${String(Number(month)).padStart(2, "0")}-${String(
-    Number(day),
-  ).padStart(2, "0")}`;
-  const date = new Date(`${normalized}T00:00:00`);
-  if (
-    Number.isNaN(date.getTime()) ||
-    date.getFullYear() !== Number(year) ||
-    date.getMonth() + 1 !== Number(month) ||
-    date.getDate() !== Number(day)
-  ) {
-    throw new Error("实验日期无效");
-  }
-  return normalized;
-}
-
 function inferSource(column: QueueColumn): QueueColumnSource {
   if (column.source) return column.source;
-  const known: Record<string, QueueColumnSource> = {
-    sequence: "sequence",
-    expNo: "experiment_number",
-    caseId: "pathology_number",
-    diagnosis: "diagnosis",
-    test: "project",
-    actions: "actions",
-  };
-  return known[column.key] ?? `field:${column.name}`;
+  return `field:${column.name}`;
 }
 
-function normalizeColumns(value: unknown): QueueColumn[] {
+function normalizeColumns(value: unknown, defaults: QueueColumn[]): QueueColumn[] {
   if (!Array.isArray(value) || !value.length) {
-    return defaultQueueColumns.map((column) => ({ ...column }));
-  }
-  const result = value
-    .filter(
-      (item): item is Record<string, unknown> =>
-        Boolean(item && typeof item === "object"),
-    )
-    .map((item, index) => {
-      const key =
-        typeof item.key === "string" && item.key.trim()
-          ? item.key
-          : `custom_queue_${index}`;
-      const name =
-        typeof item.name === "string" && item.name.trim() ? item.name : `字段${index + 1}`;
-      const column: QueueColumn = {
-        key,
-        name,
-        export: item.export !== false,
-        source:
-          typeof item.source === "string"
-            ? (item.source as QueueColumnSource)
-            : undefined,
-      };
-      column.source = inferSource(column);
-      if (column.source === "actions") column.export = false;
-      return column;
-    });
-  if (!result.some((column) => column.source === "actions")) {
-    result.push({ ...defaultQueueColumns[defaultQueueColumns.length - 1]! });
-  }
-  return result;
-}
-
-function normalizeCandidateColumns(value: unknown): QueueColumn[] {
-  if (!Array.isArray(value) || !value.length) {
-    return defaultCandidateColumns.map((column) => ({ ...column }));
+    return defaults.map((column) => ({ ...column }));
   }
   return value
-    .filter(
-      (item): item is Record<string, unknown> =>
-        Boolean(item && typeof item === "object"),
-    )
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
     .map((item, index) => ({
       key:
         typeof item.key === "string" && item.key.trim()
           ? item.key
-          : `custom_candidate_${index}`,
+          : `custom_${index}`,
       name:
         typeof item.name === "string" && item.name.trim()
           ? item.name
           : `字段${index + 1}`,
-      export: false,
+      export: item.export !== false,
       source:
         typeof item.source === "string"
           ? (item.source as QueueColumnSource)
@@ -224,9 +165,8 @@ function normalizeCandidateColumns(value: unknown): QueueColumn[] {
 
 function projectFieldValue(record: ProjectRecord, fieldLabel: string): string {
   const project = appStore.projectById(record.project_id);
-  const normalized = fieldLabel.trim();
   const field = project?.fields.find(
-    (item) => item.label === normalized || item.key === normalized,
+    (item) => item.label === fieldLabel.trim() || item.key === fieldLabel.trim(),
   );
   if (!field) return "";
   if (field.system_key === "pathology_number") return record.pathology_number;
@@ -236,29 +176,29 @@ function projectFieldValue(record: ProjectRecord, fieldLabel: string): string {
   return record.values[field.id] ?? "";
 }
 
-function firstMatchingField(record: ProjectRecord, names: string[]): string {
+function diagnosisFor(record: ProjectRecord): string {
   const project = appStore.projectById(record.project_id);
-  const field = project?.fields.find((item) =>
-    names.some((name) => item.label.includes(name)),
+  const field = project?.fields.find(
+    (item) => item.label.includes("临床诊断") || item.label.includes("诊断"),
   );
   return field ? projectFieldValue(record, field.label) : "";
 }
 
-function diagnosisFor(record: ProjectRecord): string {
-  return firstMatchingField(record, ["临床诊断", "诊断"]);
+function previewNumber(item: ExperimentPlanItem): string {
+  return prefixDraft.value.trim() ? `${prefixDraft.value.trim()}-${item.position}` : "";
 }
 
 function queueCellValue(
-  run: ExperimentRun,
+  item: ExperimentPlanItem,
   column: QueueColumn,
   rowIndex: number,
 ): string | number {
   const source = inferSource(column);
   if (source === "sequence") return rowIndex + 1;
-  if (source === "experiment_number") return run.experiment_number;
-  if (source === "pathology_number") return run.pathology_number;
-  if (source === "project") return run.project_name;
-  const record = recordById.value.get(run.record_id);
+  if (source === "experiment_number") return previewNumber(item);
+  if (source === "pathology_number") return item.pathology_number;
+  if (source === "project") return item.project_name;
+  const record = recordById.value.get(item.record_id);
   if (!record) return "";
   if (source === "diagnosis") return diagnosisFor(record);
   if (source.startsWith("field:")) {
@@ -291,30 +231,34 @@ async function loadAllRecords(): Promise<void> {
   records.value = loaded;
 }
 
-async function loadBatch(): Promise<void> {
-  try {
-    experimentDate.value = normalizeDate(experimentDate.value);
-    const batch = await getExperimentBatch(experimentDate.value);
-    runs.value = batch.runs.slice().sort((a, b) => a.position - b.position);
-    selectedCandidates.value = [];
-    candidateTableRef.value?.clearSelection();
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "实验编排读取失败");
+async function loadPlans(preferredId = activePlanId.value): Promise<void> {
+  plans.value = await listExperimentPlans();
+  if (!plans.value.length) {
+    const created = await createExperimentPlan("");
+    plans.value = [created];
   }
+  activePlanId.value =
+    plans.value.find((plan) => plan.id === preferredId)?.id ?? plans.value[0]!.id;
+  prefixDraft.value = activePlan.value?.prefix ?? "";
+  selectedCandidates.value = [];
+  candidateTableRef.value?.clearSelection();
 }
 
 async function loadPage(): Promise<void> {
   loading.value = true;
   try {
     if (!appStore.projects.length) await appStore.bootstrap();
-    const [setting, candidateSetting] = await Promise.all([
+    const [queueSetting, candidateSetting] = await Promise.all([
       getSetting<QueueColumn[]>("queue_columns"),
       getSetting<QueueColumn[]>("candidate_columns"),
       loadAllRecords(),
+      loadPlans(),
     ]);
-    queueColumns.value = normalizeColumns(setting.value);
-    candidateColumns.value = normalizeCandidateColumns(candidateSetting.value);
-    await loadBatch();
+    queueColumns.value = normalizeColumns(queueSetting.value, defaultQueueColumns);
+    candidateColumns.value = normalizeColumns(
+      candidateSetting.value,
+      defaultCandidateColumns,
+    );
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "实验编排初始化失败");
   } finally {
@@ -322,38 +266,77 @@ async function loadPage(): Promise<void> {
   }
 }
 
-function changeExperimentDate(value: string): void {
-  experimentDate.value = value;
-  void loadBatch();
+function changeActivePlan(): void {
+  prefixDraft.value = activePlan.value?.prefix ?? "";
+  selectedCandidates.value = [];
+  candidateTableRef.value?.clearSelection();
+}
+
+async function createPlan(): Promise<void> {
+  try {
+    const { value } = await ElMessageBox.prompt(
+      "编号前缀可以与其他编排单相同，并且之后仍可自由修改。",
+      "新建实验编排单",
+      {
+        inputPlaceholder: "例如：20260801",
+        confirmButtonText: "创建",
+        cancelButtonText: "取消",
+      },
+    );
+    const plan = await createExperimentPlan(value.trim());
+    await loadPlans(plan.id);
+  } catch (error) {
+    if (error === "cancel" || error === "close") return;
+    ElMessage.error(error instanceof Error ? error.message : "新建编排单失败");
+  }
+}
+
+async function savePrefix(showMessage = false): Promise<void> {
+  if (!activePlan.value) return;
+  const updated = await updateExperimentPlan(activePlan.value.id, prefixDraft.value);
+  const index = plans.value.findIndex((plan) => plan.id === updated.id);
+  if (index >= 0) plans.value[index] = updated;
+  prefixDraft.value = updated.prefix;
+  if (showMessage) ElMessage.success("编号前缀已保存，实验编号已重新计算");
+}
+
+async function removeCurrentPlan(): Promise<void> {
+  if (!activePlan.value) return;
+  try {
+    await ElMessageBox.confirm(
+      "删除编排单不会清除已经回写到台账的实验编号。",
+      "删除实验编排单",
+      {
+        confirmButtonText: "删除",
+        cancelButtonText: "取消",
+        type: "warning",
+      },
+    );
+    await deleteExperimentPlan(activePlan.value.id);
+    await loadPlans("");
+  } catch (error) {
+    if (error === "cancel" || error === "close") return;
+    ElMessage.error(error instanceof Error ? error.message : "删除编排单失败");
+  }
 }
 
 async function addSelectedToQueue(): Promise<void> {
-  if (!selectedCandidates.value.length) {
-    ElMessage.warning("请先勾选待检记录");
+  if (!activePlan.value || !selectedCandidates.value.length) {
+    ElMessage.warning("请先勾选待实验记录");
     return;
   }
   loading.value = true;
   let added = 0;
   try {
-    const date = normalizeDate(experimentDate.value);
+    await savePrefix();
     for (const record of selectedCandidates.value) {
-      if (record.status !== "待实验" || queuedRecordIds.value.has(record.id)) continue;
-      await addExperimentRun(date, record.id, false);
+      await addExperimentPlanItem(activePlan.value.id, record.id);
       added += 1;
     }
-    await Promise.all([loadAllRecords(), loadBatch()]);
-    if (added) {
-      await persistRunOrder(
-        runs.value
-          .slice()
-          .sort((a, b) =>
-            comparePathologyNumbers(a.pathology_number, b.pathology_number),
-          ),
-      );
-    }
-    ElMessage.success(`已将 ${added} 条项目记录加入当天实验编排`);
+    await loadPlans(activePlan.value.id);
+    ElMessage.success(`已加入 ${added} 条记录`);
   } catch (error) {
-    await loadBatch();
+    await loadPlans(activePlan.value.id);
     ElMessage.error(error instanceof Error ? error.message : "加入实验编排失败");
   } finally {
     loading.value = false;
@@ -369,20 +352,18 @@ function invertCandidates(): void {
   });
 }
 
-async function persistRunOrder(nextRuns: ExperimentRun[]): Promise<void> {
-  if (!nextRuns.length) {
-    runs.value = [];
-    return;
-  }
+async function persistOrder(nextItems: ExperimentPlanItem[]): Promise<void> {
+  if (!activePlan.value || !nextItems.length) return;
   loading.value = true;
   try {
-    const batch = await reorderExperimentRuns(
-      normalizeDate(experimentDate.value),
-      nextRuns.map((run) => run.id),
+    const updated = await reorderExperimentPlan(
+      activePlan.value.id,
+      nextItems.map((item) => item.id),
     );
-    runs.value = batch.runs.slice().sort((a, b) => a.position - b.position);
+    const index = plans.value.findIndex((plan) => plan.id === updated.id);
+    if (index >= 0) plans.value[index] = updated;
   } catch (error) {
-    await loadBatch();
+    await loadPlans(activePlan.value.id);
     ElMessage.error(error instanceof Error ? error.message : "实验顺序保存失败");
   } finally {
     loading.value = false;
@@ -390,7 +371,7 @@ async function persistRunOrder(nextRuns: ExperimentRun[]): Promise<void> {
 }
 
 async function applySort(): Promise<void> {
-  const next = runs.value.slice();
+  const next = planItems.value.slice();
   if (sortRule.value === "project") {
     const projectOrder = new Map(
       appStore.projects.map((project, index) => [project.id, index]),
@@ -409,46 +390,40 @@ async function applySort(): Promise<void> {
     ElMessage.info("已保持当前手动顺序");
     return;
   }
-  await persistRunOrder(next);
-  ElMessage.success(sortRule.value === "project" ? "已按项目集中排序" : "已按病理号排序");
+  await persistOrder(next);
+  ElMessage.success("实验顺序已保存");
 }
 
-async function commitBatch(): Promise<void> {
-  if (!runs.value.length) {
-    ElMessage.warning("当天还没有可确认的实验编排");
+async function applyPlan(): Promise<void> {
+  if (!activePlan.value || !planItems.value.length) {
+    ElMessage.warning("当前编排单没有可回写记录");
     return;
   }
   try {
-    const date = normalizeDate(experimentDate.value);
-    const result = await commitExperimentBatch(date);
-    await loadAllRecords();
-    ElMessage.success(`已把 ${result.updated_records} 条实验编号回写到对应项目台账`);
+    await savePrefix();
+    const result = await applyExperimentPlan(activePlan.value.id);
+    await Promise.all([loadAllRecords(), loadPlans(activePlan.value.id)]);
+    ElMessage.success(`已回写 ${result.updated_records} 条实验编号，记录状态和实验日期未改变`);
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "实验编号回写失败");
   }
 }
 
-async function moveRun(index: number, offset: -1 | 1): Promise<void> {
+async function moveItem(index: number, offset: -1 | 1): Promise<void> {
   const target = index + offset;
-  if (target < 0 || target >= runs.value.length) return;
-  const next = runs.value.slice();
-  const [run] = next.splice(index, 1);
-  if (!run) return;
-  next.splice(target, 0, run);
-  await persistRunOrder(next);
+  if (target < 0 || target >= planItems.value.length) return;
+  const next = planItems.value.slice();
+  const [item] = next.splice(index, 1);
+  if (!item) return;
+  next.splice(target, 0, item);
+  await persistOrder(next);
 }
 
-async function moveProjectBlockToTop(projectId: string): Promise<void> {
-  const projectRuns = runs.value.filter((run) => run.project_id === projectId);
-  const otherRuns = runs.value.filter((run) => run.project_id !== projectId);
-  await persistRunOrder([...projectRuns, ...otherRuns]);
-  ElMessage.success("该项目组已整体置顶");
-}
-
-async function removeRun(run: ExperimentRun): Promise<void> {
+async function removeItem(item: ExperimentPlanItem): Promise<void> {
+  if (!activePlan.value) return;
   try {
     await ElMessageBox.confirm(
-      `确认从 ${experimentDate.value} 的实验编排移除 ${run.pathology_number}？台账记录不会新增或删除。`,
+      `确认从当前编排单移除 ${item.pathology_number}？已回写的台账编号不会自动清除。`,
       "移出实验编排",
       {
         confirmButtonText: "移出",
@@ -456,9 +431,8 @@ async function removeRun(run: ExperimentRun): Promise<void> {
         type: "warning",
       },
     );
-    await deleteExperimentRun(run.id);
-    await Promise.all([loadAllRecords(), loadBatch()]);
-    ElMessage.success("已移出实验编排；原项目台账记录未发生增删");
+    await deleteExperimentPlanItem(activePlan.value.id, item.id);
+    await loadPlans(activePlan.value.id);
   } catch (error) {
     if (error === "cancel" || error === "close") return;
     ElMessage.error(error instanceof Error ? error.message : "移出实验编排失败");
@@ -466,128 +440,99 @@ async function removeRun(run: ExperimentRun): Promise<void> {
 }
 
 async function saveQueueColumns(): Promise<void> {
-  try {
-    queueColumns.value.forEach((column) => {
-      column.name = column.name.trim() || "未命名";
-      column.source = inferSource(column);
-      if (column.source === "actions") column.export = false;
-    });
-    await putSetting("queue_columns", queueColumns.value);
-    ElMessage.success("实验编排表头和导出字段已保存");
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "实验表头保存失败");
-  }
-}
-
-function addQueueColumn(): void {
-  const name = newQueueColumnName.value.trim();
-  if (!name) {
-    ElMessage.warning("请输入表头名称");
-    return;
-  }
-  queueColumns.value.splice(Math.max(0, queueColumns.value.length - 1), 0, {
-    key: `custom_queue_${Date.now()}`,
-    name,
-    export: true,
-    source: `field:${name}`,
+  queueColumns.value.forEach((column) => {
+    column.name = column.name.trim() || "未命名";
+    if (inferSource(column) === "actions") column.export = false;
   });
-  newQueueColumnName.value = "";
-}
-
-function moveQueueColumn(index: number, offset: -1 | 1): void {
-  const target = index + offset;
-  if (target < 0 || target >= queueColumns.value.length) return;
-  const next = queueColumns.value.slice();
-  const [column] = next.splice(index, 1);
-  if (!column) return;
-  next.splice(target, 0, column);
-  queueColumns.value = next;
-}
-
-function deleteQueueColumn(index: number): void {
-  if (queueColumns.value[index]?.source === "actions") return;
-  queueColumns.value.splice(index, 1);
+  await putSetting("queue_columns", queueColumns.value);
+  ElMessage.success("实验编排表头和导出字段已保存");
 }
 
 async function saveCandidateColumns(): Promise<void> {
-  try {
-    candidateColumns.value.forEach((column) => {
-      column.name = column.name.trim() || "未命名";
-      column.source = inferSource(column);
-      column.export = false;
-    });
-    await putSetting("candidate_columns", candidateColumns.value);
-    ElMessage.success("待检记录表头已保存");
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "待检记录表头保存失败");
-  }
+  candidateColumns.value.forEach((column) => {
+    column.name = column.name.trim() || "未命名";
+    column.export = false;
+  });
+  await putSetting("candidate_columns", candidateColumns.value);
+  ElMessage.success("待实验记录表头已保存");
 }
 
-function addCandidateColumn(): void {
-  const name = newCandidateColumnName.value.trim();
+function addColumn(target: "queue" | "candidate"): void {
+  const name =
+    target === "queue" ? newQueueColumnName.value.trim() : newCandidateColumnName.value.trim();
   if (!name) {
     ElMessage.warning("请输入表头名称");
     return;
   }
-  candidateColumns.value.push({
-    key: `custom_candidate_${Date.now()}`,
+  const column: QueueColumn = {
+    key: `custom_${target}_${Date.now()}`,
     name,
-    export: false,
+    export: target === "queue",
     source: `field:${name}`,
-  });
-  newCandidateColumnName.value = "";
+  };
+  if (target === "queue") {
+    queueColumns.value.splice(Math.max(0, queueColumns.value.length - 1), 0, column);
+    newQueueColumnName.value = "";
+  } else {
+    candidateColumns.value.push(column);
+    newCandidateColumnName.value = "";
+  }
 }
 
-function moveCandidateColumn(index: number, offset: -1 | 1): void {
-  const target = index + offset;
-  if (target < 0 || target >= candidateColumns.value.length) return;
-  const next = candidateColumns.value.slice();
-  const [column] = next.splice(index, 1);
-  if (!column) return;
-  next.splice(target, 0, column);
-  candidateColumns.value = next;
+function moveColumn(target: "queue" | "candidate", index: number, offset: -1 | 1): void {
+  const columns = target === "queue" ? queueColumns.value : candidateColumns.value;
+  const destination = index + offset;
+  if (destination < 0 || destination >= columns.length) return;
+  const [column] = columns.splice(index, 1);
+  if (column) columns.splice(destination, 0, column);
 }
 
-function deleteCandidateColumn(index: number): void {
-  candidateColumns.value.splice(index, 1);
+function deleteColumn(target: "queue" | "candidate", index: number): void {
+  const columns = target === "queue" ? queueColumns.value : candidateColumns.value;
+  if (target === "queue" && inferSource(columns[index]!) === "actions") return;
+  columns.splice(index, 1);
 }
 
 async function setProjectEligibility(projectId: string, enabled: boolean): Promise<void> {
   try {
     await updateProject(projectId, { experiment_enabled: enabled });
     await appStore.reloadProjects();
-    if (
-      candidateProjectId.value &&
-      !appStore.projectById(candidateProjectId.value)?.experiment_enabled
-    ) {
-      candidateProjectId.value = "";
-    }
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "项目进入实验编排设置失败");
   }
 }
 
 async function exportQueue(): Promise<void> {
-  const columns = queueColumns.value.filter(
-    (column) => column.export && inferSource(column) !== "actions",
-  );
-  if (!columns.length) {
-    ElMessage.warning("请至少勾选一个导出字段");
+  if (!activePlan.value || !planItems.value.length) {
+    ElMessage.warning("当前编排单没有可导出的记录");
     return;
   }
-  await exportWorkbook(
-    [
-      {
-        name: "实验编排",
-        headers: columns.map((column) => column.name),
-        rows: runs.value.map((run, index) =>
-          columns.map((column) => queueCellValue(run, column, index)),
-        ),
-      },
-    ],
-    `实验编排_${experimentDate.value}`,
-  );
-  ElMessage.success(`已导出 ${runs.value.length} 个实验位`);
+  try {
+    await savePrefix();
+    const columns = queueColumns.value.filter(
+      (column) => column.export && inferSource(column) !== "actions",
+    );
+    if (!columns.length) {
+      ElMessage.warning("请至少勾选一个导出字段");
+      return;
+    }
+    const saved = await exportWorkbook(
+      [
+        {
+          name: "实验编排",
+          headers: columns.map((column) => column.name),
+          rows: planItems.value.map((item, index) =>
+            columns.map((column) => queueCellValue(item, column, index)),
+          ),
+        },
+      ],
+      `实验编排_${prefixDraft.value.trim() || "未命名"}`,
+    );
+    if (!saved) return;
+    ElMessage.success(`已导出 ${planItems.value.length} 条编排记录`);
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "实验编排导出失败");
+  }
 }
 
 onMounted(() => {
@@ -599,43 +544,70 @@ onMounted(() => {
   <div class="page-stack" v-loading="loading">
     <section class="rule-card">
       <div>
-        <strong>实验编排规则</strong>
+        <strong>实验编排仅用于生成、回写实验编号和导出 Excel</strong>
         <p>
-          一个病理号可参与多个项目；队列始终按项目记录 ID 关联。移出编排只删除该次实验位，不会复制、增加或删除台账记录。
+          编排不读取或修改台账实验日期，不改变“待实验/已完成”状态，也不会因为回写而锁定。
         </p>
       </div>
-      <el-tag effect="plain">同一实验日期共用一个批次</el-tag>
+      <el-tag effect="plain">前缀可重复、可反复修改</el-tag>
+    </section>
+
+    <section class="page-card plan-bar">
+      <div class="plan-selector">
+        <label>
+          <span>编排单</span>
+          <el-select v-model="activePlanId" @change="changeActivePlan">
+            <el-option
+              v-for="plan in plans"
+              :key="plan.id"
+              :label="plan.prefix || '未命名编排单'"
+              :value="plan.id"
+            />
+          </el-select>
+        </label>
+        <el-button :icon="Plus" @click="createPlan">新建</el-button>
+        <el-button :icon="Delete" type="danger" plain @click="removeCurrentPlan">
+          删除
+        </el-button>
+      </div>
+      <label class="prefix-field">
+        <span>实验编号前缀</span>
+        <el-input
+          v-model="prefixDraft"
+          placeholder="例如：20260801"
+          maxlength="80"
+          @change="savePrefix(true)"
+        >
+          <template #append>-1, -2, -3…</template>
+        </el-input>
+      </label>
+      <div class="plan-meta">
+        <span>最近回写：</span>
+        <strong>{{ activePlan?.last_applied_at || "尚未回写" }}</strong>
+      </div>
     </section>
 
     <div class="experiment-workspace">
       <section class="page-card candidate-card">
         <div class="page-card-header">
-          <div class="step-heading">
-            <span>1</span>
-            <div>
-              <h2 class="page-card-title">选择待检记录</h2>
-              <p class="page-description">仅显示“待实验”且未加入当天编排的项目记录</p>
-            </div>
+          <div>
+            <h2 class="page-card-title">选择待实验记录</h2>
+            <p class="page-description">已有实验编号的待实验记录也可以重新加入并覆盖编号</p>
           </div>
           <div class="toolbar">
             <el-button size="small" :icon="Setting" @click="candidateEditorVisible = true">
-              编辑待检表头
+              编辑表头
             </el-button>
-            <el-button size="small" @click="eligibilityVisible = true">
-              设置进入项目
-            </el-button>
-            <el-button size="small" @click="candidateTableRef?.toggleAllSelection()">
-              全选
-            </el-button>
+            <el-button size="small" @click="eligibilityVisible = true">设置项目</el-button>
+            <el-button size="small" @click="candidateTableRef?.toggleAllSelection()">全选</el-button>
             <el-button size="small" @click="invertCandidates">反选</el-button>
-            <span class="muted">已选 {{ selectedCandidates.length }} 条</span>
           </div>
         </div>
         <div class="page-card-body candidate-filter">
           <el-input
             v-model="candidateSearch"
             clearable
-            placeholder="筛选病理号、诊断、蜡块号或项目"
+            placeholder="筛选病理号、实验编号、诊断或项目"
           />
           <el-select v-model="candidateProjectId" clearable placeholder="全部项目">
             <el-option
@@ -645,15 +617,17 @@ onMounted(() => {
               :value="project.id"
             />
           </el-select>
-          <el-button type="primary" @click="addSelectedToQueue">加入实验编排</el-button>
+          <el-button type="primary" @click="addSelectedToQueue">
+            加入编排（{{ selectedCandidates.length }}）
+          </el-button>
         </div>
         <el-table
           ref="candidateTableRef"
           :data="pendingCandidates"
           row-key="id"
           border
-          max-height="calc(100vh - 330px)"
-          empty-text="没有符合条件的待检记录"
+          max-height="calc(100vh - 390px)"
+          empty-text="没有符合条件的待实验记录"
           @selection-change="selectedCandidates = $event"
         >
           <el-table-column type="selection" width="52" align="center" />
@@ -675,72 +649,53 @@ onMounted(() => {
 
       <section class="page-card queue-card">
         <div class="page-card-header">
-          <div class="step-heading">
-            <span>2</span>
-            <div>
-              <h2 class="page-card-title">实验队列编排</h2>
-              <p class="page-description">共 {{ runs.length }} 个实验位</p>
-            </div>
+          <div>
+            <h2 class="page-card-title">编号编排</h2>
+            <p class="page-description">当前 {{ planItems.length }} 条；编排完成后仍可继续修改</p>
           </div>
+          <el-button :icon="Setting" @click="queueEditorVisible = true">编辑表头</el-button>
         </div>
         <div class="page-card-body queue-toolbar">
-          <label class="inline-field">
-            <span>实验日期</span>
-            <EditableDateInput
-              v-model="experimentDate"
-              @change="changeExperimentDate"
-            />
-          </label>
           <el-select v-model="sortRule" style="width: 170px">
             <el-option label="按病理号排序" value="pathology" />
-            <el-option label="按项目集中主排序" value="project" />
-            <el-option label="手动保持当前顺序" value="manual" />
+            <el-option label="按项目集中排序" value="project" />
+            <el-option label="保持手动顺序" value="manual" />
           </el-select>
-          <el-button type="primary" :icon="Rank" @click="applySort">应用排序</el-button>
-          <el-button :icon="Setting" @click="queueEditorVisible = true">
-            编辑实验表头
-          </el-button>
-          <el-tag effect="plain">.xlsx</el-tag>
+          <el-button :icon="Rank" @click="applySort">应用排序</el-button>
           <el-button :icon="Download" @click="exportQueue">导出 Excel</el-button>
-          <el-button type="success" :icon="Check" @click="commitBatch">
-            确认编排并回写台账
+          <el-button type="success" :icon="Check" @click="applyPlan">
+            编排完成并回写编号
           </el-button>
         </div>
-
         <el-table
-          :data="runs"
+          :data="planItems"
           row-key="id"
           border
-          max-height="calc(100vh - 330px)"
-          empty-text="当天还没有实验编排"
+          max-height="calc(100vh - 390px)"
+          empty-text="当前编排单还没有记录"
         >
           <el-table-column
             v-for="column in queueColumns"
             :key="column.key"
             :label="column.name"
-            :min-width="inferSource(column) === 'actions' ? 250 : 120"
+            :min-width="inferSource(column) === 'actions' ? 170 : 120"
             :fixed="inferSource(column) === 'actions' ? 'right' : undefined"
           >
-            <template #default="{ row, $index }: { row: ExperimentRun; $index: number }">
+            <template #default="{ row, $index }: { row: ExperimentPlanItem; $index: number }">
               <div v-if="inferSource(column) === 'actions'" class="queue-actions">
                 <el-button
                   link
                   :icon="ArrowUp"
                   :disabled="$index === 0"
-                  title="上移一条"
-                  @click="moveRun($index, -1)"
+                  @click="moveItem($index, -1)"
                 />
                 <el-button
                   link
                   :icon="ArrowDown"
-                  :disabled="$index === runs.length - 1"
-                  title="下移一条"
-                  @click="moveRun($index, 1)"
+                  :disabled="$index === planItems.length - 1"
+                  @click="moveItem($index, 1)"
                 />
-                <el-button link @click="moveProjectBlockToTop(row.project_id)">
-                  项目组置顶
-                </el-button>
-                <el-button link type="danger" :icon="Delete" @click="removeRun(row)">
+                <el-button link type="danger" :icon="Delete" @click="removeItem(row)">
                   移出
                 </el-button>
               </div>
@@ -750,12 +705,12 @@ onMounted(() => {
                   inferSource(column) === 'pathology_number'
                 "
               >
-                {{ queueCellValue(row, column, $index) }}
+                {{ queueCellValue(row, column, $index) || "—" }}
               </code>
               <el-tag v-else-if="inferSource(column) === 'project'" effect="plain">
                 {{ queueCellValue(row, column, $index) }}
               </el-tag>
-              <span v-else>{{ queueCellValue(row, column, $index) }}</span>
+              <span v-else>{{ queueCellValue(row, column, $index) || "—" }}</span>
             </template>
           </el-table-column>
         </el-table>
@@ -763,175 +718,88 @@ onMounted(() => {
     </div>
   </div>
 
-  <el-dialog v-model="queueEditorVisible" title="实验编排表头与导出字段" width="920px">
-    <p class="editor-note">
-      可添加、删除、改名和调整顺序；“字段来源”可对应任意项目台账表头。不同项目没有该表头时留空。
-    </p>
-    <el-table :data="queueColumns" row-key="key" border max-height="470">
+  <el-dialog v-model="queueEditorVisible" title="实验编排表头与导出字段" width="900px">
+    <el-table :data="queueColumns" row-key="key" border max-height="460">
       <el-table-column label="顺序" width="90" align="center">
         <template #default="{ $index }">
-          <el-button
-            link
-            :icon="ArrowUp"
-            :disabled="$index === 0"
-            @click="moveQueueColumn($index, -1)"
-          />
-          <el-button
-            link
-            :icon="ArrowDown"
-            :disabled="$index === queueColumns.length - 1"
-            @click="moveQueueColumn($index, 1)"
-          />
+          <el-button link :icon="ArrowUp" :disabled="$index === 0" @click="moveColumn('queue', $index, -1)" />
+          <el-button link :icon="ArrowDown" :disabled="$index === queueColumns.length - 1" @click="moveColumn('queue', $index, 1)" />
         </template>
       </el-table-column>
-      <el-table-column label="显示名称" min-width="180">
-        <template #default="{ row }: { row: QueueColumn }">
-          <el-input v-model="row.name" />
-        </template>
+      <el-table-column label="显示名称" min-width="170">
+        <template #default="{ row }: { row: QueueColumn }"><el-input v-model="row.name" /></template>
       </el-table-column>
       <el-table-column label="字段来源" min-width="260">
         <template #default="{ row }: { row: QueueColumn }">
-          <el-select
-            v-model="row.source"
-            :disabled="inferSource(row) === 'actions'"
-            filterable
-            style="width: 100%"
-          >
+          <el-select v-model="row.source" :disabled="inferSource(row) === 'actions'" filterable style="width: 100%">
             <el-option label="序号" value="sequence" />
             <el-option label="实验编号" value="experiment_number" />
             <el-option label="病理号" value="pathology_number" />
             <el-option label="项目" value="project" />
-            <el-option label="自动匹配诊断字段" value="diagnosis" />
+            <el-option label="自动匹配诊断" value="diagnosis" />
             <el-option label="留空" value="blank" />
-            <el-option
-              v-for="label in availableFieldLabels"
-              :key="label"
-              :label="`台账表头：${label}`"
-              :value="`field:${label}`"
-            />
+            <el-option v-for="label in availableFieldLabels" :key="label" :label="`台账表头：${label}`" :value="`field:${label}`" />
           </el-select>
         </template>
       </el-table-column>
-      <el-table-column label="导出" width="90" align="center">
-        <template #default="{ row }: { row: QueueColumn }">
-          <el-checkbox
-            v-model="row.export"
-            :disabled="inferSource(row) === 'actions'"
-          />
-        </template>
+      <el-table-column label="导出" width="80">
+        <template #default="{ row }: { row: QueueColumn }"><el-checkbox v-model="row.export" :disabled="inferSource(row) === 'actions'" /></template>
       </el-table-column>
-      <el-table-column label="操作" width="90" align="center">
+      <el-table-column label="操作" width="80">
         <template #default="{ row, $index }: { row: QueueColumn; $index: number }">
-          <el-button
-            link
-            type="danger"
-            :disabled="inferSource(row) === 'actions'"
-            @click="deleteQueueColumn($index)"
-          >
-            删除
-          </el-button>
+          <el-button link type="danger" :disabled="inferSource(row) === 'actions'" @click="deleteColumn('queue', $index)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
     <div class="add-column-row">
-      <el-input
-        v-model="newQueueColumnName"
-        placeholder="添加表头，例如：DNA浓度"
-        @keyup.enter="addQueueColumn"
-      />
-      <el-button :icon="Plus" @click="addQueueColumn">添加表头</el-button>
+      <el-input v-model="newQueueColumnName" placeholder="添加表头" @keyup.enter="addColumn('queue')" />
+      <el-button :icon="Plus" @click="addColumn('queue')">添加</el-button>
     </div>
     <template #footer>
       <el-button @click="queueEditorVisible = false">取消</el-button>
-      <el-button
-        type="primary"
-        @click="
-          saveQueueColumns();
-          queueEditorVisible = false;
-        "
-      >
-        保存设置
-      </el-button>
+      <el-button type="primary" @click="saveQueueColumns(); queueEditorVisible = false">保存</el-button>
     </template>
   </el-dialog>
 
-  <el-dialog v-model="candidateEditorVisible" title="待检记录表头" width="820px">
-    <p class="editor-note">
-      这里只调整“选择待检记录”的显示字段，不会修改项目台账表头或原始数据。
-    </p>
+  <el-dialog v-model="candidateEditorVisible" title="待实验记录表头" width="820px">
     <el-table :data="candidateColumns" row-key="key" border max-height="430">
-      <el-table-column label="顺序" width="90" align="center">
+      <el-table-column label="顺序" width="90">
         <template #default="{ $index }">
-          <el-button
-            link
-            :icon="ArrowUp"
-            :disabled="$index === 0"
-            @click="moveCandidateColumn($index, -1)"
-          />
-          <el-button
-            link
-            :icon="ArrowDown"
-            :disabled="$index === candidateColumns.length - 1"
-            @click="moveCandidateColumn($index, 1)"
-          />
+          <el-button link :icon="ArrowUp" :disabled="$index === 0" @click="moveColumn('candidate', $index, -1)" />
+          <el-button link :icon="ArrowDown" :disabled="$index === candidateColumns.length - 1" @click="moveColumn('candidate', $index, 1)" />
         </template>
       </el-table-column>
       <el-table-column label="显示名称" min-width="170">
-        <template #default="{ row }: { row: QueueColumn }">
-          <el-input v-model="row.name" />
-        </template>
+        <template #default="{ row }: { row: QueueColumn }"><el-input v-model="row.name" /></template>
       </el-table-column>
-      <el-table-column label="字段来源" min-width="280">
+      <el-table-column label="字段来源" min-width="260">
         <template #default="{ row }: { row: QueueColumn }">
           <el-select v-model="row.source" filterable style="width: 100%">
             <el-option label="病理号" value="pathology_number" />
-            <el-option label="实验编号" value="experiment_number" />
+            <el-option label="原实验编号" value="experiment_number" />
             <el-option label="项目" value="project" />
-            <el-option label="自动匹配诊断字段" value="diagnosis" />
+            <el-option label="自动匹配诊断" value="diagnosis" />
             <el-option label="留空" value="blank" />
-            <el-option
-              v-for="label in availableFieldLabels"
-              :key="label"
-              :label="`台账表头：${label}`"
-              :value="`field:${label}`"
-            />
+            <el-option v-for="label in availableFieldLabels" :key="label" :label="`台账表头：${label}`" :value="`field:${label}`" />
           </el-select>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="90" align="center">
-        <template #default="{ $index }">
-          <el-button link type="danger" @click="deleteCandidateColumn($index)">
-            删除
-          </el-button>
-        </template>
+      <el-table-column label="操作" width="80">
+        <template #default="{ $index }"><el-button link type="danger" @click="deleteColumn('candidate', $index)">删除</el-button></template>
       </el-table-column>
     </el-table>
     <div class="add-column-row">
-      <el-input
-        v-model="newCandidateColumnName"
-        placeholder="添加显示表头，例如：标本"
-        @keyup.enter="addCandidateColumn"
-      />
-      <el-button :icon="Plus" @click="addCandidateColumn">添加表头</el-button>
+      <el-input v-model="newCandidateColumnName" placeholder="添加显示表头" @keyup.enter="addColumn('candidate')" />
+      <el-button :icon="Plus" @click="addColumn('candidate')">添加</el-button>
     </div>
     <template #footer>
       <el-button @click="candidateEditorVisible = false">取消</el-button>
-      <el-button
-        type="primary"
-        @click="
-          saveCandidateColumns();
-          candidateEditorVisible = false;
-        "
-      >
-        保存设置
-      </el-button>
+      <el-button type="primary" @click="saveCandidateColumns(); candidateEditorVisible = false">保存</el-button>
     </template>
   </el-dialog>
 
   <el-dialog v-model="eligibilityVisible" title="设置可进入实验编排的项目" width="560px">
-    <p class="editor-note">
-      关闭后，该项目的新待实验记录不再出现在待检列表；已经加入的实验位不受影响。
-    </p>
+    <p class="editor-note">关闭后，该项目的待实验记录不会出现在候选列表。</p>
     <div class="eligibility-list">
       <div v-for="project in appStore.projects" :key="project.id" class="eligibility-row">
         <span>{{ project.name }}</span>
@@ -943,23 +811,25 @@ onMounted(() => {
         />
       </div>
     </div>
-    <template #footer>
-      <el-button type="primary" @click="eligibilityVisible = false">完成</el-button>
-    </template>
+    <template #footer><el-button type="primary" @click="eligibilityVisible = false">完成</el-button></template>
   </el-dialog>
 </template>
 
 <style scoped>
-.rule-card {
+.rule-card,
+.plan-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
   border: 1px solid #b9d3ff;
-  border-left: 4px solid var(--app-primary);
   border-radius: 10px;
   background: #f8fbff;
   padding: 12px 14px;
+}
+
+.rule-card {
+  border-left: 4px solid var(--app-primary);
 }
 
 .rule-card p,
@@ -968,6 +838,29 @@ onMounted(() => {
   color: var(--app-muted);
   font-size: 12px;
   line-height: 1.6;
+}
+
+.plan-selector,
+.plan-meta {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+
+.plan-selector label,
+.prefix-field {
+  display: grid;
+  gap: 5px;
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.plan-selector label {
+  width: 220px;
+}
+
+.prefix-field {
+  width: min(420px, 40vw);
 }
 
 .experiment-workspace {
@@ -982,54 +875,26 @@ onMounted(() => {
   overflow: hidden;
 }
 
-.step-heading {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.step-heading > span {
-  display: grid;
-  width: 28px;
-  height: 28px;
-  place-items: center;
-  border-radius: 999px;
-  color: #0958d9;
-  background: var(--app-primary-soft);
-  font-weight: 700;
-}
-
 .candidate-filter {
   display: grid;
   grid-template-columns: minmax(180px, 1fr) 135px auto;
   gap: 8px;
 }
 
-.queue-toolbar {
+.queue-toolbar,
+.queue-actions,
+.add-column-row {
   display: flex;
-  flex-wrap: wrap;
-  align-items: end;
+  align-items: center;
   gap: 8px;
 }
 
-.inline-field {
-  display: grid;
-  width: 188px;
-  gap: 5px;
-  color: var(--app-muted);
-  font-size: 12px;
-}
-
-.queue-actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
+.queue-toolbar {
+  flex-wrap: wrap;
 }
 
 .add-column-row {
-  display: flex;
   max-width: 520px;
-  gap: 8px;
   margin-top: 12px;
 }
 
@@ -1057,6 +922,15 @@ code {
 @media (max-width: 1500px) {
   .experiment-workspace {
     grid-template-columns: 1fr;
+  }
+
+  .plan-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .prefix-field {
+    width: 100%;
   }
 }
 </style>
