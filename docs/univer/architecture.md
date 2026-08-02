@@ -17,7 +17,7 @@ flowchart LR
 
 项目当前使用 Vue 3 + Vite，迁移时采用 Univer 官方推荐的 preset 模式：`createUniver` + `UniverSheetsCorePreset`。实例只保存在普通 TypeScript 变量中，不放进 Vue 的响应式代理；组件挂载时创建，卸载或项目切换时 dispose。
 
-首版使用本地 workbook/snapshot，不引入 Univer Server。现有 FastAPI 仍负责记录保存、项目隔离、报告打印、Excel 手动导出和自动导出。
+首版使用本地 workbook/snapshot，不引入 Univer Server。表格交互全部通过 Univer Facade/Command API；FastAPI 只负责测试数据装载、测试数据保存、项目隔离、报告打印、Excel 手动导出和自动导出。当前业务数据库不参与迁移。
 
 ## Univer 的目标位置
 
@@ -25,15 +25,16 @@ flowchart LR
 flowchart LR
   P[项目切换] --> W[UniverLedgerGrid]
   W --> S[Univer workbook snapshot]
-  W --> R[记录更新/批量导入 API]
-  R --> DB[(SQLite)]
+  W --> U[Univer Facade/Command API]
+  U --> R[测试数据保存 API]
+  R --> DB[(独立测试 SQLite)]
   T[工具栏与业务页面] --> R
   T --> X[实验编排、报告、导出、自动导出]
 ```
 
 Univer 不应成为业务数据库，也不应直接决定记录是否删除、是否锁定或实验编号是否冲突。表格中的行只保存到记录 ID 的映射，保存时使用记录 ID 和字段 ID。
 
-迁移期间禁止调用 `drop_all`、删除旧 SQLite 文件或用空 workbook 覆盖数据库。先读取现有项目、字段和记录，再生成 Univer workbook；任何新字段或索引都必须通过可回滚的增量迁移完成。
+测试期间禁止调用 `drop_all`、删除旧 SQLite 文件或用空 workbook 覆盖当前数据库。先读取测试库中的项目、字段和记录，再生成 Univer workbook；本阶段不对当前业务数据库增加字段、索引或其他迁移。
 
 ## 组件责任
 
