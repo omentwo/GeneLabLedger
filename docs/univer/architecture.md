@@ -17,7 +17,7 @@ flowchart LR
 
 项目当前使用 Vue 3 + Vite，迁移时采用 Univer 官方推荐的 preset 模式：`createUniver` + `UniverSheetsCorePreset`。实例只保存在普通 TypeScript 变量中，不放进 Vue 的响应式代理；组件挂载时创建，卸载或项目切换时 dispose。
 
-首版使用本地 workbook/snapshot，不引入 Univer Server。表格交互全部通过 Univer Facade/Command API；FastAPI 只负责测试数据装载、测试数据保存、项目隔离、报告打印、Excel 手动导出和自动导出。当前业务数据库不参与迁移。
+首版使用本地 workbook/snapshot，不引入 Univer Server。Univer 是表格能力的唯一实现方，表格交互全部通过 Univer Facade/Command API；FastAPI 只负责测试数据装载、测试数据保存、项目隔离、报告打印、Excel 手动导出和自动导出。当前业务数据库不参与迁移。
 
 ## Univer 的目标位置
 
@@ -47,6 +47,8 @@ Univer 不应成为业务数据库，也不应直接决定记录是否删除、�
 - 将修改转换为现有记录更新或批量导入请求。
 - 项目切换、组件卸载时调用 Univer dispose，避免旧工作簿残留。
 
+UniverLedgerGrid 不应重新实现 Univer 已经提供的选择、编辑、复制粘贴、排序、筛选、撤销、行列尺寸和底色菜单；项目代码只增加业务映射、测试数据库同步和业务命令。
+
 ### 现有业务页面
 
 - `ExperimentsView.vue`：保留实验候选筛选、排序、上下移动和编号编排。
@@ -66,3 +68,4 @@ Univer 不应成为业务数据库，也不应直接决定记录是否删除、�
 - 不把 Univer 的行号当作记录主键；排序、过滤和删除后行号会变化。
 - 不让 Univer 直接执行业务删除；“清空单元格”和“删除数据库记录”必须分开。
 - 不在第一阶段替换实验编排和报告页面的所有表格，避免同时引入多个交互回归点。
+- 不在 Univer 外层再包一套与 Univer 冲突的输入框、选择框或底色面板。
