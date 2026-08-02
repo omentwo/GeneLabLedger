@@ -191,6 +191,19 @@ function assertTrustedIpcSender(event) {
   }
 }
 
+function windowState() {
+  return {
+    isMaximized: Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isMaximized()),
+    alwaysOnTop,
+  };
+}
+
+function notifyWindowState() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("gene-ledger:window-state-changed", windowState());
+  }
+}
+
 function createMainWindow() {
   mainWindow = new BrowserWindow({
     title: APP_TITLE,
@@ -198,6 +211,8 @@ function createMainWindow() {
     height: 820,
     minWidth: 1000,
     minHeight: 640,
+    frame: false,
+    thickFrame: true,
     show: false,
     autoHideMenuBar: true,
     backgroundColor: "#f7f8fa",
@@ -213,6 +228,8 @@ function createMainWindow() {
     },
   });
   mainWindow.setAlwaysOnTop(alwaysOnTop);
+  mainWindow.on("maximize", notifyWindowState);
+  mainWindow.on("unmaximize", notifyWindowState);
   mainWindow.once("ready-to-show", () => mainWindow?.show());
   mainWindow.webContents.on("before-input-event", (event, input) => {
     if (
@@ -313,6 +330,33 @@ function registerDesktopHandlers() {
     return applyAlwaysOnTop(value);
   });
 
+  ipcMain.handle("gene-ledger:get-window-state", (event) => {
+    assertTrustedIpcSender(event);
+    return windowState();
+  });
+
+  ipcMain.handle("gene-ledger:minimize-window", (event) => {
+    assertTrustedIpcSender(event);
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize();
+  });
+
+  ipcMain.handle("gene-ledger:toggle-window-maximize", (event) => {
+    assertTrustedIpcSender(event);
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+    if (mainWindow.isMaximized()) {
+      mainWindow.unmaximize();
+    } else {
+      mainWindow.maximize();
+    }
+    notifyWindowState();
+    return mainWindow.isMaximized();
+  });
+
+  ipcMain.handle("gene-ledger:close-window", (event) => {
+    assertTrustedIpcSender(event);
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+  });
+
   ipcMain.handle("gene-ledger:restart", (event) => {
     assertTrustedIpcSender(event);
     app.relaunch();
@@ -376,6 +420,7 @@ function applyAlwaysOnTop(value) {
   if (dataDirectory) {
     writeDesktopSettings(dataDirectory, alwaysOnTop);
   }
+  notifyWindowState();
   return alwaysOnTop;
 }
 

@@ -17,5 +17,14 @@ contextBridge.exposeInMainWorld("geneLedgerDesktop", {
   changeDataDirectory: () => ipcRenderer.invoke("gene-ledger:change-data-directory"),
   getAlwaysOnTop: () => ipcRenderer.invoke("gene-ledger:get-always-on-top"),
   setAlwaysOnTop: (value) => ipcRenderer.invoke("gene-ledger:set-always-on-top", Boolean(value)),
+  getWindowState: () => ipcRenderer.invoke("gene-ledger:get-window-state"),
+  minimizeWindow: () => ipcRenderer.invoke("gene-ledger:minimize-window"),
+  toggleWindowMaximize: () => ipcRenderer.invoke("gene-ledger:toggle-window-maximize"),
+  closeWindow: () => ipcRenderer.invoke("gene-ledger:close-window"),
+  onWindowStateChanged: (listener) => {
+    const handler = (_event, state) => listener(state);
+    ipcRenderer.on("gene-ledger:window-state-changed", handler);
+    return () => ipcRenderer.removeListener("gene-ledger:window-state-changed", handler);
+  },
   restart: () => ipcRenderer.invoke("gene-ledger:restart"),
 });

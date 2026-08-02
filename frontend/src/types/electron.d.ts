@@ -12,6 +12,13 @@ export interface GeneLedgerDesktopBridge {
   changeDataDirectory: () => Promise<{ changed: boolean; directory: string }>;
   getAlwaysOnTop: () => Promise<boolean>;
   setAlwaysOnTop: (value: boolean) => Promise<boolean>;
+  getWindowState: () => Promise<{ isMaximized: boolean; alwaysOnTop: boolean }>;
+  minimizeWindow: () => Promise<void>;
+  toggleWindowMaximize: () => Promise<boolean>;
+  closeWindow: () => Promise<void>;
+  onWindowStateChanged: (
+    listener: (state: { isMaximized: boolean; alwaysOnTop: boolean }) => void,
+  ) => () => void;
   restart: () => Promise<void>;
 }
 
