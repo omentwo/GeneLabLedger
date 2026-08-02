@@ -5,6 +5,18 @@ $FrontendRoot = Join-Path $ProjectRoot "frontend"
 $FrontendIndex = Join-Path $FrontendRoot "dist\index.html"
 $FrontendSource = Join-Path $FrontendRoot "src"
 $FrontendPublic = Join-Path $FrontendRoot "public"
+$FrontendBuildConfigs = @(
+    (Join-Path $FrontendRoot "vite.config.ts"),
+    (Join-Path $FrontendRoot "vite.config.js"),
+    (Join-Path $FrontendRoot "vite.config.mjs"),
+    (Join-Path $FrontendRoot "tsconfig.json"),
+    (Join-Path $FrontendRoot "tsconfig.app.json"),
+    (Join-Path $FrontendRoot "tsconfig.node.json"),
+    (Join-Path $FrontendRoot "tailwind.config.js"),
+    (Join-Path $FrontendRoot "tailwind.config.ts"),
+    (Join-Path $FrontendRoot "postcss.config.js"),
+    (Join-Path $FrontendRoot "postcss.config.cjs")
+)
 Set-Location -LiteralPath $BackendRoot
 $env:UV_CACHE_DIR = Join-Path $BackendRoot ".uv-cache"
 
@@ -25,6 +37,9 @@ if (-not $NeedsFrontendBuild) {
         Get-Item -LiteralPath (Join-Path $FrontendRoot "index.html")
         Get-Item -LiteralPath (Join-Path $FrontendRoot "package.json")
         Get-Item -LiteralPath (Join-Path $FrontendRoot "package-lock.json")
+        $FrontendBuildConfigs | Where-Object { Test-Path -LiteralPath $_ } | ForEach-Object {
+            Get-Item -LiteralPath $_
+        }
     )
     $NeedsFrontendBuild = $null -ne ($SourceFiles | Where-Object { $_.LastWriteTimeUtc -gt $DistStamp } | Select-Object -First 1)
 }

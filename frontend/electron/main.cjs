@@ -1,5 +1,5 @@
 const { app, BrowserWindow, Menu, dialog, ipcMain } = require("electron");
-const { spawn } = require("node:child_process");
+const { execFile, spawn } = require("node:child_process");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const http = require("node:http");
@@ -296,10 +296,51 @@ function registerDesktopHandlers() {
 }
 
 function stopBackend() {
-  if (!backendProcess) return;
-  backendProcess.removeAllListeners("exit");
-  backendProcess.kill();
+  const processToStop = backendProcess;
   backendProcess = null;
+  if (!processToStop) return Promise.resolve();
+
+  processToStop.removeAllListeners("exit");
+  return new Promise((resolve) => {
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      resolve();
+    };
+    processToStop.once("exit", finish);
+
+    if (processToStop.exitCode != null || processToStop.signalCode != null) {
+      finish();
+      return;
+    }
+
+    if (process.platform === "win32" && processToStop.pid) {
+      execFile(
+        "taskkill",
+        ["/PID", String(processToStop.pid), "/T", "/F"],
+        { windowsHide: true },
+        (error) => {
+          if (error) {
+            try {
+              processToStop.kill();
+            } catch {
+              // The process may already have exited between taskkill and fallback.
+            }
+          }
+          if (processToStop.exitCode != null || processToStop.signalCode != null) finish();
+        },
+      );
+    } else {
+      try {
+        processToStop.kill("SIGTERM");
+      } catch {
+        finish();
+      }
+    }
+
+    setTimeout(finish, 5000);
+  });
 }
 
 const singleInstance = app.requestSingleInstanceLock();
@@ -331,9 +372,14 @@ if (!singleInstance) {
   });
 }
 
-app.on("before-quit", () => {
+app.on("before-quit", (event) => {
+  if (quitting) {
+    event.preventDefault();
+    return;
+  }
+  event.preventDefault();
   quitting = true;
-  stopBackend();
+  void stopBackend().finally(() => app.exit(0));
 });
 
 app.on("window-all-closed", () => {
