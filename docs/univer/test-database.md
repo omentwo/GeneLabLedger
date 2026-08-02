@@ -2,36 +2,26 @@
 
 ## 原则
 
-- 不对当前业务 SQLite 数据库执行迁移、清空、重建或删除。
-- 不把当前业务数据库作为 Univer 正式迁移目标。
-- 测试时使用独立的测试数据目录，例如 `backend/data/univer-test/`，或使用当前数据库的只读副本。
-- 测试产生的编辑、删除、底色和编号回写只能写入测试数据库；测试结束可以直接销毁测试目录，不影响当前业务数据。
+- 本次迁移没有数据库 schema 变更，不执行 `drop_all`、删除 SQLite 文件或覆盖现有 `ledger.db`。
+- 需要验证写入时，先复制业务数据目录到独立目录，例如 `backend/data/univer-test/`。
+- 启动后端时设置 `GENE_LEDGER_DATA_DIR` 指向副本；桌面版可在“数据与设置”中切换目录并重启。
+- 生产数据目录只用于只读核对，测试编辑、删除、底色和编号回写均落到副本。
 
-## 数据装载
+## 推荐步骤
 
-1. 先备份当前数据库和模板目录。
-2. 将当前数据库复制到测试目录，或使用后端种子数据创建全新的测试库。
-3. 通过现有项目/记录 API 读取测试数据，转换成 `IWorkbookData`，再调用 `univerAPI.createWorkbook(workbookData)`。
-4. 在 Univer 中完成表格操作，使用 Univer 事件和命令收集变更。
-5. 需要验证保存时，只调用测试环境的记录 API，不连接当前业务数据目录。
+1. 关闭正在使用业务数据库的测试实例，备份数据库和 `templates` 目录。
+2. 复制整个数据目录，确保 `ledger.db`、报告模板和导出目录一起存在。
+3. 用副本启动后端，打开台账并确认项目、字段、记录和已有底色可加载。
+4. 在 Univer 中测试选区、编辑、复制粘贴、撤销/重做、锁定、列宽、底色和清除底色。
+5. 测试实验编排编号回写、报告打印、手动/自动导出和项目隔离。
+6. 对比业务目录文件哈希或修改时间，确认生产数据库没有写入。
 
-## Univer API 边界
+## API 边界
 
-表格层必须使用 Univer API：
+- workbook：`univerAPI.createWorkbook`、`FWorkbook.save`/`getSnapshot`。
+- 选区：`FWorkbook.onSelectionChange`。
+- 值变化：`univerAPI.Event.SheetValueChanged`。
+- 样式和区域：`FWorksheet.getRange`、`FRange.setBackground`、`setValueForCell`。
+- 底色和列宽：`FWorkbook.onCommandExecuted` 监听 Univer 原生命令。
 
-- 工作簿和快照：`createWorkbook`、`FWorkbook.getSnapshot`。
-- 单元格/区域：`FWorksheet.getRange`、Facade 的值和样式 API。
-- 选区：`SelectionChanged`、active range 和 range list。
-- 编辑与粘贴：`SheetEditEnded`、`ClipboardPasted` 以及相应命令事件。
-- 底色：`sheet.command.set-background-color` 和清除底色命令。
-- 删除、排序、筛选和撤销：Univer 的 range/worksheet 命令。
-
-禁止通过 Element Plus 表格实例、`querySelector` 直接改单元格、或用浏览器 DOM 拖动逻辑替代表格行为。
-
-## 验收标准
-
-- 现有业务数据库文件的修改时间和内容在测试前后不变。
-- 测试数据库可以完整加载项目、字段、记录和底色。
-- Univer 的多选、复制粘贴、底色和删除行为只影响测试库。
-- 关闭测试版本后，当前业务版本仍可正常打开原数据库。
-
+禁止通过 Element Plus 表格实例、`querySelector` 或浏览器拖动事件替代表格行为。

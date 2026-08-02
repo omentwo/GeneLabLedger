@@ -1,59 +1,33 @@
-# Univer 替换准备
+# Univer 台账迁移
 
-本目录用于准备将台账表格区域替换为 Univer 的设计、数据契约和验收资料。
+台账主表已经迁移到 Univer 0.25.1。迁移只替换前端表格交互，不迁移或清空现有 SQLite 数据库，也不保留旧表格切换开关。
 
-## 当前结论
+## 现在的边界
 
-- 本阶段只准备文档，不启用 Univer 运行时代码，也不改变现有数据库结构。
-- 推荐只替换 `LedgerView.vue` 内的数据表格，保留项目导航、实验编排、报告、导入导出和自动导出页面。
-- 表格处理必须通过 Univer Facade/Command API 完成：选区、编辑、复制粘贴、删除、排序、筛选、底色和撤销重做不再通过 Element Plus 表格或直接 DOM 操作实现。
-- 当前业务数据库不迁移、不清空、不作为 Univer 的初始化目标；只使用独立测试数据库或当前数据库的只读副本验证映射和交互。
-- 每个项目使用独立的 Univer 工作簿实例。切换项目时销毁旧实例并按项目重新加载数据。
-- 测试阶段可以把现有数据库复制到独立测试数据目录，但所有写入只落到测试数据库，不回写当前业务数据库。
-- 不保留前端新旧表格切换开关。迁移验收通过后直接使用 Univer，回滚依靠 Git 标签或安装包版本，不在运行时保留旧表格分支。
-- 底色使用 Univer 原生 Fill color / `sheet.command.set-background-color`，同时把颜色值同步到现有 `highlight_color` 字段，以便重新加载、报告和导出保持一致。
-- 迁移遵循“Univer 原生优先”：Univer 已提供的能力不再保留当前项目的重复实现。
+- `frontend/src/components/UniverLedgerGrid.vue` 负责当前项目 workbook 的创建、选区映射、单元格读写、列宽和原生底色命令。
+- `LedgerView.vue` 负责业务 API：记录更新、锁定、删除、状态、报告入口、导入、手动导出和项目切换。
+- 实验编排、实验编号回写、报告打印、自动导出和项目管理页面保持原业务实现。
+- Univer 只保存当前项目的视图数据；记录 UUID、字段 ID 和 `project_id` 仍由业务 API 管理。
+- 原生 Fill color/清除底色是唯一的底色入口，颜色会回写现有 `highlight_color` 字段。
+- 旧的 Element Plus 主表格、拖动勾选、手写底色面板、复制粘贴解析和输入框宽高/行距设置已经删除。
 
-## 不迁移的旧实现
+## 数据库安全
 
-以下内容在 Univer 接入后删除，不再作为并行功能维护：
+本次迁移没有数据库迁移脚本，也没有删除、重建或覆盖现有 `ledger.db`。验证写入时应先复制数据目录，并通过 `GENE_LEDGER_DATA_DIR` 或桌面“数据目录”切换到副本；生产数据目录不作为迁移测试目标。
 
-- Element Plus `el-table` 的行选择、拖动选择和 DOM 事件处理。
-- 旧的 HTML 输入框、输入框宽高比例、记录间距 CSS 等表格专用设置。
-- 自定义底色弹窗、标准色列表和旧表格底色 CSS。
-- 自定义复制粘贴解析、单元格导航、排序、筛选、撤销重做等重复逻辑。
+## 官方 API 基线
 
-## 继续保留的业务能力
+组件采用官方 Vue 3 preset 集成：`createUniver` + `UniverSheetsCorePreset`。实例保存在普通 TypeScript 变量中，在组件卸载时 dispose。当前版本使用的事件是：
 
-以下不是 Univer 的通用表格能力，应继续保留在项目业务层：
+- `FWorkbook.onSelectionChange`：将 Univer range 映射为记录列表。
+- `FWorkbook.onCommandExecuted`：监听 Fill color、清除底色和列宽命令。
+- `univerAPI.addEvent(univerAPI.Event.SheetValueChanged, ...)`：监听编辑、粘贴和撤销后的值变化。
 
-- 测试数据库读写、记录 ID/字段 ID 映射和项目隔离。
-- 实验编排、实验编号回写、记录锁定和审计日志。
-- 报告模板、DOCX/WPS/Word 打印、手动导出和自动导出。
-- 测试数据库的安全边界和 Git/安装包级别回滚。
+参考官方文档：[Vue 集成](https://docs.univer.ai/guides/sheets/getting-started/integrations/vue)、[安装](https://docs.univer.ai/guides/sheets/getting-started/installation)、[核心能力](https://docs.univer.ai/guides/sheets/features/core)、[架构](https://docs.univer.ai/guides/recipes/architecture/univer)。
 
-## 当前官方接入基线
+## 验证顺序
 
-按官方 Vue 3 集成文档，首版使用 `@univerjs/presets` + `@univerjs/preset-sheets-core` 的 preset 模式，在 `onMounted` 中调用 `createUniver`，在 `onBeforeUnmount` 中 dispose；Univer/FUniver 实例不放进 Vue 的 reactive/ref 代理中。
-
-参考：
-
-- <https://docs.univer.ai/guides/sheets/getting-started/integrations/vue>
-- <https://docs.univer.ai/guides/sheets/getting-started/installation>
-- <https://docs.univer.ai/guides/sheets/features/core>
-
-## 文档索引
-
-- [架构边界](./architecture.md)：现有模块与 Univer 的接入位置。
-- [数据契约](./data-contract.md)：行、列、记录 ID、字段 ID 和保存规则。
-- [测试数据库](./test-database.md)：独立测试库、副本和禁止写入当前数据库的规则。
-- [兼容性矩阵](./compatibility-matrix.md)：现有功能替换后的保留方式和回退方案。
-- [上线清单](./rollout-checklist.md)：开发、测试、Electron 打包和回滚步骤。
-
-## 推荐实施顺序
-
-1. 新建 `UniverLedgerGrid.vue`，以当前 `LedgerView` 的记录和字段生成工作簿快照。
-2. 通过 `SelectionChanged`、`SheetEditEnded` 和 `ClipboardPasted` 等事件同步选区和修改。
-3. 单元格编辑调用现有记录更新接口；多单元格粘贴调用批量导入提交接口。
-4. 删除、锁定、底色、报告打印等业务动作继续经过现有业务 API，不直接依赖 Univer 的内部行号。
-5. 直接替换台账表格并完成验收；回滚只使用版本标签或安装包，不增加前端旧功能开关。
+1. 在独立测试数据目录启动后端，确认项目、字段、记录和底色能加载。
+2. 验证 Univer 选区、键盘/鼠标编辑、复制粘贴、锁定保护、列宽、底色和清除底色。
+3. 验证实验编号回写、报告打印、手动导出、自动导出和项目隔离。
+4. 执行前端 typecheck/test/build、后端 pytest，再执行 Electron Windows 打包。

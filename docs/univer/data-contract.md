@@ -2,47 +2,36 @@
 
 ## 工作簿范围
 
-- 一个活动项目对应一个 Univer workbook。
-- workbook 中只加载当前项目的字段和记录，不混入其他项目数据。
-- 切换项目时先 dispose 当前 workbook，再加载新项目快照。
-- 项目 ID 由页面状态提供，不能从可见单元格内容推断。
-- 首版只从独立测试数据库读取数据；不读取或写入当前业务数据库文件。
+- 一个活动项目对应一个 workbook，只加载该项目的字段和记录。
+- 切换项目时 dispose 旧 workbook，再按新的 `project_id` 创建快照。
+- workbook 行列索引只用于界面定位；任何保存、删除、锁定或报告操作都使用业务 ID。
 
-## 行映射
+## 映射
 
 | Univer 信息 | 业务字段 | 规则 |
 | --- | --- | --- |
-| 行索引 | `ProjectRecord.id` | 只用于界面定位，保存必须使用 UUID |
-| 项目范围 | `ProjectRecord.project_id` | 所有更新、删除、报告操作校验项目归属 |
-| 锁定状态 | `ProjectRecord.locked` | 锁定记录不可编辑、删除或导入覆盖 |
-| 底色 | `ProjectRecord.highlight_color` | Univer 原生 Fill color 产生十六进制颜色；空值表示清除底色 |
-| 实验编号 | `ProjectRecord.experiment_number` | 编排完成后由批量接口回写 |
+| 第 0 行 | 字段 label | 冻结表头，不作为记录 |
+| 第 `index + 1` 行 | `ProjectRecord.id` | 通过当前 props 行数组映射，不能持久化为主键 |
+| 第 `columnIndex` 列 | `FieldDefinition.id` | 通过字段 ID 保存，不使用表头文字作唯一标识 |
+| 行底色 | `ProjectRecord.highlight_color` | 十六进制色值；空值表示清除 |
+| 锁定行 | `ProjectRecord.locked` | 前端恢复本地编辑，后端继续强制校验 |
+| 实验编号 | `experiment_number` | 实验编排页面完成后通过既有 API 回写 |
 
-## 列映射
+## 编辑与同步
 
-| Univer 信息 | 业务字段 | 备注 |
-| --- | --- | --- |
-| 列索引 | `FieldDefinition.id` | 不使用列标题作为唯一标识 |
-| 系统字段 | `pathology_number`、`status`、`experiment_date` 等 | 通过固定 system key 映射 |
-| 自定义字段 | `RecordValue.field_id` + `value_text` | 保存时提交字段 ID 和规范化文本 |
-| 字段类型 | `text`、`number`、`date`、`select` | 下拉、日期和数字校验由数据契约统一转换 |
+1. `FWorkbook.onSelectionChange` 将当前 range 的数据行去重后发出 `selection-change`。
+2. `SheetValueChanged` 读取受影响 FRange 的值，按行列映射发出 `cell-change`。
+3. `LedgerView` 对普通记录调用 `updateRecord`；草稿行先走既有创建逻辑；锁定行恢复原值。
+4. 服务端返回规范化记录后重新写回 workbook，避免只相信本地值。
+5. 复制、粘贴、撤销和重做都由 Univer 产生值变化事件；数据库记录删除仍由业务工具栏确认后调用删除 API。
 
-## 编辑、粘贴与底色
+## 底色与列宽
 
-1. `SheetEditEnded` 产生单元格修改时，先根据行列映射取得 record ID 和 field ID。
-2. 单个单元格调用记录更新接口，并处理锁定、冲突和错误提示。
-3. 多单元格粘贴先解析为二维值，再按记录 ID 聚合，调用批量导入提交接口。
-4. 保存成功后重新应用服务端规范化值，不能只相信工作簿本地值。
-5. 删除记录必须弹出业务确认，并调用记录删除接口；不得用普通 `deleteCells` 代替。
-6. 用户对选区使用 Univer 的 Fill color 或清除底色命令后，监听对应的范围/命令事件，把最终颜色写回所选记录的 `highlight_color`；重新打开项目时再由该字段恢复 cell style。
-7. 不再维护独立的旧版底色弹窗或旧表格底色 CSS；Univer 工具栏的标准色、主题色和清除色作为唯一前端入口。
+- 用户使用 Univer 原生 Fill color 或清除底色命令。
+- `onCommandExecuted` 读取命令范围，将颜色和记录 ID 发给 `setRecordsHighlight`；后端返回值再同步回工作簿。
+- 用户拖动列边界或设置列宽时，组件发出 `column-resize`，由项目字段 API 持久化 `width`。
+- 旧的自定义颜色面板、底色 CSS、输入框宽高和行距设置不再参与渲染。
 
-## 导出契约
+## 导入导出与业务操作
 
-手动导出仍使用现有 `WorkbookSheet` 结构：`name`、`headers`、`rows` 和隐藏列信息。表格内的导出动作通过 Univer API 获取 workbook/snapshot，再交给测试环境的后端或现有桌面保存桥生成文件；当前业务数据库不参与导出测试写入。
-
-## 限制
-
-- 首版沿用现有导入文件大小、字段数量和记录数量限制。
-- 超大数据集应分页加载或使用虚拟化，不把所有项目数据无条件复制到浏览器内存。
-- 所有批量请求都应记录失败行和服务端错误，支持重试而不是静默丢失。
+Excel 导入预览/提交、手动导出、报告打印、自动导出和实验编号回写继续使用现有业务 API；这些功能不把 Univer 行号写入数据库，也不改变 `project_id` 隔离规则。

@@ -28,7 +28,7 @@ Electron 负责桌面边界和文件对话框，Vue 前端只通过 HTTP API 和
 |---|---|
 | 桌面容器 | Electron 43、electron-builder、NSIS |
 | 前端 | Vue 3、TypeScript、Vite 7、Pinia、Vue Router |
-| UI | Element Plus、Tailwind CSS 4（未启用 Preflight） |
+| UI | Element Plus、Tailwind CSS 4（未启用 Preflight）；台账主表格使用 Univer 0.25.1 |
 | 后端 | Python 3.13、FastAPI、Uvicorn、Pydantic v2 |
 | 持久化 | SQLAlchemy 2、SQLite、Alembic |
 | Excel | 标准库 `zipfile`/XML 的 XLSX 读取与写入 |
@@ -151,17 +151,18 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 ```powershell
 cd backend
 uv run ruff check .
-uv run pytest
+uv run pytest --basetemp=..\\.pytest-tmp\\backend
 
 cd ../frontend
 npm run typecheck
-npm run test
+npm run test -- --run
 npm run build
+npm run desktop:package
 ```
 
 后端测试覆盖 API、自动导出、桌面 launcher、DOCX 模板和现代前端集成；前端测试覆盖客户端、报告 API、病理号排序、实验 API 和数据操作 API。Electron JavaScript 可用 `node --check` 做语法检查。
 
-`.github/workflows/windows-release.yml` 使用 Nuitka 构建 Python sidecar，`.github/workflows/windows-pyinstaller.yml` 使用 PyInstaller；两条流水线都将 sidecar 放入 Electron `extraResources/backend`，再由 electron-builder 生成 NSIS 安装包。除 CI 外，不在本机执行 Nuitka、PyInstaller 或安装包构建。
+`.github/workflows/windows-release.yml` 使用 Nuitka 构建 Python sidecar，`.github/workflows/windows-pyinstaller.yml` 使用 PyInstaller；两条流水线都将 sidecar 放入 Electron `extraResources/backend`，再由 electron-builder 生成 NSIS 安装包。本机打包时使用同样的 sidecar 目录布局。
 
 ## 10. 代码位置索引
 
@@ -186,5 +187,6 @@ backend/desktop/launcher.py             桌面 sidecar 入口
 frontend/electron/main.cjs              Electron 生命周期与原生对话框
 frontend/electron/preload.cjs           IPC 白名单桥接
 frontend/src/router/index.ts            页面路由
+frontend/src/components/UniverLedgerGrid.vue Univer 台账 workbook 与 API 映射
 frontend/src/views/                    各业务页面
 ```

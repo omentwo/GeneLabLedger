@@ -6,7 +6,7 @@
 |---|---|
 | 桌面容器 | Electron、Electron Builder |
 | 前端框架 | Vue 3、TypeScript、Vite |
-| UI 与样式 | Element Plus、Tailwind CSS |
+| UI 与样式 | Element Plus、Tailwind CSS；台账主表格使用 Univer 0.25.1 |
 | 前端状态与路由 | Pinia、Vue Router |
 | 后端框架 | Python 3.13、FastAPI、Uvicorn |
 | 数据校验 | Pydantic |

@@ -22,6 +22,7 @@ frontend/*.tsbuildinfo
 
 # Desktop packaging output
 .pytest-temp/
+.pytest-tmp/
 build/
 dist/
 installer-output/
