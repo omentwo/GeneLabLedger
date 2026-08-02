@@ -39,7 +39,7 @@ export const DEFAULT_LEDGER_DISPLAY_SETTINGS = {
 
 export const DEFAULT_LEDGER_SHORTCUT_SETTINGS = {
   navigation: ["Alt"],
-  extendSelection: ["Alt", "Shift"],
+  extendSelection: ["Control", "Shift"],
 } as const;
 
 export function normalizeLedgerDisplaySettings(value: unknown): LedgerDisplaySettings {
