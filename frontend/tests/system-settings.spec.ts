@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   DEFAULT_LEDGER_DISPLAY_SETTINGS,
+  DEFAULT_LEDGER_SHORTCUT_SETTINGS,
   normalizeLedgerDisplaySettings,
+  normalizeLedgerShortcutSettings,
 } from "@/api/system";
 
 describe("ledger display settings", () => {
@@ -31,6 +33,24 @@ describe("ledger display settings", () => {
       rowPaddingY: 0,
       editorWidthPercent: 92,
       editorHeightPercent: 100,
+    });
+  });
+});
+
+describe("ledger shortcut settings", () => {
+  it("falls back to default modifier combinations", () => {
+    expect(normalizeLedgerShortcutSettings(null)).toEqual(DEFAULT_LEDGER_SHORTCUT_SETTINGS);
+  });
+
+  it("keeps supported modifiers in a stable order", () => {
+    expect(
+      normalizeLedgerShortcutSettings({
+        navigation: ["Shift", "Alt", "Shift", "unknown"],
+        extendSelection: ["CapsLock", "Control"],
+      }),
+    ).toEqual({
+      navigation: ["Alt", "Shift"],
+      extendSelection: ["Control", "CapsLock"],
     });
   });
 });

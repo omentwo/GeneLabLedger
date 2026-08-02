@@ -29,10 +29,14 @@ import { useRoute, useRouter } from "vue-router";
 import { commitWorkbookImport, previewWorkbookImport } from "@/api/imports";
 import {
   DEFAULT_LEDGER_DISPLAY_SETTINGS,
+  DEFAULT_LEDGER_SHORTCUT_SETTINGS,
   LEDGER_DISPLAY_SETTINGS_KEY,
+  LEDGER_SHORTCUT_SETTINGS_KEY,
   getSetting,
   normalizeLedgerDisplaySettings,
+  normalizeLedgerShortcutSettings,
   type LedgerDisplaySettings,
+  type LedgerShortcutSettings,
 } from "@/api/system";
 import {
   assignRecordProject,
@@ -75,8 +79,13 @@ const selectedRecords = ref<ProjectRecord[]>([]);
 const ledgerDisplaySettings = ref<LedgerDisplaySettings>({
   ...DEFAULT_LEDGER_DISPLAY_SETTINGS,
 });
+const ledgerShortcutSettings = ref<LedgerShortcutSettings>({
+  navigation: [...DEFAULT_LEDGER_SHORTCUT_SETTINGS.navigation],
+  extendSelection: [...DEFAULT_LEDGER_SHORTCUT_SETTINGS.extendSelection],
+});
 const selectionStartDate = ref("");
 const selectionEndDate = ref("");
+const ledgerTableCardRef = ref<HTMLElement | null>(null);
 const tableRef = ref<{
   clearSelection: () => void;
   doLayout: () => void;
@@ -84,6 +93,11 @@ const tableRef = ref<{
   toggleAllSelection: () => void;
   toggleRowSelection: (row: LedgerRow, selected?: boolean) => void;
 } | null>(null);
+type GridCellPosition = { rowIndex: number; columnIndex: number };
+type GridCellRange = { anchor: GridCellPosition; focus: GridCellPosition };
+const activeGridCell = ref<GridCellPosition | null>(null);
+const gridCellRange = ref<GridCellRange | null>(null);
+let suppressGridFocusReset = false;
 type SelectionRowInfo = {
   row: LedgerRow;
   index: number;
@@ -283,6 +297,291 @@ const importHasErrors = computed(
 
 function isDraft(record: LedgerRow): boolean {
   return record._draft === true;
+}
+
+function gridCellFromElement(element: EventTarget | null): GridCellPosition | null {
+  if (!(element instanceof Element)) return null;
+  const editor = element.closest<HTMLElement>("[data-row-id][data-field-index]");
+  const cell = element.closest("td.ledger-editor-column");
+  if (!editor || !cell) return null;
+  const rowId = editor.dataset.rowId;
+  const columnIndex = Number(editor.dataset.fieldIndex);
+  if (!rowId || !Number.isInteger(columnIndex) || columnIndex < 0) return null;
+  const rowIndex = tableRows.value.findIndex((row) => row.id === rowId);
+  if (rowIndex < 0 || columnIndex >= fields.value.length) return null;
+  return { rowIndex, columnIndex };
+}
+
+function clampGridCell(position: GridCellPosition): GridCellPosition {
+  return {
+    rowIndex: Math.max(0, Math.min(tableRows.value.length - 1, position.rowIndex)),
+    columnIndex: Math.max(0, Math.min(fields.value.length - 1, position.columnIndex)),
+  };
+}
+
+function moveGridCell(position: GridCellPosition, rowDelta: number, columnDelta: number): GridCellPosition {
+  return clampGridCell({
+    rowIndex: position.rowIndex + rowDelta,
+    columnIndex: position.columnIndex + columnDelta,
+  });
+}
+
+function normalizedGridRange(range: GridCellRange): {
+  rowStart: number;
+  rowEnd: number;
+  columnStart: number;
+  columnEnd: number;
+} {
+  return {
+    rowStart: Math.min(range.anchor.rowIndex, range.focus.rowIndex),
+    rowEnd: Math.max(range.anchor.rowIndex, range.focus.rowIndex),
+    columnStart: Math.min(range.anchor.columnIndex, range.focus.columnIndex),
+    columnEnd: Math.max(range.anchor.columnIndex, range.focus.columnIndex),
+  };
+}
+
+const gridCellClassName = computed(() => {
+  const currentRows = tableRows.value;
+  const currentFields = fields.value;
+  const range = gridCellRange.value;
+  const normalizedRange = range ? normalizedGridRange(range) : null;
+  const active = activeGridCell.value;
+  return ({ row, columnIndex }: { row: LedgerRow; columnIndex: number }): string => {
+    const fieldIndex = columnIndex - 2;
+    if (fieldIndex < 0 || fieldIndex >= currentFields.length) return "";
+    const rowIndex = currentRows.findIndex((candidate) => candidate.id === row.id);
+    if (rowIndex < 0) return "";
+    const classes: string[] = [];
+    if (
+      normalizedRange &&
+      rowIndex >= normalizedRange.rowStart &&
+      rowIndex <= normalizedRange.rowEnd &&
+      fieldIndex >= normalizedRange.columnStart &&
+      fieldIndex <= normalizedRange.columnEnd
+    ) {
+      classes.push("grid-cell-selected");
+    }
+    if (active?.rowIndex === rowIndex && active.columnIndex === fieldIndex) {
+      classes.push("grid-cell-active");
+    }
+    return classes.join(" ");
+  };
+});
+
+function gridEditorRoot(position: GridCellPosition): HTMLElement | null {
+  const root = ledgerTableCardRef.value;
+  if (!root) return null;
+  const rowId = tableRows.value[position.rowIndex]?.id;
+  if (!rowId) return null;
+  const fieldIndex = String(position.columnIndex);
+  return (
+    [...root.querySelectorAll<HTMLElement>("[data-row-id][data-field-index]")].find(
+      (element) =>
+        element.dataset.rowId === rowId && element.dataset.fieldIndex === fieldIndex,
+    ) ?? null
+  );
+}
+
+async function focusGridCell(position: GridCellPosition): Promise<void> {
+  if (!tableRows.value.length || !fields.value.length) return;
+  const nextPosition = clampGridCell(position);
+  activeGridCell.value = nextPosition;
+  suppressGridFocusReset = true;
+  await nextTick();
+  const editor = gridEditorRoot(nextPosition);
+  const focusTarget =
+    editor?.matches("input, textarea, button, [tabindex]")
+      ? editor
+      : editor?.querySelector<HTMLElement>(
+          "input:not([type='date']), textarea, button, [tabindex]:not([tabindex='-1'])",
+        );
+  if (focusTarget) {
+    focusTarget.focus({ preventScroll: true });
+    editor?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+  window.setTimeout(() => {
+    suppressGridFocusReset = false;
+  }, 0);
+}
+
+function shortcutModifierIsActive(event: KeyboardEvent, modifier: string): boolean {
+  if (modifier === "Alt") return event.altKey;
+  if (modifier === "Shift") return event.shiftKey;
+  if (modifier === "Control") return event.ctrlKey;
+  if (modifier === "Meta") return event.metaKey;
+  if (modifier === "CapsLock") return event.getModifierState("CapsLock");
+  return false;
+}
+
+function matchesGridShortcut(event: KeyboardEvent, modifiers: readonly string[]): boolean {
+  if (!event.key.startsWith("Arrow") || !modifiers.length) return false;
+  const required = new Set(modifiers);
+  for (const modifier of ["Alt", "Shift", "Control", "Meta"]) {
+    if (shortcutModifierIsActive(event, modifier) !== required.has(modifier)) return false;
+  }
+  if (shortcutModifierIsActive(event, "CapsLock") !== required.has("CapsLock")) return false;
+  return true;
+}
+
+function gridArrowDelta(key: string): { rowDelta: number; columnDelta: number } | null {
+  if (key === "ArrowUp") return { rowDelta: -1, columnDelta: 0 };
+  if (key === "ArrowDown") return { rowDelta: 1, columnDelta: 0 };
+  if (key === "ArrowLeft") return { rowDelta: 0, columnDelta: -1 };
+  if (key === "ArrowRight") return { rowDelta: 0, columnDelta: 1 };
+  return null;
+}
+
+function textareaOwnsArrowKey(event: KeyboardEvent): boolean {
+  const target = event.target;
+  if (!(target instanceof HTMLTextAreaElement)) return false;
+  if (event.altKey || event.ctrlKey || event.metaKey) return false;
+  const cursor = target.selectionStart;
+  if (cursor === null) return false;
+  if (event.key === "ArrowUp") return target.value.slice(0, cursor).includes("\n");
+  if (event.key === "ArrowDown") return target.value.slice(cursor).includes("\n");
+  return false;
+}
+
+function selectOwnsArrowKey(event: KeyboardEvent): boolean {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target?.closest(".el-select")) return false;
+  const dropdown = document.querySelector<HTMLElement>(".el-select-dropdown");
+  return Boolean(dropdown && dropdown.getBoundingClientRect().height > 0);
+}
+
+function handleGridFocusIn(event: FocusEvent): void {
+  const cell = gridCellFromElement(event.target);
+  if (!cell) return;
+  activeGridCell.value = cell;
+  if (!suppressGridFocusReset) gridCellRange.value = null;
+}
+
+function handleGridPointerDown(event: PointerEvent): void {
+  const cell = gridCellFromElement(event.target);
+  if (!cell) return;
+  activeGridCell.value = cell;
+  gridCellRange.value = null;
+}
+
+function extendGridSelection(cell: GridCellPosition, delta: { rowDelta: number; columnDelta: number }): void {
+  const currentRange = gridCellRange.value;
+  const anchor = currentRange?.anchor ?? cell;
+  const focus = moveGridCell(currentRange?.focus ?? cell, delta.rowDelta, delta.columnDelta);
+  gridCellRange.value = { anchor: { ...anchor }, focus: { ...focus } };
+  void focusGridCell(focus);
+}
+
+function handleGridKeydown(event: KeyboardEvent): void {
+  if (event.isComposing) return;
+  const cell = gridCellFromElement(event.target);
+  if (!cell) return;
+  activeGridCell.value = cell;
+
+  if (
+    gridCellRange.value &&
+    (event.key === "Delete" || event.key === "Backspace")
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    void clearGridCellRange();
+    return;
+  }
+
+  const delta = gridArrowDelta(event.key);
+  if (!delta || textareaOwnsArrowKey(event) || selectOwnsArrowKey(event)) return;
+  if (matchesGridShortcut(event, ledgerShortcutSettings.value.extendSelection)) {
+    event.preventDefault();
+    event.stopPropagation();
+    extendGridSelection(cell, delta);
+    return;
+  }
+  if (matchesGridShortcut(event, ledgerShortcutSettings.value.navigation)) {
+    event.preventDefault();
+    event.stopPropagation();
+    gridCellRange.value = null;
+    void focusGridCell(moveGridCell(cell, delta.rowDelta, delta.columnDelta));
+  }
+}
+
+function handleGridCopy(event: ClipboardEvent): void {
+  const range = gridCellRange.value;
+  if (!range) return;
+  const normalized = normalizedGridRange(range);
+  const matrix: string[] = [];
+  for (let rowIndex = normalized.rowStart; rowIndex <= normalized.rowEnd; rowIndex += 1) {
+    const row = tableRows.value[rowIndex];
+    if (!row) continue;
+    const values: string[] = [];
+    for (
+      let columnIndex = normalized.columnStart;
+      columnIndex <= normalized.columnEnd;
+      columnIndex += 1
+    ) {
+      const field = fields.value[columnIndex];
+      values.push(field ? valueFor(row, field) : "");
+    }
+    matrix.push(values.join("\t"));
+  }
+  event.clipboardData?.setData("text/plain", matrix.join("\n"));
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function handleGridPaste(event: ClipboardEvent): void {
+  const range = gridCellRange.value;
+  const text = event.clipboardData?.getData("text/plain") ?? "";
+  if (!range || !text) return;
+  const normalized = normalizedGridRange(range);
+  event.preventDefault();
+  event.stopPropagation();
+  void pasteGrid(event, normalized.rowStart, normalized.columnStart).then(() => {
+    gridCellRange.value = null;
+    void focusGridCell({ rowIndex: normalized.rowStart, columnIndex: normalized.columnStart });
+  });
+}
+
+async function clearGridCellRange(): Promise<void> {
+  const range = gridCellRange.value;
+  if (!range) return;
+  const normalized = normalizedGridRange(range);
+  let cleared = 0;
+  let skippedLocked = 0;
+  let skippedRequired = 0;
+  for (let rowIndex = normalized.rowStart; rowIndex <= normalized.rowEnd; rowIndex += 1) {
+    for (
+      let columnIndex = normalized.columnStart;
+      columnIndex <= normalized.columnEnd;
+      columnIndex += 1
+    ) {
+      const record = tableRows.value[rowIndex];
+      const field = fields.value[columnIndex];
+      if (!record || !field) continue;
+      if (record.locked) {
+        skippedLocked += 1;
+        continue;
+      }
+      if (field.system_key === "pathology_number" || field.system_key === "status") {
+        skippedRequired += 1;
+        continue;
+      }
+      if (!valueFor(record, field)) continue;
+      setValue(record, field, "");
+      await saveField(record, field);
+      cleared += 1;
+    }
+  }
+  gridCellRange.value = null;
+  activeGridCell.value = {
+    rowIndex: normalized.rowStart,
+    columnIndex: normalized.columnStart,
+  };
+  void focusGridCell({
+    rowIndex: normalized.rowStart,
+    columnIndex: normalized.columnStart,
+  });
+  if (cleared) ElMessage.success(`已清空 ${cleared} 个单元格`);
+  if (skippedLocked) ElMessage.info(`已跳过 ${skippedLocked} 个锁定单元格`);
+  if (skippedRequired) ElMessage.info(`已跳过 ${skippedRequired} 个必填状态单元格`);
 }
 
 function selectionRowFromElement(element: Element | null): SelectionRowInfo | null {
@@ -814,6 +1113,15 @@ async function loadLedgerDisplaySettings(): Promise<void> {
   }
 }
 
+async function loadLedgerShortcutSettings(): Promise<void> {
+  try {
+    const result = await getSetting<Partial<LedgerShortcutSettings>>(LEDGER_SHORTCUT_SETTINGS_KEY);
+    ledgerShortcutSettings.value = normalizeLedgerShortcutSettings(result.value);
+  } catch (error) {
+    ElMessage.warning(error instanceof Error ? error.message : "台账快捷键设置读取失败");
+  }
+}
+
 async function loadRecords(
   projectId = activeProjectId.value,
   options: { showLoading?: boolean } = {},
@@ -1143,20 +1451,6 @@ async function updateSelectedLock(locked: boolean): Promise<void> {
   }
 }
 
-function generateSelectedReports(): void {
-  if (!selectedRecords.value.length) {
-    ElMessage.warning("请先勾选需要打印报告的记录");
-    return;
-  }
-  void router.push({
-    path: "/reports",
-    query: {
-      project: activeProjectId.value,
-      records: selectedRecords.value.map((record) => record.id).join(","),
-    },
-  });
-}
-
 async function updateSelectedReportStatus(reportGenerated: boolean): Promise<void> {
   const targets = selectedRecords.value.filter((record) => !record.locked);
   if (!targets.length) {
@@ -1477,6 +1771,8 @@ watch(
 
 watch(activeProjectId, async (projectId, previousProjectId) => {
   if (!ledgerInitialized || !projectId || projectId === previousProjectId) return;
+  activeGridCell.value = null;
+  gridCellRange.value = null;
   draftRows.value = [];
   selectedRecords.value = [];
   selectionStartDate.value = "";
@@ -1522,12 +1818,15 @@ async function initializeLedger(): Promise<void> {
 onMounted(() => {
   document.addEventListener("click", handleSelectionClickCapture, true);
   void loadLedgerDisplaySettings();
+  void loadLedgerShortcutSettings();
   void initializeLedger();
 });
 
 onBeforeUnmount(() => {
   document.removeEventListener("click", handleSelectionClickCapture, true);
   stopSelectionDrag();
+  activeGridCell.value = null;
+  gridCellRange.value = null;
   bottomScrollTimers.forEach((timer) => window.clearTimeout(timer));
   bottomScrollTimers = [];
 });
@@ -1625,8 +1924,10 @@ onBeforeUnmount(() => {
 
     <section class="selection-bar">
       <strong>已选 {{ selectedCount }} 条</strong>
-      <el-button @click="selectAllVisible">全选</el-button>
-      <el-button @click="invertVisibleSelection">反选</el-button>
+      <div class="selection-quick-actions" aria-label="快速选择">
+        <el-button @click="selectAllVisible">全选</el-button>
+        <el-button @click="invertVisibleSelection">反选</el-button>
+      </div>
       <EditableDateInput
         v-model="selectionStartDate"
         class="selection-date"
@@ -1640,10 +1941,10 @@ onBeforeUnmount(() => {
       />
       <el-button @click="selectByDateRange">按日期范围选择</el-button>
       <el-button @click="updateSelectedStatus('已完成')">
-        标记已完成
+        已完成
       </el-button>
       <el-button @click="updateSelectedStatus('待实验')">
-        标记待实验
+        待实验
       </el-button>
       <el-button
         :icon="Brush"
@@ -1662,19 +1963,16 @@ onBeforeUnmount(() => {
         清除底色
       </el-button>
       <el-button :icon="Lock" @click="updateSelectedLock(true)">
-        锁定所选
+        锁定
       </el-button>
       <el-button :icon="Unlock" @click="updateSelectedLock(false)">
-        解锁所选
-      </el-button>
-      <el-button :icon="Document" @click="generateSelectedReports">
-        打印报告
+        解锁
       </el-button>
       <el-button @click="updateSelectedReportStatus(true)">
-        标记已生成报告
+        已生成报告
       </el-button>
       <el-button @click="updateSelectedReportStatus(false)">
-        恢复未生成报告
+        待生成报告
       </el-button>
       <el-button
         type="danger"
@@ -1689,7 +1987,15 @@ onBeforeUnmount(() => {
       </el-button>
     </section>
 
-    <section class="page-card ledger-table-card">
+    <section
+      ref="ledgerTableCardRef"
+      class="page-card ledger-table-card"
+      @pointerdown.capture="handleGridPointerDown"
+      @focusin.capture="handleGridFocusIn"
+      @keydown.capture="handleGridKeydown"
+      @copy.capture="handleGridCopy"
+      @paste.capture="handleGridPaste"
+    >
       <el-table
         ref="tableRef"
         :class="{ 'selection-dragging': selectionDragging }"
@@ -1709,6 +2015,7 @@ onBeforeUnmount(() => {
         :row-class-name="rowClassName"
         :row-style="rowStyle"
         :cell-style="rowCellStyle"
+        :cell-class-name="gridCellClassName"
         @selection-change="selectedRecords = $event"
         @pointerdown="handleSelectionPointerDown"
         @header-dragend="handleHeaderResize"
@@ -1744,6 +2051,8 @@ onBeforeUnmount(() => {
               v-if="field.data_type === 'date' || field.system_key === 'experiment_date'"
               class="cell-field"
               :class="{ 'cell-field-invalid': fieldErrorFor(row, field) }"
+              :data-row-id="row.id"
+              :data-field-index="columnIndex"
             >
               <EditableDateInput
                 :model-value="valueFor(row, field)"
@@ -1758,6 +2067,8 @@ onBeforeUnmount(() => {
             </div>
             <EditableChoiceInput
               v-else-if="field.options.length || field.data_type === 'select'"
+              :data-row-id="row.id"
+              :data-field-index="columnIndex"
               :model-value="valueFor(row, field)"
               :options="fieldOptions(field)"
               :readonly="row.locked"
@@ -1767,6 +2078,8 @@ onBeforeUnmount(() => {
             />
             <el-input
               v-else-if="!field.is_core"
+              :data-row-id="row.id"
+              :data-field-index="columnIndex"
               type="textarea"
               :autosize="{ minRows: 1, maxRows: 5 }"
               resize="none"
@@ -1779,6 +2092,8 @@ onBeforeUnmount(() => {
             />
             <el-input
               v-else
+              :data-row-id="row.id"
+              :data-field-index="columnIndex"
               :model-value="valueFor(row, field)"
               :readonly="row.locked"
               :inputmode="field.data_type === 'number' ? 'decimal' : undefined"
@@ -2379,6 +2694,16 @@ onBeforeUnmount(() => {
   font-size: 13px;
 }
 
+.selection-quick-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.selection-quick-actions > :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
 .selection-drag-hint {
   color: var(--app-muted);
   font-size: 12px;
@@ -2523,6 +2848,21 @@ onBeforeUnmount(() => {
 :deep(.el-table .highlighted-row .el-select__wrapper),
 :deep(.el-table .highlighted-row .el-textarea__inner) {
   background-color: var(--record-highlight-color);
+}
+
+:deep(.el-table td.grid-cell-selected) {
+  background: #eaf3ff !important;
+  box-shadow: inset 0 0 0 1px #93c5fd;
+}
+
+:deep(.el-table td.grid-cell-selected .el-input__wrapper),
+:deep(.el-table td.grid-cell-selected .el-select__wrapper),
+:deep(.el-table td.grid-cell-selected .el-textarea__inner) {
+  background-color: #eaf3ff !important;
+}
+
+:deep(.el-table td.grid-cell-active) {
+  box-shadow: inset 0 0 0 2px var(--app-primary);
 }
 
 :deep(.el-table .el-textarea__inner) {

@@ -4,6 +4,8 @@ import {
   Clock,
   DataAnalysis,
   Document,
+  Expand,
+  Fold,
   List,
   Notebook,
   Setting,
@@ -21,7 +23,10 @@ const isDesktop = computed(() => Boolean(bridge));
 const alwaysOnTop = ref(false);
 const isMaximized = ref(false);
 const windowControlBusy = ref(false);
+const isSidebarCollapsed = ref(false);
 let removeWindowStateListener: (() => void) | undefined;
+
+const SIDEBAR_COLLAPSED_STORAGE_KEY = "gene-lab-ledger.sidebar-collapsed";
 
 const navigation = [
   { to: "/dashboard", label: "统计面板", icon: DataAnalysis },
@@ -86,7 +91,28 @@ async function closeWindow(): Promise<void> {
   }
 }
 
+function restoreSidebarState(): void {
+  try {
+    isSidebarCollapsed.value = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === "true";
+  } catch {
+    // localStorage can be unavailable in a restricted browser context.
+  }
+}
+
+function toggleSidebar(): void {
+  isSidebarCollapsed.value = !isSidebarCollapsed.value;
+  try {
+    window.localStorage.setItem(
+      SIDEBAR_COLLAPSED_STORAGE_KEY,
+      String(isSidebarCollapsed.value),
+    );
+  } catch {
+    // The sidebar still toggles for this session when persistence is unavailable.
+  }
+}
+
 onMounted(() => {
+  restoreSidebarState();
   void appStore.bootstrap();
   if (!bridge) return;
   void syncWindowState();
@@ -103,7 +129,10 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app-shell bg-slate-50 text-slate-900">
+  <div
+    class="app-shell bg-slate-50 text-slate-900"
+    :class="{ 'sidebar-collapsed': isSidebarCollapsed }"
+  >
     <header class="window-titlebar" aria-label="窗口标题栏">
       <div class="window-titlebar-drag" @dblclick="toggleMaximize">
         <svg class="window-titlebar-mark" viewBox="0 0 64 64" aria-hidden="true">
@@ -164,8 +193,26 @@ onBeforeUnmount(() => {
     </header>
 
     <div class="app-content">
-      <aside class="app-sidebar flex flex-col border-r border-slate-200 bg-white px-2.5 py-3 shadow-[1px_0_0_rgba(15,23,42,0.02)]">
-        <div class="flex min-h-16 items-center gap-3 px-3 pb-4">
+      <aside
+        class="app-sidebar flex flex-col border-r border-slate-200 bg-white px-2.5 py-3 shadow-[1px_0_0_rgba(15,23,42,0.02)]"
+        :class="{ 'is-collapsed': isSidebarCollapsed }"
+      >
+        <div class="sidebar-brand">
+          <button
+            class="sidebar-toggle"
+            type="button"
+            :aria-expanded="!isSidebarCollapsed"
+            aria-controls="primary-navigation"
+            :aria-label="isSidebarCollapsed ? '展开侧边栏' : '收起侧边栏'"
+            :title="isSidebarCollapsed ? '展开侧边栏' : '收起侧边栏'"
+            @click="toggleSidebar"
+          >
+            <el-icon aria-hidden="true">
+              <Expand v-if="isSidebarCollapsed" />
+              <Fold v-else />
+            </el-icon>
+          </button>
+
           <svg
             class="size-8 shrink-0"
             viewBox="0 0 64 64"
@@ -178,30 +225,35 @@ onBeforeUnmount(() => {
             <circle cx="22" cy="16" r="3" fill="#f59e0b" />
             <circle cx="42" cy="16" r="3" fill="#f59e0b" />
           </svg>
-          <div class="whitespace-nowrap text-[13px] font-bold leading-tight tracking-tight text-slate-900">
+          <div class="sidebar-brand-title whitespace-nowrap text-[13px] font-bold leading-tight tracking-tight text-slate-900">
             基因检测台账
           </div>
         </div>
 
-        <nav class="grid gap-1.5" aria-label="主导航">
+        <nav id="primary-navigation" class="grid gap-1.5" aria-label="主导航">
           <RouterLink
             v-for="item in navigation"
             :key="item.to"
             :to="item.to"
-            class="flex min-h-11 items-center gap-3 rounded-lg px-3 text-sm font-semibold text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 [&.router-link-active]:bg-slate-900 [&.router-link-active]:text-white [&.router-link-active]:shadow-sm"
+            class="sidebar-nav-link flex min-h-11 items-center gap-3 rounded-lg px-3 text-sm font-semibold text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 [&.router-link-active]:bg-blue-50 [&.router-link-active]:text-blue-600"
+            :class="{ 'justify-center px-0': isSidebarCollapsed }"
+            :title="isSidebarCollapsed ? item.label : undefined"
           >
             <el-icon class="text-base"><component :is="item.icon" /></el-icon>
-            <span>{{ item.label }}</span>
+            <span v-if="!isSidebarCollapsed">{{ item.label }}</span>
           </RouterLink>
         </nav>
 
-        <div class="mt-auto flex items-center gap-2 px-3 pt-4 text-xs text-slate-500">
+        <div
+          class="sidebar-status mt-auto flex items-center gap-2 px-3 pt-4 text-xs text-slate-500"
+          :title="isSidebarCollapsed ? (appStore.backendOnline ? '本机后端已连接' : '正在连接后端') : undefined"
+        >
           <span
             class="size-2 rounded-full bg-slate-300"
             :class="appStore.backendOnline ? 'bg-emerald-500 ring-4 ring-emerald-50' : ''"
             aria-hidden="true"
           />
-          <span>{{ appStore.backendOnline ? "本机后端已连接" : "正在连接后端" }}</span>
+          <span v-if="!isSidebarCollapsed">{{ appStore.backendOnline ? "本机后端已连接" : "正在连接后端" }}</span>
         </div>
       </aside>
 
@@ -216,9 +268,16 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .app-shell {
+  --app-sidebar-expanded-width: 196px;
+  --app-sidebar-collapsed-width: 72px;
+  --app-sidebar-current-width: var(--app-sidebar-expanded-width);
   display: flex;
   min-height: 100vh;
   flex-direction: column;
+}
+
+.app-shell.sidebar-collapsed {
+  --app-sidebar-current-width: var(--app-sidebar-collapsed-width);
 }
 
 .window-titlebar {
@@ -318,16 +377,92 @@ onBeforeUnmount(() => {
   display: grid;
   min-height: calc(100vh - 36px);
   flex: 1 0 auto;
-  grid-template-columns: 180px minmax(0, 1fr);
+  grid-template-columns: var(--app-sidebar-current-width) minmax(0, 1fr);
+  transition: grid-template-columns 180ms ease;
 }
 
 .app-sidebar {
   position: sticky;
   top: 36px;
   height: calc(100vh - 36px);
+  min-width: 0;
+  overflow-x: hidden;
+  transition: padding 180ms ease;
+}
+
+.sidebar-brand {
+  display: flex;
+  min-height: 64px;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px 16px;
+}
+
+.sidebar-toggle {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: #667085;
+  cursor: pointer;
+  outline: none;
+  padding: 0;
+  transition: background-color 150ms ease, color 150ms ease;
+}
+
+.sidebar-toggle:hover,
+.sidebar-toggle:focus-visible {
+  background: #f2f4f7;
+  color: #182230;
+}
+
+.sidebar-toggle .el-icon {
+  font-size: 18px;
+}
+
+.sidebar-nav-link {
+  min-width: 0;
+}
+
+.sidebar-nav-link .el-icon {
+  flex: 0 0 auto;
+}
+
+.sidebar-nav-link span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-sidebar.is-collapsed .sidebar-brand {
+  justify-content: center;
+  padding-inline: 0;
+}
+
+.app-sidebar.is-collapsed .sidebar-brand > svg,
+.app-sidebar.is-collapsed .sidebar-brand-title {
+  display: none;
+}
+
+.app-sidebar.is-collapsed .sidebar-status {
+  justify-content: center;
+  padding-inline: 0;
+}
+
+.app-sidebar.is-collapsed .sidebar-nav-link {
+  width: 44px;
+  justify-self: center;
 }
 
 @media (max-width: 760px) {
+  .app-shell {
+    --app-sidebar-expanded-width: 168px;
+  }
+
   .window-control {
     width: 40px;
   }
