@@ -15,5 +15,7 @@ contextBridge.exposeInMainWorld("geneLedgerDesktop", {
   chooseDirectory: (initialDirectory) =>
     ipcRenderer.invoke("gene-ledger:choose-directory", initialDirectory),
   changeDataDirectory: () => ipcRenderer.invoke("gene-ledger:change-data-directory"),
+  getAlwaysOnTop: () => ipcRenderer.invoke("gene-ledger:get-always-on-top"),
+  setAlwaysOnTop: (value) => ipcRenderer.invoke("gene-ledger:set-always-on-top", Boolean(value)),
   restart: () => ipcRenderer.invoke("gene-ledger:restart"),
 });

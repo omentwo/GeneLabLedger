@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime, time, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.audit import audit
@@ -17,6 +18,7 @@ from app.schemas import (
     RecordAssignProject,
     RecordCreate,
     RecordExperimentNumberBatch,
+    RecordHighlightUpdate,
     RecordList,
     RecordLockUpdate,
     RecordRead,
@@ -167,19 +169,26 @@ def assign_experiment_numbers(
             detail=f"实验编号已存在：{', '.join(conflict_numbers)}",
         )
     before = {record.id: record.experiment_number for record in ordered}
-    for record in ordered:
-        record.experiment_number = None
-    session.flush()
-    for record, number in zip(ordered, numbers, strict=True):
-        record.experiment_number = number
-        audit(
-            session,
-            "record.experiment_number.update",
-            "project_record",
-            record.id,
-            {"before": before[record.id], "after": number, "source": "experiment_numbering"},
-        )
-    session.commit()
+    try:
+        for record in ordered:
+            record.experiment_number = None
+        session.flush()
+        for record, number in zip(ordered, numbers, strict=True):
+            record.experiment_number = number
+            audit(
+                session,
+                "record.experiment_number.update",
+                "project_record",
+                record.id,
+                {"before": before[record.id], "after": number, "source": "experiment_numbering"},
+            )
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="实验编号已被其他记录占用，请刷新后重试",
+        ) from error
     return [record_dict(require_record(session, record.id, include_values=True)) for record in ordered]
 
 
@@ -203,23 +212,32 @@ def create_record(payload: RecordCreate, session: Session = Depends(get_session)
         status=payload.status,
         experiment_date=payload.experiment_date,
         experiment_number=payload.experiment_number,
+        highlight_color=payload.highlight_color,
     )
-    session.add(record)
-    session.flush()
-    replace_record_values(session, record, payload.values)
-    audit(
-        session,
-        "record.create",
-        "project_record",
-        record.id,
-        {
-            "project_id": record.project_id,
-            "pathology_number": record.pathology_number,
-            "status": record.status,
-            "experiment_number": record.experiment_number,
-        },
-    )
-    session.commit()
+    try:
+        session.add(record)
+        session.flush()
+        replace_record_values(session, record, payload.values)
+        audit(
+            session,
+            "record.create",
+            "project_record",
+            record.id,
+            {
+                "project_id": record.project_id,
+                "pathology_number": record.pathology_number,
+                "status": record.status,
+                "experiment_number": record.experiment_number,
+                "highlight_color": record.highlight_color,
+            },
+        )
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="实验编号已被其他记录占用，请刷新后重试",
+        ) from error
     return record_dict(require_record(session, record.id, include_values=True))
 
 
@@ -237,6 +255,7 @@ def update_record(
         "status": record.status,
         "experiment_date": record.experiment_date.isoformat() if record.experiment_date else None,
         "experiment_number": record.experiment_number,
+        "highlight_color": record.highlight_color,
     }
     if payload.pathology_number is not None:
         record.pathology_number = payload.pathology_number
@@ -254,27 +273,73 @@ def update_record(
         if existing:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="实验编号已存在")
         record.experiment_number = payload.experiment_number or None
+    if "highlight_color" in payload.model_fields_set:
+        record.highlight_color = payload.highlight_color
     if payload.values is not None:
         replace_record_values(session, record, payload.values)
-    audit(
-        session,
-        "record.update",
-        "project_record",
-        record.id,
-        {
-            "before": before,
-            "after": {
-                "pathology_number": record.pathology_number,
-                "status": record.status,
-                "experiment_date": (
-                    record.experiment_date.isoformat() if record.experiment_date else None
-                ),
-                "experiment_number": record.experiment_number,
+    try:
+        audit(
+            session,
+            "record.update",
+            "project_record",
+            record.id,
+            {
+                "before": before,
+                "after": {
+                    "pathology_number": record.pathology_number,
+                    "status": record.status,
+                    "experiment_date": (
+                        record.experiment_date.isoformat() if record.experiment_date else None
+                    ),
+                    "experiment_number": record.experiment_number,
+                    "highlight_color": record.highlight_color,
+                },
             },
-        },
-    )
-    session.commit()
+        )
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="实验编号已被其他记录占用，请刷新后重试",
+        ) from error
     return record_dict(require_record(session, record.id, include_values=True))
+
+
+@router.put("/highlight", response_model=list[RecordRead])
+def update_highlight(
+    payload: RecordHighlightUpdate,
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    record_ids = list(dict.fromkeys(payload.record_ids))
+    records = list(
+        session.scalars(
+            select(ProjectRecord)
+            .where(ProjectRecord.id.in_(record_ids))
+            .options(*record_load_options())
+        )
+    )
+    by_id = {record.id: record for record in records}
+    missing = [record_id for record_id in record_ids if record_id not in by_id]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"部分台账记录不存在：{', '.join(missing)}",
+        )
+    ordered = [by_id[record_id] for record_id in record_ids]
+    for record in ordered:
+        before = record.highlight_color
+        record.highlight_color = payload.highlight_color
+        if before != record.highlight_color:
+            audit(
+                session,
+                "record.highlight.update",
+                "project_record",
+                record.id,
+                {"before": before, "after": record.highlight_color},
+            )
+    session.commit()
+    return [record_dict(require_record(session, record.id, include_values=True)) for record in ordered]
 
 
 @router.put("/report-status", response_model=list[RecordRead])

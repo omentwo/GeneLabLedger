@@ -30,6 +30,7 @@ import type {
   AutoExportTaskInput,
 } from "@/types/api";
 import { chooseNativeDirectory } from "@/utils/desktop";
+import { formatShanghaiDateTime } from "@/utils/datetime";
 
 const appStore = useAppStore();
 const loading = ref(false);
@@ -109,18 +110,6 @@ function resetForm(): void {
   unlimitedRetention.value = false;
   selectedTaskId.value = "";
   runs.value = [];
-}
-
-function formatTime(value: string | null): string {
-  if (!value) return "—";
-  const normalized = /(?:Z|[+-]\d\d:\d\d)$/.test(value) ? value : `${value}Z`;
-  const date = new Date(normalized);
-  return Number.isNaN(date.getTime())
-    ? value
-    : date.toLocaleString("zh-CN", {
-        timeZone: "Asia/Shanghai",
-        hour12: false,
-      });
 }
 
 function projectNames(task: AutoExportTask): string {
@@ -337,7 +326,7 @@ onMounted(() => {
             </div>
             <p>{{ projectNames(task) }}</p>
             <small>{{ scheduleSummary(task) }}</small>
-            <small>下次执行：{{ formatTime(task.next_run_at) }}</small>
+            <small>下次执行：{{ formatShanghaiDateTime(task.next_run_at) }}</small>
           </button>
           <el-empty v-if="!tasks.length" description="还没有自动导出任务" />
         </div>
@@ -532,7 +521,7 @@ onMounted(() => {
         <el-table :data="runs" border max-height="300" empty-text="暂无执行记录">
           <el-table-column label="开始时间" width="175">
             <template #default="{ row }: { row: AutoExportRun }">
-              {{ formatTime(row.started_at) }}
+              {{ formatShanghaiDateTime(row.started_at) }}
             </template>
           </el-table-column>
           <el-table-column label="触发方式" width="100">
@@ -542,8 +531,16 @@ onMounted(() => {
           </el-table-column>
           <el-table-column label="状态" width="95">
             <template #default="{ row }: { row: AutoExportRun }">
-              <el-tag :type="row.status === 'success' ? 'success' : 'danger'">
-                {{ row.status === "success" ? "成功" : "失败" }}
+              <el-tag
+                :type="
+                  row.status === 'success'
+                    ? 'success'
+                    : row.status === 'running'
+                      ? 'warning'
+                      : 'danger'
+                "
+              >
+                {{ row.status === "success" ? "成功" : row.status === "running" ? "执行中" : "失败" }}
               </el-tag>
             </template>
           </el-table-column>

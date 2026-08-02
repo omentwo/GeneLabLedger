@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { commitWorkbookImport, previewWorkbookImport } from "@/api/imports";
-import { executeBulkDelete, previewBulkDelete } from "@/api/records";
+import { executeBulkDelete, previewBulkDelete, setRecordsHighlight } from "@/api/records";
 
 function jsonResponse(payload: unknown): Response {
   return new Response(JSON.stringify(payload), {
@@ -85,6 +85,27 @@ describe("ledger data operation APIs", () => {
     expect(JSON.parse(String((fetchMock.mock.calls[1]![1] as RequestInit).body))).toEqual({
       filter,
       expected_record_ids: ["record-1"],
+    });
+  });
+
+  it("sets or clears a selected records' highlight color", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse([]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await setRecordsHighlight(["record-1", "record-2"], "#FFF2CC");
+    await setRecordsHighlight(["record-1"], null);
+
+    expect(fetchMock.mock.calls[0]![0]).toBe("/api/records/highlight");
+    expect(JSON.parse(String((fetchMock.mock.calls[0]![1] as RequestInit).body))).toEqual({
+      record_ids: ["record-1", "record-2"],
+      highlight_color: "#FFF2CC",
+    });
+    expect(JSON.parse(String((fetchMock.mock.calls[1]![1] as RequestInit).body))).toEqual({
+      record_ids: ["record-1"],
+      highlight_color: null,
     });
   });
 });

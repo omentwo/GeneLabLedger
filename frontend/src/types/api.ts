@@ -46,6 +46,7 @@ export interface ProjectRecord {
   experiment_number: string | null;
   report_generated: boolean;
   locked: boolean;
+  highlight_color: string | null;
   values: Record<string, string>;
   created_at: string;
   updated_at: string;
@@ -64,6 +65,7 @@ export interface RecordCreateInput {
   status: RecordStatus;
   experiment_date: string | null;
   experiment_number?: string | null;
+  highlight_color?: string | null;
   values: Record<string, string>;
 }
 
@@ -72,6 +74,7 @@ export interface RecordUpdateInput {
   status?: RecordStatus;
   experiment_date?: string | null;
   experiment_number?: string | null;
+  highlight_color?: string | null;
   values?: Record<string, string>;
 }
 
@@ -171,6 +174,13 @@ export interface AuditLog {
   entity_id: string | null;
   details: Record<string, unknown>;
   created_at: string;
+}
+
+export interface AuditLogPage {
+  items: AuditLog[];
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 export interface HealthStatus {

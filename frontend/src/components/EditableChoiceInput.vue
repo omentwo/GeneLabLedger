@@ -39,7 +39,6 @@ function commit(value: string): void {
     default-first-option
     clearable
     :placeholder="placeholder"
-    @update:model-value="emit('update:modelValue', String($event ?? ''))"
     @change="commit(String($event ?? ''))"
     @paste="emit('paste', $event)"
   >

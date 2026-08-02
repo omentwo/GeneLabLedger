@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import calendar
+import logging
 import re
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -23,11 +24,12 @@ from app.models import (
     RecordValue,
 )
 from app.services.workbooks import write_xlsx
-from app.timezones import ASIA_SHANGHAI
+from app.timezones import ASIA_SHANGHAI, utc_now
 
 LOCAL_TIMEZONE = ASIA_SHANGHAI
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 CRON_FIELD_NAMES = ("分钟", "小时", "日期", "月份", "星期")
+logger = logging.getLogger(__name__)
 
 
 class TaskSchedule(Protocol):
@@ -42,10 +44,6 @@ class TaskSchedule(Protocol):
 
 class AutoExportBusyError(RuntimeError):
     pass
-
-
-def utc_now_naive() -> datetime:
-    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def _parse_cron_field(
@@ -216,9 +214,11 @@ def _next_preset_run(schedule: TaskSchedule, after_local: datetime) -> datetime:
 
 
 def compute_next_run(schedule: TaskSchedule, after_utc: datetime | None = None) -> datetime:
-    reference_utc = after_utc or utc_now_naive()
+    reference_utc = after_utc or utc_now()
     if reference_utc.tzinfo is None:
         reference_utc = reference_utc.replace(tzinfo=UTC)
+    else:
+        reference_utc = reference_utc.astimezone(UTC)
     after_local = reference_utc.astimezone(LOCAL_TIMEZONE)
     if schedule.schedule_type == "cron":
         if not schedule.cron_expression:
@@ -226,7 +226,7 @@ def compute_next_run(schedule: TaskSchedule, after_utc: datetime | None = None) 
         next_local = _next_cron_run(schedule.cron_expression, after_local)
     else:
         next_local = _next_preset_run(schedule, after_local)
-    return next_local.astimezone(UTC).replace(tzinfo=None)
+    return next_local.astimezone(UTC)
 
 
 def validate_output_directory(value: str) -> Path:
@@ -351,7 +351,7 @@ def execute_auto_export_task(database: Database, task_id: str, trigger: str) -> 
                 run = session.get(AutoExportRun, run_id)
                 if not run:
                     raise ValueError("自动导出执行记录不存在")
-                finished_at = utc_now_naive()
+                finished_at = utc_now()
                 run.status = "success"
                 run.attempt_count = attempts
                 run.file_path = str(output_path)
@@ -385,7 +385,7 @@ def execute_auto_export_task(database: Database, task_id: str, trigger: str) -> 
         run = session.get(AutoExportRun, run_id)
         if not task or not run:
             raise last_error or RuntimeError("自动导出执行失败")
-        finished_at = utc_now_naive()
+        finished_at = utc_now()
         message = str(last_error or "未知错误")
         run.status = "failed"
         run.attempt_count = attempts
@@ -426,7 +426,7 @@ class AutoExportScheduler:
             await self._loop_task
 
     def _recover_interrupted_runs(self) -> None:
-        now = utc_now_naive()
+        now = utc_now()
         with self.database.session_factory() as session:
             interrupted = list(
                 session.scalars(select(AutoExportRun).where(AutoExportRun.status == "running"))
@@ -442,7 +442,7 @@ class AutoExportScheduler:
             session.commit()
 
     def _due_task_ids(self) -> list[str]:
-        now = utc_now_naive()
+        now = utc_now()
         with self.database.session_factory() as session:
             return list(
                 session.scalars(
@@ -462,7 +462,7 @@ class AutoExportScheduler:
                     if task_id not in self._running_task_ids:
                         asyncio.create_task(self.run_task(task_id, "scheduled"))
             except Exception:  # noqa: BLE001
-                pass
+                logger.exception("自动导出调度器轮询失败")
             await asyncio.sleep(self.poll_seconds)
 
     async def run_task(self, task_id: str, trigger: str = "manual") -> AutoExportRun:

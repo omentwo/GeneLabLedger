@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
     JSON,
     Boolean,
     Date,
-    DateTime,
     ForeignKey,
     Index,
     Integer,
@@ -18,21 +17,18 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.database import Base
+from app.database import Base, UTCDateTime
+from app.timezones import utc_now
 
 
 def new_uuid() -> str:
     return str(uuid.uuid4())
 
 
-def utc_now() -> datetime:
-    return datetime.now(UTC)
-
-
 class TimestampMixin:
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UTCDateTime(),
         default=utc_now,
         onupdate=utc_now,
         nullable=False,
@@ -125,6 +121,7 @@ class ProjectRecord(Base, TimestampMixin):
     experiment_number: Mapped[str | None] = mapped_column(String(80), nullable=True)
     report_generated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     locked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    highlight_color: Mapped[str | None] = mapped_column(String(7), nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="records")
     values: Mapped[list[RecordValue]] = relationship(
@@ -229,7 +226,7 @@ class AuditLog(Base):
     entity_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
     details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UTCDateTime(),
         default=utc_now,
         nullable=False,
         index=True,
@@ -261,8 +258,8 @@ class AutoExportTask(Base, TimestampMixin):
     failure_retries: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     retention_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
-    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
-    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_run_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, index=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     last_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
     last_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -289,7 +286,7 @@ class AutoExportRun(Base):
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     file_path: Mapped[str | None] = mapped_column(String(900), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
 
     task: Mapped[AutoExportTask] = relationship(back_populates="runs")

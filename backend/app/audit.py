@@ -7,6 +7,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.models import AuditLog
+from app.timezones import utc_now
 
 
 def audit(
@@ -40,7 +41,13 @@ def prune_audit_logs(
     more audit rows and make the retention pass self-defeating.
     """
 
-    current_time = now or datetime.now(UTC)
+    current_time = now or utc_now()
+    if current_time.tzinfo is None:
+        # Older callers may provide a naive UTC value; normalize it at the
+        # boundary so comparisons remain portable across database dialects.
+        current_time = current_time.replace(tzinfo=UTC)
+    else:
+        current_time = current_time.astimezone(UTC)
     cutoff = current_time - timedelta(days=retention_days)
     deleted = (
         session.execute(delete(AuditLog).where(AuditLog.created_at < cutoff)).rowcount or 0

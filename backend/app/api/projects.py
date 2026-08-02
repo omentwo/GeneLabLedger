@@ -61,11 +61,18 @@ def create_project(payload: ProjectCreate, session: Session = Depends(get_sessio
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="项目名称已存在")
     max_order = session.scalar(select(func.max(Project.sort_order))) or -1
     project = Project(name=payload.name, sort_order=max_order + 1)
-    session.add(project)
-    session.flush()
-    add_core_fields(session, project)
-    audit(session, "project.create", "project", project.id, {"name": project.name})
-    session.commit()
+    try:
+        session.add(project)
+        session.flush()
+        add_core_fields(session, project)
+        audit(session, "project.create", "project", project.id, {"name": project.name})
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="项目名称已被其他请求占用，请刷新后重试",
+        ) from error
     return load_project(session, project.id)
 
 
@@ -92,21 +99,28 @@ def update_project(
         project.sort_order = payload.sort_order
     if payload.experiment_enabled is not None:
         project.experiment_enabled = payload.experiment_enabled
-    audit(
-        session,
-        "project.update",
-        "project",
-        project.id,
-        {
-            "before": before,
-            "after": {
-                "name": project.name,
-                "sort_order": project.sort_order,
-                "experiment_enabled": project.experiment_enabled,
+    try:
+        audit(
+            session,
+            "project.update",
+            "project",
+            project.id,
+            {
+                "before": before,
+                "after": {
+                    "name": project.name,
+                    "sort_order": project.sort_order,
+                    "experiment_enabled": project.experiment_enabled,
+                },
             },
-        },
-    )
-    session.commit()
+        )
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="项目名称已被其他请求占用，请刷新后重试",
+        ) from error
     return load_project(session, project.id)
 
 
@@ -168,18 +182,25 @@ def create_field(
         width=payload.width,
         is_core=False,
     )
-    session.add(field)
-    session.flush()
-    for index, value in enumerate(payload.options):
-        session.add(FieldOption(field_id=field.id, value=value, sort_order=index))
-    audit(
-        session,
-        "field.create",
-        "field",
-        field.id,
-        {"project_id": project_id, "label": field.label},
-    )
-    session.commit()
+    try:
+        session.add(field)
+        session.flush()
+        for index, value in enumerate(payload.options):
+            session.add(FieldOption(field_id=field.id, value=value, sort_order=index))
+        audit(
+            session,
+            "field.create",
+            "field",
+            field.id,
+            {"project_id": project_id, "label": field.label},
+        )
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="表头备选项存在重复值，请检查后重试",
+        ) from error
     return session.scalar(
         select(FieldDefinition)
         .where(FieldDefinition.id == field.id)
@@ -260,18 +281,25 @@ def replace_field_options(
             status_code=status.HTTP_409_CONFLICT,
             detail="状态核心字段固定使用“待实验、已完成”",
         )
-    field.options.clear()
-    session.flush()
-    for index, value in enumerate(payload.options):
-        field.options.append(FieldOption(value=value, sort_order=index))
-    audit(
-        session,
-        "field.options.replace",
-        "field",
-        field.id,
-        {"options": payload.options},
-    )
-    session.commit()
+    try:
+        field.options.clear()
+        session.flush()
+        for index, value in enumerate(payload.options):
+            field.options.append(FieldOption(value=value, sort_order=index))
+        audit(
+            session,
+            "field.options.replace",
+            "field",
+            field.id,
+            {"options": payload.options},
+        )
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="备选项存在重复值，请检查后重试",
+        ) from error
     return field
 
 

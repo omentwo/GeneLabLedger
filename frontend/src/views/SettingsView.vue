@@ -1,8 +1,22 @@
 <script setup lang="ts">
 import { FolderOpened, RefreshRight } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { computed, ref } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 
+import {
+  DEFAULT_LEDGER_DISPLAY_SETTINGS,
+  LEDGER_EDITOR_HEIGHT_MIN,
+  LEDGER_EDITOR_SIZE_MAX,
+  LEDGER_EDITOR_SIZE_STEP,
+  LEDGER_EDITOR_WIDTH_MIN,
+  LEDGER_DISPLAY_SETTINGS_KEY,
+  LEDGER_ROW_PADDING_MAX,
+  LEDGER_ROW_PADDING_MIN,
+  getSetting,
+  normalizeLedgerDisplaySettings,
+  putSetting,
+  type LedgerDisplaySettings,
+} from "@/api/system";
 import { desktopBridge } from "@/utils/desktop";
 
 const bridge = desktopBridge();
@@ -10,6 +24,43 @@ const currentDirectory = ref(bridge?.dataDirectory ?? "");
 const pendingDirectory = ref("");
 const changing = ref(false);
 const isDesktop = computed(() => Boolean(bridge));
+const alwaysOnTop = ref(false);
+const alwaysOnTopLoading = ref(false);
+const ledgerDisplaySettings = reactive<LedgerDisplaySettings>({
+  ...DEFAULT_LEDGER_DISPLAY_SETTINGS,
+});
+const ledgerDisplayLoading = ref(false);
+const ledgerDisplaySaving = ref(false);
+
+async function loadLedgerDisplaySettings(): Promise<void> {
+  ledgerDisplayLoading.value = true;
+  try {
+    const result = await getSetting<Partial<LedgerDisplaySettings>>(LEDGER_DISPLAY_SETTINGS_KEY);
+    Object.assign(ledgerDisplaySettings, normalizeLedgerDisplaySettings(result.value));
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "台账显示设置读取失败");
+  } finally {
+    ledgerDisplayLoading.value = false;
+  }
+}
+
+async function saveLedgerDisplaySettings(): Promise<void> {
+  ledgerDisplaySaving.value = true;
+  try {
+    const value = normalizeLedgerDisplaySettings(ledgerDisplaySettings);
+    const result = await putSetting(LEDGER_DISPLAY_SETTINGS_KEY, value);
+    Object.assign(ledgerDisplaySettings, normalizeLedgerDisplaySettings(result.value));
+    ElMessage.success("台账显示设置已保存");
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "台账显示设置保存失败");
+  } finally {
+    ledgerDisplaySaving.value = false;
+  }
+}
+
+function resetLedgerDisplaySettings(): void {
+  Object.assign(ledgerDisplaySettings, DEFAULT_LEDGER_DISPLAY_SETTINGS);
+}
 
 async function changeDataDirectory(): Promise<void> {
   if (!bridge) return;
@@ -45,6 +96,38 @@ async function restartApplication(): Promise<void> {
   if (!bridge) return;
   await bridge.restart();
 }
+
+async function loadAlwaysOnTop(): Promise<void> {
+  if (!bridge) return;
+  alwaysOnTopLoading.value = true;
+  try {
+    alwaysOnTop.value = await bridge.getAlwaysOnTop();
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "置顶状态读取失败");
+  } finally {
+    alwaysOnTopLoading.value = false;
+  }
+}
+
+async function updateAlwaysOnTop(value: string | number | boolean): Promise<void> {
+  if (!bridge) return;
+  const nextValue = Boolean(value);
+  alwaysOnTopLoading.value = true;
+  try {
+    alwaysOnTop.value = await bridge.setAlwaysOnTop(nextValue);
+    ElMessage.success(alwaysOnTop.value ? "窗口已始终保持最顶层" : "已关闭始终保持最顶层");
+  } catch (error) {
+    alwaysOnTop.value = !nextValue;
+    ElMessage.error(error instanceof Error ? error.message : "置顶设置保存失败");
+  } finally {
+    alwaysOnTopLoading.value = false;
+  }
+}
+
+onMounted(() => {
+  void loadLedgerDisplaySettings();
+  void loadAlwaysOnTop();
+});
 </script>
 
 <template>
@@ -95,6 +178,109 @@ async function restartApplication(): Promise<void> {
             @click="restartApplication"
           >
             立即重启并切换
+          </el-button>
+        </div>
+      </div>
+    </section>
+
+    <section class="page-card overflow-hidden">
+      <div class="page-card-header">
+        <div>
+          <h2 class="page-card-title">窗口显示</h2>
+          <p class="page-description">控制应用窗口是否始终显示在其他窗口上方。</p>
+        </div>
+        <el-tag :type="isDesktop ? 'success' : 'info'">
+          {{ isDesktop ? "Electron 可用" : "浏览器模式不可用" }}
+        </el-tag>
+      </div>
+      <div class="flex flex-wrap items-center justify-between gap-4 p-5">
+        <div class="grid gap-1">
+          <span class="text-sm font-semibold text-slate-700">始终保持最顶层</span>
+          <span class="text-xs leading-5 text-slate-500">
+            开启后窗口会保持在其他应用窗口上方，也可以使用 Ctrl+Shift+T 快速切换。
+          </span>
+        </div>
+        <el-switch
+          v-model="alwaysOnTop"
+          :loading="alwaysOnTopLoading"
+          :disabled="!isDesktop"
+          active-text="开启"
+          inactive-text="关闭"
+          @change="updateAlwaysOnTop"
+        />
+      </div>
+    </section>
+
+    <section class="page-card overflow-hidden">
+      <div class="page-card-header">
+        <div>
+          <h2 class="page-card-title">台账显示</h2>
+          <p class="page-description">调整记录之间的间隔，以及输入框在单元格中的宽度和高度。</p>
+        </div>
+        <el-tag type="info">全局设置</el-tag>
+      </div>
+      <div class="grid gap-5 p-5">
+        <div class="grid max-w-2xl gap-2">
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-sm font-semibold text-slate-700">记录之间间距</span>
+            <span class="text-sm text-slate-500">间隔 {{ ledgerDisplaySettings.rowPaddingY }} px</span>
+          </div>
+          <el-slider
+            v-model="ledgerDisplaySettings.rowPaddingY"
+            :min="LEDGER_ROW_PADDING_MIN"
+            :max="LEDGER_ROW_PADDING_MAX"
+            :step="1"
+            :disabled="ledgerDisplayLoading || ledgerDisplaySaving"
+            show-input
+          />
+          <p class="text-xs leading-5 text-slate-500">数值越大，记录之间的空白越大；输入内容会保持垂直居中。</p>
+        </div>
+
+        <div class="grid max-w-4xl gap-5 lg:grid-cols-2">
+          <div class="grid gap-2">
+            <div class="flex items-center justify-between gap-3">
+              <span class="text-sm font-semibold text-slate-700">输入框宽度占比</span>
+              <span class="text-sm text-slate-500">{{ ledgerDisplaySettings.editorWidthPercent }}%</span>
+            </div>
+            <el-slider
+              v-model="ledgerDisplaySettings.editorWidthPercent"
+              :min="LEDGER_EDITOR_WIDTH_MIN"
+              :max="LEDGER_EDITOR_SIZE_MAX"
+              :step="LEDGER_EDITOR_SIZE_STEP"
+              :disabled="ledgerDisplayLoading || ledgerDisplaySaving"
+              show-input
+            />
+            <p class="text-xs leading-5 text-slate-500">控制输入框占当前字段单元格可用宽度的比例。</p>
+          </div>
+
+          <div class="grid gap-2">
+            <div class="flex items-center justify-between gap-3">
+              <span class="text-sm font-semibold text-slate-700">输入框高度占比</span>
+              <span class="text-sm text-slate-500">{{ ledgerDisplaySettings.editorHeightPercent }}%</span>
+            </div>
+            <el-slider
+              v-model="ledgerDisplaySettings.editorHeightPercent"
+              :min="LEDGER_EDITOR_HEIGHT_MIN"
+              :max="LEDGER_EDITOR_SIZE_MAX"
+              :step="LEDGER_EDITOR_SIZE_STEP"
+              :disabled="ledgerDisplayLoading || ledgerDisplaySaving"
+              show-input
+            />
+            <p class="text-xs leading-5 text-slate-500">控制输入框占当前字段单元格可用高度的比例。</p>
+          </div>
+        </div>
+
+        <div class="flex flex-wrap gap-2">
+          <el-button
+            type="primary"
+            :loading="ledgerDisplaySaving"
+            :disabled="ledgerDisplayLoading"
+            @click="saveLedgerDisplaySettings"
+          >
+            保存台账显示设置
+          </el-button>
+          <el-button :disabled="ledgerDisplayLoading || ledgerDisplaySaving" @click="resetLedgerDisplaySettings">
+            恢复默认
           </el-button>
         </div>
       </div>

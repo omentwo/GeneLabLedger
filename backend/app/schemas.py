@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from typing import Literal
 
@@ -7,6 +8,20 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 DataType = Literal["text", "number", "date", "select"]
 RecordStatus = Literal["待实验", "已完成"]
+_HEX_COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def normalize_highlight_color(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if not _HEX_COLOR_PATTERN.fullmatch(cleaned):
+        raise ValueError("底色必须是 6 位十六进制颜色，例如 #FFF2CC")
+    return cleaned.lower()
+
+
 MappingSourceType = Literal[
     "unmapped",
     "field",
@@ -134,6 +149,7 @@ class RecordCreate(BaseModel):
     status: RecordStatus = "待实验"
     experiment_date: date | None = None
     experiment_number: str | None = Field(default=None, max_length=80)
+    highlight_color: str | None = Field(default=None, max_length=7)
     values: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("pathology_number")
@@ -146,12 +162,18 @@ class RecordCreate(BaseModel):
     def clean_experiment_number(cls, value: str | None) -> str | None:
         return value.strip() if value is not None and value.strip() else None
 
+    @field_validator("highlight_color")
+    @classmethod
+    def clean_highlight_color(cls, value: str | None) -> str | None:
+        return normalize_highlight_color(value)
+
 
 class RecordUpdate(BaseModel):
     pathology_number: str | None = Field(default=None, min_length=1, max_length=160)
     status: RecordStatus | None = None
     experiment_date: date | None = None
     experiment_number: str | None = Field(default=None, max_length=80)
+    highlight_color: str | None = Field(default=None, max_length=7)
     values: dict[str, str] | None = None
 
     @field_validator("pathology_number")
@@ -162,7 +184,12 @@ class RecordUpdate(BaseModel):
     @field_validator("experiment_number")
     @classmethod
     def clean_optional_experiment_number(cls, value: str | None) -> str | None:
-        return value.strip() if value is not None else None
+        return value.strip() if value is not None and value.strip() else None
+
+    @field_validator("highlight_color")
+    @classmethod
+    def clean_highlight_color(cls, value: str | None) -> str | None:
+        return normalize_highlight_color(value)
 
 
 class RecordExperimentNumberBatch(BaseModel):
@@ -187,6 +214,16 @@ class RecordReportStatusUpdate(BaseModel):
     report_generated: bool
 
 
+class RecordHighlightUpdate(BaseModel):
+    record_ids: list[str] = Field(min_length=1, max_length=1000)
+    highlight_color: str | None = Field(default=None, max_length=7)
+
+    @field_validator("highlight_color")
+    @classmethod
+    def clean_highlight_color(cls, value: str | None) -> str | None:
+        return normalize_highlight_color(value)
+
+
 class RecordAssignProject(BaseModel):
     target_project_id: str
 
@@ -201,6 +238,7 @@ class RecordRead(BaseModel):
     experiment_number: str | None
     report_generated: bool
     locked: bool
+    highlight_color: str | None
     values: dict[str, str]
     created_at: datetime
     updated_at: datetime
@@ -296,6 +334,13 @@ class AuditLogRead(BaseModel):
     created_at: datetime
 
 
+class AuditLogPageRead(BaseModel):
+    items: list[AuditLogRead]
+    total: int
+    limit: int
+    offset: int
+
+
 class HealthRead(BaseModel):
     status: str
     database: str
@@ -349,6 +394,22 @@ class WorkbookImportRow(BaseModel):
     experiment_date: date | None = None
     experiment_number: str | None = Field(default=None, max_length=80)
     values: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("pathology_number")
+    @classmethod
+    def clean_pathology_number(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("病理号不能为空")
+        return value
+
+    @field_validator("experiment_number")
+    @classmethod
+    def clean_experiment_number(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
 
 
 class WorkbookImportPreviewRow(WorkbookImportRow):

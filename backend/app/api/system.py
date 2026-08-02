@@ -3,13 +3,18 @@ from __future__ import annotations
 import json
 
 from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy import select, text
+from sqlalchemy import String, cast, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.audit import audit
 from app.database import get_session
 from app.models import AppSetting, AuditLog
-from app.schemas import AppSettingRead, AppSettingUpdate, AuditLogRead, HealthRead
+from app.schemas import (
+    AppSettingRead,
+    AppSettingUpdate,
+    AuditLogPageRead,
+    HealthRead,
+)
 from app.services.office_printing import OfficePrintService
 
 router = APIRouter(tags=["系统"])
@@ -25,18 +30,12 @@ AUDIT_ACTION_SEARCH_LABELS = {
     "field.options.replace": "修改备选项",
     "record.create": "新增台账记录",
     "record.update": "修改台账记录",
+    "record.highlight.update": "标记台账底色",
     "record.delete": "删除台账记录",
     "record.lock": "锁定台账记录",
     "record.unlock": "解锁台账记录",
     "record.assign_project": "分配到其他项目",
     "record.experiment_number.update": "回写实验编号",
-    "experiment.plan.create": "历史编号队列创建",
-    "experiment.plan.update": "历史编号队列修改",
-    "experiment.plan.delete": "历史编号队列删除",
-    "experiment.plan.item.add": "历史编号队列加入记录",
-    "experiment.plan.item.delete": "历史编号队列移出记录",
-    "experiment.plan.reorder": "历史编号队列排序",
-    "experiment.plan.apply": "历史编号队列回写",
     "record.bulk_delete": "按日期批量删除台账记录",
     "record.import.create": "导入新增台账记录",
     "record.import.update": "导入更新台账记录",
@@ -60,8 +59,6 @@ AUDIT_ENTITY_SEARCH_LABELS = {
     "project": "检测项目",
     "field": "台账表头",
     "project_record": "台账记录",
-    "experiment_plan": "历史编号队列",
-    "experiment_plan_item": "历史编号条目",
     "report_template": "报告模板",
     "report_template_version": "模板版本",
     "auto_export_task": "自动导出任务",
@@ -80,34 +77,54 @@ def health(request: Request, session: Session = Depends(get_session)) -> dict:
     }
 
 
-@router.get("/audit-logs", response_model=list[AuditLogRead])
+@router.get("/audit-logs", response_model=AuditLogPageRead)
 def list_audit_logs(
     search: str | None = Query(default=None, max_length=240),
-    limit: int = Query(default=100, ge=1, le=1000),
+    limit: int = Query(default=50, ge=1, le=50),
     offset: int = Query(default=0, ge=0),
     session: Session = Depends(get_session),
-) -> list[AuditLog]:
-    statement = select(AuditLog).order_by(AuditLog.created_at.desc())
-    if not search or not search.strip():
-        return list(session.scalars(statement.offset(offset).limit(limit)))
-
-    term = search.strip().casefold()
-    matched = []
-    for log in session.scalars(statement):
-        searchable = " ".join(
+) -> dict:
+    filters = []
+    if search and search.strip():
+        term = search.strip().casefold()
+        pattern = f"%{term}%"
+        filters.extend(
             [
-                log.actor,
-                log.action,
-                AUDIT_ACTION_SEARCH_LABELS.get(log.action, ""),
-                log.entity_type,
-                AUDIT_ENTITY_SEARCH_LABELS.get(log.entity_type, ""),
-                log.entity_id or "",
-                json.dumps(log.details, ensure_ascii=False, sort_keys=True),
+                AuditLog.actor.ilike(pattern),
+                AuditLog.action.ilike(pattern),
+                AuditLog.entity_type.ilike(pattern),
+                AuditLog.entity_id.ilike(pattern),
+                cast(AuditLog.details, String).ilike(pattern),
             ]
-        ).casefold()
-        if term in searchable:
-            matched.append(log)
-    return matched[offset : offset + limit]
+        )
+        matching_actions = [
+            action
+            for action, label in AUDIT_ACTION_SEARCH_LABELS.items()
+            if term in label.casefold()
+        ]
+        matching_entities = [
+            entity_type
+            for entity_type, label in AUDIT_ENTITY_SEARCH_LABELS.items()
+            if term in label.casefold()
+        ]
+        if matching_actions:
+            filters.append(AuditLog.action.in_(matching_actions))
+        if matching_entities:
+            filters.append(AuditLog.entity_type.in_(matching_entities))
+
+    where_clause = or_(*filters) if filters else None
+    count_statement = select(func.count()).select_from(AuditLog)
+    statement = select(AuditLog).order_by(
+        AuditLog.created_at.desc(),
+        AuditLog.id.desc(),
+    )
+    if where_clause is not None:
+        count_statement = count_statement.where(where_clause)
+        statement = statement.where(where_clause)
+
+    total = session.scalar(count_statement) or 0
+    items = list(session.scalars(statement.offset(offset).limit(limit)))
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/settings/{key}", response_model=AppSettingRead)

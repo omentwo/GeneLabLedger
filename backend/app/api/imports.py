@@ -5,6 +5,7 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.audit import audit
@@ -236,14 +237,10 @@ def commit_workbook(
             status_code=status.HTTP_409_CONFLICT,
             detail="导入内容中存在重复实验编号",
         )
-    outside_conflicts = list(
-        session.scalars(
-            select(ProjectRecord).where(
-                ProjectRecord.experiment_number.in_(numbers),
-                ProjectRecord.id.not_in(target_ids),
-            )
-        )
-    )
+    conflict_statement = select(ProjectRecord).where(ProjectRecord.experiment_number.in_(numbers))
+    if target_ids:
+        conflict_statement = conflict_statement.where(ProjectRecord.id.not_in(target_ids))
+    outside_conflicts = list(session.scalars(conflict_statement))
     if outside_conflicts:
         detail = ", ".join(
             f"{record.experiment_number}（{record.pathology_number}）"
@@ -254,47 +251,54 @@ def commit_workbook(
             detail=f"实验编号已被其他记录使用：{detail}",
         )
 
-    for record in existing.values():
-        record.experiment_number = None
-    session.flush()
+    try:
+        for record in existing.values():
+            record.experiment_number = None
+        session.flush()
 
-    created = 0
-    updated = 0
-    record_ids: list[str] = []
-    for row in payload.rows:
-        record = existing.get(row.record_id or "")
-        action = "update"
-        if not record:
-            record = ProjectRecord(
-                id=row.record_id or str(uuid.uuid4()),
-                project_id=payload.project_id,
-                pathology_number=row.pathology_number,
+        created = 0
+        updated = 0
+        record_ids: list[str] = []
+        for row in payload.rows:
+            record = existing.get(row.record_id or "")
+            action = "update"
+            if not record:
+                record = ProjectRecord(
+                    id=row.record_id or str(uuid.uuid4()),
+                    project_id=payload.project_id,
+                    pathology_number=row.pathology_number,
+                )
+                session.add(record)
+                session.flush()
+                created += 1
+                action = "create"
+            else:
+                updated += 1
+            record.pathology_number = row.pathology_number
+            record.status = row.status
+            record.experiment_date = row.experiment_date
+            record.experiment_number = row.experiment_number or None
+            replace_record_values(session, record, row.values)
+            record_ids.append(record.id)
+            audit(
+                session,
+                f"record.import.{action}",
+                "project_record",
+                record.id,
+                {"row_number": row.row_number, "project_id": payload.project_id},
             )
-            session.add(record)
-            session.flush()
-            created += 1
-            action = "create"
-        else:
-            updated += 1
-        record.pathology_number = row.pathology_number
-        record.status = row.status
-        record.experiment_date = row.experiment_date
-        record.experiment_number = row.experiment_number
-        replace_record_values(session, record, row.values)
-        record_ids.append(record.id)
         audit(
             session,
-            f"record.import.{action}",
-            "project_record",
-            record.id,
-            {"row_number": row.row_number, "project_id": payload.project_id},
+            "record.import.commit",
+            "project",
+            payload.project_id,
+            {"created": created, "updated": updated, "record_ids": record_ids},
         )
-    audit(
-        session,
-        "record.import.commit",
-        "project",
-        payload.project_id,
-        {"created": created, "updated": updated, "record_ids": record_ids},
-    )
-    session.commit()
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="导入数据与现有记录冲突，请刷新后重试",
+        ) from error
     return {"created": created, "updated": updated, "record_ids": record_ids}

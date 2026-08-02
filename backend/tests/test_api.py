@@ -436,6 +436,48 @@ def test_audit_logs_support_new_experiment_and_import_labels(
         json={"record_ids": [record["id"]], "prefix": "AUDIT"},
     )
     assert updated.status_code == 200
-    by_label = client.get("/api/audit-logs?search=回写实验编号&limit=100")
-    assert any(log["entity_id"] == record["id"] for log in by_label.json())
-    assert client.get("/api/audit-logs?search=完全不存在的关键词&limit=100").json() == []
+    by_label = client.get("/api/audit-logs?search=回写实验编号&limit=50")
+    assert any(log["entity_id"] == record["id"] for log in by_label.json()["items"])
+    empty = client.get("/api/audit-logs?search=完全不存在的关键词&limit=50").json()
+    assert empty["items"] == []
+    assert empty["total"] == 0
+
+
+def test_records_can_be_highlighted_individually_or_in_batch(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    project_id = seeded_projects["TB"]["id"]
+    first = client.post(
+        "/api/records",
+        json={"project_id": project_id, "pathology_number": "HIGHLIGHT-001"},
+    ).json()
+    second = client.post(
+        "/api/records",
+        json={"project_id": project_id, "pathology_number": "HIGHLIGHT-002"},
+    ).json()
+
+    batch = client.put(
+        "/api/records/highlight",
+        json={
+            "record_ids": [first["id"], second["id"]],
+            "highlight_color": "#FFF2CC",
+        },
+    )
+    assert batch.status_code == 200
+    assert [record["highlight_color"] for record in batch.json()] == ["#fff2cc", "#fff2cc"]
+
+    locked = client.put(f"/api/records/{first['id']}/lock", json={"locked": True})
+    assert locked.status_code == 200
+    clear = client.put(
+        "/api/records/highlight",
+        json={"record_ids": [first["id"]], "highlight_color": None},
+    )
+    assert clear.status_code == 200
+    assert clear.json()[0]["highlight_color"] is None
+
+    invalid = client.put(
+        "/api/records/highlight",
+        json={"record_ids": [second["id"]], "highlight_color": "yellow"},
+    )
+    assert invalid.status_code == 422

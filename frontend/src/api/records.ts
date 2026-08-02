@@ -11,7 +11,6 @@ import type {
 export interface RecordQuery {
   project_id?: string;
   status?: string;
-  pathology_number?: string;
   search?: string;
   experiment_date?: string;
   report_generated?: boolean;
@@ -96,6 +95,18 @@ export function setRecordsReportGenerated(
   });
 }
 
+export function setRecordsHighlight(
+  recordIds: string[],
+  highlightColor: string | null,
+): Promise<ProjectRecord[]> {
+  return apiRequest<ProjectRecord[]>("/records/highlight", {
+    method: "PUT",
+    body: jsonBody({
+      record_ids: recordIds,
+      highlight_color: highlightColor,
+    }),
+  });
+}
 
 export function previewBulkDelete(
   filter: BulkDeleteFilter,

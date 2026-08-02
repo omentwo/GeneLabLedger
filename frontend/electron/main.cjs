@@ -16,6 +16,7 @@ let mainWindow = null;
 let backendProcess = null;
 let backendUrl = "";
 let dataDirectory = "";
+let alwaysOnTop = false;
 let quitting = false;
 
 function settingsDirectory() {
@@ -29,24 +30,28 @@ function settingsPath() {
 function readDesktopSettings() {
   try {
     const parsed = JSON.parse(fs.readFileSync(settingsPath(), "utf8"));
-    if (typeof parsed.dataDirectory === "string" && path.isAbsolute(parsed.dataDirectory)) {
-      return { dataDirectory: path.resolve(parsed.dataDirectory) };
-    }
+    return {
+      dataDirectory:
+        typeof parsed.dataDirectory === "string" && path.isAbsolute(parsed.dataDirectory)
+          ? path.resolve(parsed.dataDirectory)
+          : "",
+      alwaysOnTop: parsed.alwaysOnTop === true,
+    };
   } catch (error) {
     if (error?.code !== "ENOENT") {
       console.error("桌面设置读取失败", error);
     }
   }
-  return { dataDirectory: "" };
+  return { dataDirectory: "", alwaysOnTop: false };
 }
 
-function writeDesktopSettings(nextDirectory) {
+function writeDesktopSettings(nextDirectory, nextAlwaysOnTop = alwaysOnTop) {
   const directory = path.resolve(nextDirectory);
   fs.mkdirSync(settingsDirectory(), { recursive: true });
   const temporaryPath = `${settingsPath()}.tmp`;
   fs.writeFileSync(
     temporaryPath,
-    `${JSON.stringify({ dataDirectory: directory }, null, 2)}\n`,
+    `${JSON.stringify({ dataDirectory: directory, alwaysOnTop: Boolean(nextAlwaysOnTop) }, null, 2)}\n`,
     "utf8",
   );
   fs.renameSync(temporaryPath, settingsPath());
@@ -207,8 +212,18 @@ function createMainWindow() {
       ],
     },
   });
+  mainWindow.setAlwaysOnTop(alwaysOnTop);
   mainWindow.once("ready-to-show", () => mainWindow?.show());
   mainWindow.webContents.on("before-input-event", (event, input) => {
+    if (
+      (input.control || input.meta) &&
+      input.shift &&
+      String(input.key).toLowerCase() === "t"
+    ) {
+      event.preventDefault();
+      applyAlwaysOnTop(!alwaysOnTop);
+      return;
+    }
     if ((input.control || input.meta) && String(input.key).toLowerCase() === "w") {
       event.preventDefault();
       app.quit();
@@ -284,8 +299,18 @@ function registerDesktopHandlers() {
       return { changed: false, directory: dataDirectory };
     }
     fs.mkdirSync(selected, { recursive: true });
-    const saved = writeDesktopSettings(selected);
+    const saved = writeDesktopSettings(selected, alwaysOnTop);
     return { changed: true, directory: saved };
+  });
+
+  ipcMain.handle("gene-ledger:get-always-on-top", (event) => {
+    assertTrustedIpcSender(event);
+    return mainWindow?.isAlwaysOnTop?.() ?? alwaysOnTop;
+  });
+
+  ipcMain.handle("gene-ledger:set-always-on-top", (event, value) => {
+    assertTrustedIpcSender(event);
+    return applyAlwaysOnTop(value);
   });
 
   ipcMain.handle("gene-ledger:restart", (event) => {
@@ -343,6 +368,17 @@ function stopBackend() {
   });
 }
 
+function applyAlwaysOnTop(value) {
+  alwaysOnTop = Boolean(value);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setAlwaysOnTop(alwaysOnTop);
+  }
+  if (dataDirectory) {
+    writeDesktopSettings(dataDirectory, alwaysOnTop);
+  }
+  return alwaysOnTop;
+}
+
 const singleInstance = app.requestSingleInstanceLock();
 if (!singleInstance) {
   app.quit();
@@ -362,6 +398,7 @@ if (!singleInstance) {
         app.quit();
         return;
       }
+      alwaysOnTop = readDesktopSettings().alwaysOnTop;
       registerDesktopHandlers();
       await startBackend();
       createMainWindow();

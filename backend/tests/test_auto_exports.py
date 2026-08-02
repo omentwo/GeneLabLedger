@@ -44,7 +44,7 @@ def test_cron_parser_and_next_run() -> None:
         CronSchedule(),
         datetime(2026, 7, 29, 17, 0, tzinfo=UTC),
     )
-    assert next_run == datetime(2026, 7, 29, 17, 30)
+    assert next_run == datetime(2026, 7, 29, 17, 30, tzinfo=UTC)
 
 
 def test_create_run_and_retain_latest_export(

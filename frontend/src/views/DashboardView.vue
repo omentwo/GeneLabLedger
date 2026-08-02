@@ -17,18 +17,13 @@ const errorMessage = ref("");
 const exportVisible = ref(false);
 const exportProjects = ref<string[]>([]);
 const monthlyProjectId = ref("");
+const monthlyHoverIndex = ref<number | null>(null);
 const exportFilter = reactive({
   start: "",
   end: "",
 });
 
 const total = computed(() => records.value.length);
-const pending = computed(
-  () => records.value.filter((record) => record.status === "待实验").length,
-);
-const completed = computed(
-  () => records.value.filter((record) => record.status === "已完成").length,
-);
 const recentThirtyDays = computed(() => {
   const endKey = shanghaiDateKey();
   const startKey = shiftDateKey(endKey, -29);
@@ -45,8 +40,6 @@ const projectStats = computed(() =>
       id: project.id,
       name: project.name,
       total: projectRecords.length,
-      pending: projectRecords.filter((record) => record.status === "待实验").length,
-      completed: projectRecords.filter((record) => record.status === "已完成").length,
     };
   }),
 );
@@ -92,14 +85,128 @@ const monthlyStats = computed(() => {
           ? `${year}年1月`
           : `${month}月`,
       total: monthRecords.length,
-      pending: monthRecords.filter((record) => record.status === "待实验").length,
-      completed: monthRecords.filter((record) => record.status === "已完成").length,
     };
   });
 });
 const monthlyMax = computed(() =>
   Math.max(1, ...monthlyStats.value.map((month) => month.total)),
 );
+const monthlyChartGeometry = {
+  width: 960,
+  height: 230,
+  left: 48,
+  right: 24,
+  top: 14,
+  bottom: 32,
+};
+type ChartPoint = { x: number; y: number };
+
+function smoothLineCommands(points: ChartPoint[]): string[] {
+  if (!points.length) return [];
+  const commands = [`M ${points[0]!.x} ${points[0]!.y}`];
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const previous = points[index - 1] ?? points[index]!;
+    const current = points[index]!;
+    const next = points[index + 1]!;
+    const afterNext = points[index + 2] ?? next;
+    const controlOne = {
+      x: current.x + (next.x - previous.x) / 6,
+      y: current.y + (next.y - previous.y) / 6,
+    };
+    const controlTwo = {
+      x: next.x - (afterNext.x - current.x) / 6,
+      y: next.y - (afterNext.y - current.y) / 6,
+    };
+    commands.push(
+      `C ${controlOne.x} ${controlOne.y}, ${controlTwo.x} ${controlTwo.y}, ${next.x} ${next.y}`,
+    );
+  }
+  return commands;
+}
+
+function smoothLinePath(points: ChartPoint[]): string {
+  return smoothLineCommands(points).join(" ");
+}
+
+const monthlyPoints = computed(() => {
+  const plotWidth =
+    monthlyChartGeometry.width - monthlyChartGeometry.left - monthlyChartGeometry.right;
+  const plotHeight =
+    monthlyChartGeometry.height - monthlyChartGeometry.top - monthlyChartGeometry.bottom;
+  const step = plotWidth / Math.max(1, monthlyStats.value.length - 1);
+  return monthlyStats.value.map((month, index) => ({
+    ...month,
+    x: monthlyChartGeometry.left + step * index,
+    y:
+      monthlyChartGeometry.top +
+      plotHeight -
+      (month.total / monthlyMax.value) * plotHeight,
+  }));
+});
+const monthlyLinePath = computed(() =>
+  smoothLinePath(monthlyPoints.value.map(({ x, y }) => ({ x, y }))),
+);
+const monthlyAreaPath = computed(() => {
+  const points = monthlyPoints.value;
+  if (!points.length) return "";
+  const baseline = monthlyChartGeometry.height - monthlyChartGeometry.bottom;
+  const lineCommands = smoothLineCommands(points.map(({ x, y }) => ({ x, y })));
+  return [
+    `M ${points[0]!.x} ${baseline}`,
+    `L ${points[0]!.x} ${points[0]!.y}`,
+    ...lineCommands.slice(1),
+    `L ${points.at(-1)!.x} ${baseline}`,
+    "Z",
+  ].join(" ");
+});
+const monthlyGridLines = computed(() => {
+  const plotHeight =
+    monthlyChartGeometry.height - monthlyChartGeometry.top - monthlyChartGeometry.bottom;
+  return [0, 0.25, 0.5, 0.75, 1].map((fraction) => ({
+    y: monthlyChartGeometry.top + plotHeight * fraction,
+    value: Math.round(monthlyMax.value * (1 - fraction)),
+  }));
+});
+const hoveredMonth = computed(() => {
+  const index = monthlyHoverIndex.value;
+  return index === null ? null : monthlyPoints.value[index] ?? null;
+});
+const hoveredMonthProjects = computed(() => {
+  if (!hoveredMonth.value) return [];
+  return appStore.projects
+    .map((project) => ({
+      id: project.id,
+      name: project.name,
+      count: records.value.filter(
+        (record) =>
+          (!monthlyProjectId.value || record.project_id === monthlyProjectId.value) &&
+          record.project_id === project.id &&
+          (record.experiment_date ?? "").startsWith(hoveredMonth.value!.key),
+      ).length,
+    }))
+    .filter((project) => project.count > 0)
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+});
+const monthlyTooltipClass = computed(() => {
+  const index = monthlyHoverIndex.value;
+  if (index === 0) return "monthly-tooltip-left";
+  if (index === monthlyPoints.value.length - 1) return "monthly-tooltip-right";
+  return "monthly-tooltip-center";
+});
+const monthlyTooltipStyle = computed(() => {
+  const point = hoveredMonth.value;
+  if (!point) return {};
+  const maxTop = Math.max(8, monthlyChartGeometry.height - 182);
+  const top = Math.min(maxTop, Math.max(8, point.y - 108));
+  return {
+    left: `${(point.x / monthlyChartGeometry.width) * 100}%`,
+    top: `${top}px`,
+  };
+});
+
+function setMonthlyHover(index: number): void {
+  monthlyHoverIndex.value = index;
+}
 
 function normalizeDate(value: string): string {
   const cleaned = value.trim().replace(/[/.]/g, "-");
@@ -227,19 +334,9 @@ watch(
 
     <div class="dashboard-kpis">
       <div class="kpi-card">
-        <span>总记录数</span>
+        <span>实验总量</span>
         <strong>{{ total }}</strong>
-        <small>全部项目台账</small>
-      </div>
-      <div class="kpi-card">
-        <span>待实验</span>
-        <strong>{{ pending }}</strong>
-        <small>可进入实验编排</small>
-      </div>
-      <div class="kpi-card">
-        <span>已完成</span>
-        <strong>{{ completed }}</strong>
-        <small>不进入待检队列</small>
+        <small>全部项目记录</small>
       </div>
       <div class="kpi-card">
         <span>检测项目</span>
@@ -258,9 +355,12 @@ watch(
         <div class="chart-heading">
           <div>
             <h2>近 12 个月实验量</h2>
-            <p>{{ monthlyProjectName }} · 按实验日期统计，区分待实验与已完成</p>
+            <p>{{ monthlyProjectName }} · 按实验日期统计</p>
           </div>
           <div class="chart-heading-actions">
+            <div class="monthly-chart-legend" aria-label="图表图例">
+              <span><i class="monthly-legend-dot" />实验总量</span>
+            </div>
             <el-select
               v-model="monthlyProjectId"
               class="monthly-project-select"
@@ -276,37 +376,102 @@ watch(
                 :value="project.id"
               />
             </el-select>
-            <div class="chart-legend">
-              <span><i class="legend-dot completed-dot" />已完成</span>
-              <span><i class="legend-dot pending-dot" />待实验</span>
-            </div>
           </div>
         </div>
-        <div class="monthly-chart">
-          <div
-            v-for="month in monthlyStats"
-            :key="month.key"
-            class="month-column"
-            :title="`${month.key}：共 ${month.total} 条，已完成 ${month.completed} 条，待实验 ${month.pending} 条`"
+        <div class="monthly-chart-shell" @mouseleave="monthlyHoverIndex = null">
+          <svg
+            class="monthly-line-chart"
+            :viewBox="`0 0 ${monthlyChartGeometry.width} ${monthlyChartGeometry.height}`"
+            preserveAspectRatio="none"
+            aria-label="近 12 个月实验量折线图"
           >
-            <span class="month-value">{{ month.total || "" }}</span>
-            <div class="month-track">
-              <div
-                v-if="month.total"
-                class="month-stack"
-                :style="{ height: `${Math.max(6, (month.total / monthlyMax) * 100)}%` }"
-              >
-                <i
-                  class="month-segment completed-segment"
-                  :style="{ height: `${(month.completed / month.total) * 100}%` }"
-                />
-                <i
-                  class="month-segment pending-segment"
-                  :style="{ height: `${(month.pending / month.total) * 100}%` }"
-                />
-              </div>
+            <defs>
+              <linearGradient id="monthly-area-gradient" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#409eff" stop-opacity="0.22" />
+                <stop offset="100%" stop-color="#409eff" stop-opacity="0.03" />
+              </linearGradient>
+            </defs>
+            <g class="monthly-grid-lines">
+              <line
+                v-for="line in monthlyGridLines"
+                :key="line.y"
+                :x1="monthlyChartGeometry.left"
+                :x2="monthlyChartGeometry.width - monthlyChartGeometry.right"
+                :y1="line.y"
+                :y2="line.y"
+              />
+              <text
+                v-for="line in monthlyGridLines"
+                :key="`label-${line.y}`"
+                class="monthly-y-label"
+                :x="monthlyChartGeometry.left - 10"
+                :y="line.y + 4"
+                text-anchor="end"
+              >{{ line.value }}</text>
+            </g>
+            <path class="monthly-area" :d="monthlyAreaPath" />
+            <path class="monthly-line" :d="monthlyLinePath" />
+            <line
+              v-if="hoveredMonth"
+              class="monthly-focus-line"
+              :x1="hoveredMonth.x"
+              :x2="hoveredMonth.x"
+              :y1="monthlyChartGeometry.top"
+              :y2="monthlyChartGeometry.height - monthlyChartGeometry.bottom"
+            />
+            <g v-for="(point, index) in monthlyPoints" :key="point.key">
+              <circle
+                class="monthly-point-hit"
+                :cx="point.x"
+                :cy="point.y"
+                r="16"
+                tabindex="0"
+                :aria-label="`${point.label}：${point.total} 条实验记录`"
+                @mouseenter="setMonthlyHover(index)"
+                @focus="setMonthlyHover(index)"
+                @blur="monthlyHoverIndex = null"
+              />
+              <circle
+                class="monthly-point"
+                :class="{ 'monthly-point-active': monthlyHoverIndex === index }"
+                :cx="point.x"
+                :cy="point.y"
+                :r="monthlyHoverIndex === index ? 5 : 3.5"
+              />
+              <text
+                class="monthly-axis-label"
+                :x="point.x"
+                :y="monthlyChartGeometry.height - 9"
+                text-anchor="middle"
+              >{{ point.label }}</text>
+            </g>
+          </svg>
+          <div
+            v-if="hoveredMonth"
+            class="monthly-tooltip"
+            :class="monthlyTooltipClass"
+            :style="monthlyTooltipStyle"
+          >
+            <strong>{{ hoveredMonth.label }}</strong>
+            <div class="monthly-tooltip-row">
+              <i class="monthly-tooltip-dot monthly-tooltip-total" />
+              <span>实验总量</span>
+              <b>{{ hoveredMonth.total }}</b>
             </div>
-            <span class="month-label">{{ month.label }}</span>
+            <div class="monthly-tooltip-list">
+              <div
+                v-for="project in hoveredMonthProjects"
+                :key="project.id"
+                class="monthly-tooltip-row"
+              >
+                <i class="monthly-tooltip-dot" />
+                <span>{{ project.name }}</span>
+                <b>{{ project.count }}</b>
+              </div>
+              <span v-if="!hoveredMonthProjects.length" class="monthly-tooltip-empty">
+                暂无项目记录
+              </span>
+            </div>
           </div>
         </div>
       </article>
@@ -331,18 +496,6 @@ watch(
                 class="project-bar-total"
                 :style="{ width: `${(project.total / projectMax) * 100}%` }"
               >
-                <i
-                  class="project-bar-completed"
-                  :style="{
-                    width: `${project.total ? (project.completed / project.total) * 100 : 0}%`,
-                  }"
-                />
-                <i
-                  class="project-bar-pending"
-                  :style="{
-                    width: `${project.total ? (project.pending / project.total) * 100 : 0}%`,
-                  }"
-                />
               </span>
             </div>
             <div class="project-bar-counts">
@@ -405,10 +558,6 @@ watch(
             <div class="project-overview-title">
               <strong>{{ project.name }}</strong>
               <span>{{ project.total }} 例</span>
-            </div>
-            <div class="project-overview-meta">
-              <span>待实验 {{ project.pending }}</span>
-              <span>已完成 {{ project.completed }}</span>
             </div>
           </RouterLink>
         </div>
@@ -480,14 +629,6 @@ watch(
   font-size: 12px;
 }
 
-.chart-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  color: var(--app-muted);
-  font-size: 12px;
-}
-
 .chart-heading-actions {
   display: flex;
   flex: 0 0 auto;
@@ -496,92 +637,186 @@ watch(
   gap: 9px;
 }
 
+.monthly-chart-legend {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.monthly-chart-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.monthly-legend-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #409eff;
+  box-shadow: 0 0 0 3px rgba(64, 158, 255, 0.14);
+}
+
 .monthly-project-select {
   width: 220px;
 }
 
-.chart-legend span {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.legend-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-}
-
-.completed-dot,
-.completed-segment,
-.project-bar-completed {
-  background: #409eff;
-}
-
-.pending-dot,
-.pending-segment,
-.project-bar-pending {
-  background: #f5a623;
-}
-
-.monthly-chart {
-  display: grid;
-  min-width: 620px;
-  grid-template-columns: repeat(12, minmax(38px, 1fr));
-  gap: 6px;
-  margin-top: 16px;
-}
-
 .monthly-card {
   grid-column: 1 / -1;
-  overflow-x: auto;
 }
 
-.month-column {
-  display: grid;
-  min-width: 0;
-  grid-template-rows: 18px 175px 30px;
-  align-items: end;
-  justify-items: center;
-  gap: 5px;
+.monthly-chart-shell {
+  position: relative;
+  min-width: 620px;
+  height: 230px;
+  margin-top: 16px;
+  overflow: hidden;
 }
 
-.month-value {
-  color: #344054;
+.monthly-line-chart {
+  display: block;
+  width: 100%;
+  height: 230px;
+  overflow: visible;
+}
+
+.monthly-grid-lines line {
+  stroke: #f0f2f5;
+  stroke-dasharray: 4 4;
+  stroke-width: 1;
+}
+
+.monthly-grid-lines line:last-of-type {
+  stroke: #d0d5dd;
+  stroke-dasharray: none;
+}
+
+.monthly-area {
+  fill: url("#monthly-area-gradient");
+}
+
+.monthly-line {
+  fill: none;
+  stroke: #409eff;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.5;
+}
+
+.monthly-focus-line {
+  stroke: #98a2b3;
+  stroke-dasharray: 5 4;
+  stroke-width: 1;
+}
+
+.monthly-point-hit {
+  fill: transparent;
+  cursor: crosshair;
+  outline: none;
+}
+
+.monthly-point-hit:focus-visible {
+  stroke: #409eff;
+  stroke-dasharray: 3 3;
+  stroke-width: 1;
+}
+
+.monthly-point {
+  fill: #fff;
+  stroke: #409eff;
+  stroke-width: 2;
+  pointer-events: none;
+  transition: r 0.12s ease;
+}
+
+.monthly-point-active {
+  fill: #409eff;
+}
+
+.monthly-axis-label {
+  fill: var(--app-muted);
   font-size: 11px;
 }
 
-.month-track {
-  display: flex;
-  width: 100%;
-  height: 175px;
-  align-items: end;
-  justify-content: center;
-  border-bottom: 1px solid #d0d5dd;
-  background-image: linear-gradient(to top, #f2f4f7 1px, transparent 1px);
-  background-size: 100% 25%;
+.monthly-y-label {
+  fill: var(--app-muted);
+  font-size: 11px;
 }
 
-.month-stack {
-  display: flex;
-  width: min(30px, 72%);
-  min-height: 6px;
-  flex-direction: column-reverse;
-  overflow: hidden;
-  border-radius: 5px 5px 2px 2px;
+.monthly-tooltip {
+  position: absolute;
+  top: 8px;
+  z-index: 2;
+  width: 220px;
+  padding: 12px 14px;
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 8px 24px rgba(16, 24, 40, 0.16);
+  pointer-events: none;
+  transition: left 0.15s ease, top 0.15s ease;
 }
 
-.month-segment {
+.monthly-tooltip-left {
+  transform: translateX(0);
+}
+
+.monthly-tooltip-center {
+  transform: translateX(-50%);
+}
+
+.monthly-tooltip-right {
+  transform: translateX(-100%);
+}
+
+.monthly-tooltip > strong {
   display: block;
-  width: 100%;
-  min-height: 1px;
+  margin-bottom: 9px;
+  color: #344054;
+  font-size: 14px;
 }
 
-.month-label {
+.monthly-tooltip-list {
+  max-height: 110px;
+  margin-top: 6px;
+  overflow-y: auto;
+}
+
+.monthly-tooltip-row {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  margin-top: 7px;
+  color: #667085;
+  font-size: 12px;
+}
+
+.monthly-tooltip-row b {
+  color: #344054;
+  font-size: 13px;
+}
+
+.monthly-tooltip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #8b7cff;
+}
+
+.monthly-tooltip-total {
+  background: #409eff;
+}
+
+.monthly-tooltip-empty {
+  display: block;
+  margin-top: 8px;
   color: var(--app-muted);
-  font-size: 10px;
-  text-align: center;
-  white-space: nowrap;
+  font-size: 12px;
 }
 
 .project-volume-card {
@@ -645,10 +880,7 @@ watch(
   min-width: 2px;
   overflow: hidden;
   border-radius: inherit;
-}
-
-.project-bar-total i {
-  height: 100%;
+  background: #409eff;
 }
 
 .project-bar-row > strong {
@@ -708,15 +940,13 @@ watch(
   font-size: 12px;
 }
 
-.project-overview-title,
-.project-overview-meta {
+.project-overview-title {
   display: flex;
   justify-content: space-between;
   gap: 10px;
 }
 
-.project-overview-title span,
-.project-overview-meta {
+.project-overview-title span {
   color: var(--app-muted);
   font-size: 12px;
 }
