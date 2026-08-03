@@ -244,6 +244,64 @@ class RecordRead(BaseModel):
     updated_at: datetime
 
 
+class RecordOperationSnapshot(BaseModel):
+    """A complete record state used by the session-scoped undo/redo API."""
+
+    id: str = Field(min_length=1, max_length=36)
+    project_id: str = Field(min_length=1, max_length=36)
+    pathology_number: str = Field(min_length=1, max_length=160)
+    status: RecordStatus
+    experiment_date: date | None = None
+    experiment_number: str | None = Field(default=None, max_length=80)
+    report_generated: bool = False
+    locked: bool = False
+    highlight_color: str | None = Field(default=None, max_length=7)
+    values: dict[str, str] = Field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    @field_validator("pathology_number")
+    @classmethod
+    def clean_snapshot_pathology_number(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("experiment_number")
+    @classmethod
+    def clean_snapshot_experiment_number(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None and value.strip() else None
+
+    @field_validator("highlight_color")
+    @classmethod
+    def clean_snapshot_highlight_color(cls, value: str | None) -> str | None:
+        return normalize_highlight_color(value)
+
+
+class RecordOperationApply(BaseModel):
+    operation_id: str = Field(min_length=1, max_length=80)
+    project_id: str = Field(min_length=1, max_length=36)
+    direction: Literal["undo", "redo"]
+    before: list[RecordOperationSnapshot] = Field(default_factory=list, max_length=10000)
+    after: list[RecordOperationSnapshot] = Field(default_factory=list, max_length=10000)
+
+    @model_validator(mode="after")
+    def validate_operation(self) -> RecordOperationApply:
+        before_ids = [record.id for record in self.before]
+        after_ids = [record.id for record in self.after]
+        if len(before_ids) != len(set(before_ids)) or len(after_ids) != len(set(after_ids)):
+            raise ValueError("台账操作中存在重复记录")
+        if not self.before and not self.after:
+            raise ValueError("台账操作不能为空")
+        for record in [*self.before, *self.after]:
+            if record.project_id != self.project_id:
+                raise ValueError("台账操作不属于当前项目")
+        return self
+
+
+class RecordOperationApplyResult(BaseModel):
+    records: list[RecordRead] = Field(default_factory=list)
+    deleted_ids: list[str] = Field(default_factory=list)
+
+
 class RecordList(BaseModel):
     items: list[RecordRead]
     total: int
@@ -476,6 +534,7 @@ class BulkDeleteExecute(BaseModel):
 
 class BulkDeleteResult(BaseModel):
     deleted: int
+    deleted_records: list[RecordOperationSnapshot] = Field(default_factory=list)
 
 
 

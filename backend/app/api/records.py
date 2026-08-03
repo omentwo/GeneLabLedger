@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, or_, select
@@ -9,7 +10,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.audit import audit
 from app.database import get_session
-from app.models import ProjectRecord, RecordValue
+from app.models import Project, ProjectRecord, RecordValue
 from app.schemas import (
     BulkDeleteExecute,
     BulkDeleteFilter,
@@ -21,10 +22,13 @@ from app.schemas import (
     RecordHighlightUpdate,
     RecordList,
     RecordLockUpdate,
+    RecordOperationApply,
+    RecordOperationApplyResult,
     RecordRead,
     RecordReportStatusUpdate,
     RecordUpdate,
 )
+from app.services.record_operations import apply_record_operation, snapshot_record
 from app.services.records import (
     assign_record_to_project,
     replace_record_values,
@@ -47,14 +51,20 @@ def record_load_options() -> tuple:
 def record_filters(
     *,
     project_id: str | None = None,
+    project_ids: list[str] | None = None,
+    scope: Literal["current", "all", "selected"] | None = None,
     record_status: str | None = None,
     search: str | None = None,
     experiment_date: date | None = None,
     report_generated: bool | None = None,
 ) -> list:
     filters = []
-    if project_id:
+    if scope == "selected" and project_ids:
+        filters.append(ProjectRecord.project_id.in_(project_ids))
+    elif scope != "all" and project_id:
         filters.append(ProjectRecord.project_id == project_id)
+    elif scope is None and project_ids:
+        filters.append(ProjectRecord.project_id.in_(project_ids))
     if record_status:
         filters.append(ProjectRecord.status == record_status)
     if experiment_date:
@@ -73,6 +83,7 @@ def record_filters(
         )
         filters.append(
             or_(
+                ProjectRecord.project.has(Project.name.like(term)),
                 ProjectRecord.pathology_number.like(term),
                 ProjectRecord.experiment_number.like(term),
                 value_match,
@@ -84,6 +95,8 @@ def record_filters(
 @router.get("", response_model=RecordList)
 def list_records(
     project_id: str | None = None,
+    scope: Literal["current", "all", "selected"] | None = Query(default=None),
+    project_ids: list[str] | None = Query(default=None),
     record_status: str | None = Query(default=None, alias="status"),
     search: str | None = None,
     experiment_date: date | None = None,
@@ -92,8 +105,17 @@ def list_records(
     offset: int = Query(default=0, ge=0),
     session: Session = Depends(get_session),
 ) -> dict:
+    normalized_project_ids = list(
+        dict.fromkeys(item.strip() for item in (project_ids or []) if item.strip())
+    )
+    if scope == "current" and not project_id:
+        raise HTTPException(status_code=422, detail="当前项目搜索必须提供 project_id")
+    if scope == "selected" and not normalized_project_ids:
+        raise HTTPException(status_code=422, detail="选定项目搜索必须提供 project_ids")
     filters = record_filters(
         project_id=project_id,
+        project_ids=normalized_project_ids,
+        scope=scope,
         record_status=record_status,
         search=search,
         experiment_date=experiment_date,
@@ -190,6 +212,18 @@ def assign_experiment_numbers(
             detail="实验编号已被其他记录占用，请刷新后重试",
         ) from error
     return [record_dict(require_record(session, record.id, include_values=True)) for record in ordered]
+
+
+@router.post("/operations/apply", response_model=RecordOperationApplyResult)
+def apply_operation(
+    payload: RecordOperationApply,
+    session: Session = Depends(get_session),
+) -> dict:
+    records, deleted_ids = apply_record_operation(session, payload)
+    return {
+        "records": [record_dict(record) for record in records],
+        "deleted_ids": deleted_ids,
+    }
 
 
 @router.get("/{record_id}", response_model=RecordRead)
@@ -474,6 +508,7 @@ def bulk_delete_records(session: Session, payload: BulkDeleteFilter) -> list[Pro
         session.scalars(
             select(ProjectRecord)
             .where(*bulk_delete_conditions(payload))
+            .options(selectinload(ProjectRecord.values))
             .order_by(ProjectRecord.created_at, ProjectRecord.id)
         )
     )
@@ -531,6 +566,7 @@ def execute_bulk_delete(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"包含锁定记录，请先解锁：{', '.join(locked[:20])}",
         )
+    deleted_snapshots = [snapshot_record(record) for record in records]
     for record in records:
         audit(
             session,
@@ -557,4 +593,4 @@ def execute_bulk_delete(
         },
     )
     session.commit()
-    return {"deleted": len(records)}
+    return {"deleted": len(records), "deleted_records": deleted_snapshots}

@@ -5,6 +5,10 @@ import { computed, onMounted, reactive, ref } from "vue";
 
 import {
   DEFAULT_LEDGER_DISPLAY_SETTINGS,
+  LEDGER_FONT_FAMILY_OPTIONS,
+  LEDGER_FONT_SIZE_MAX,
+  LEDGER_FONT_SIZE_MIN,
+  LEDGER_FONT_SIZE_STEP,
   LEDGER_EDITOR_HEIGHT_MIN,
   LEDGER_EDITOR_SIZE_MAX,
   LEDGER_EDITOR_SIZE_STEP,
@@ -12,6 +16,9 @@ import {
   LEDGER_DISPLAY_SETTINGS_KEY,
   LEDGER_ROW_PADDING_MAX,
   LEDGER_ROW_PADDING_MIN,
+  LEDGER_ZOOM_MAX,
+  LEDGER_ZOOM_MIN,
+  LEDGER_ZOOM_STEP,
   LEDGER_SHORTCUT_SETTINGS_KEY,
   DEFAULT_LEDGER_SHORTCUT_SETTINGS,
   getSetting,
@@ -383,6 +390,52 @@ onMounted(() => {
         <el-tag type="info">全局设置</el-tag>
       </div>
       <div class="grid gap-5 p-5">
+        <div class="grid max-w-4xl gap-5 lg:grid-cols-2">
+          <div class="grid gap-2">
+            <div class="flex items-center justify-between gap-3">
+              <span class="text-sm font-semibold text-slate-700">台账字体</span>
+              <span class="text-sm text-slate-500">{{ ledgerDisplaySettings.fontSizePx }} px</span>
+            </div>
+            <el-select
+              v-model="ledgerDisplaySettings.fontFamily"
+              :disabled="ledgerDisplayLoading || ledgerDisplaySaving"
+            >
+              <el-option
+                v-for="option in LEDGER_FONT_FAMILY_OPTIONS"
+                :key="option.value"
+                :label="option.label"
+                :value="option.value"
+              />
+            </el-select>
+            <el-slider
+              v-model="ledgerDisplaySettings.fontSizePx"
+              :min="LEDGER_FONT_SIZE_MIN"
+              :max="LEDGER_FONT_SIZE_MAX"
+              :step="LEDGER_FONT_SIZE_STEP"
+              :disabled="ledgerDisplayLoading || ledgerDisplaySaving"
+              show-input
+            />
+          </div>
+
+          <div class="grid gap-2">
+            <div class="flex items-center justify-between gap-3">
+              <span class="text-sm font-semibold text-slate-700">台账缩放</span>
+              <span class="text-sm text-slate-500">{{ ledgerDisplaySettings.zoomPercent }}%</span>
+            </div>
+            <el-slider
+              v-model="ledgerDisplaySettings.zoomPercent"
+              :min="LEDGER_ZOOM_MIN"
+              :max="LEDGER_ZOOM_MAX"
+              :step="LEDGER_ZOOM_STEP"
+              :disabled="ledgerDisplayLoading || ledgerDisplaySaving"
+              show-input
+            />
+            <p class="text-xs leading-5 text-slate-500">
+              只调整台账表格区域，不改变其他页面。
+            </p>
+          </div>
+        </div>
+
         <div class="grid max-w-2xl gap-2">
           <div class="flex items-center justify-between gap-3">
             <span class="text-sm font-semibold text-slate-700">记录之间间距</span>

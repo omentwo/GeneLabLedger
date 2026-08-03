@@ -78,6 +78,21 @@ export interface RecordUpdateInput {
   values?: Record<string, string>;
 }
 
+export type RecordOperationDirection = "undo" | "redo";
+
+export interface RecordOperationApplyInput {
+  operation_id: string;
+  project_id: string;
+  direction: RecordOperationDirection;
+  before: ProjectRecord[];
+  after: ProjectRecord[];
+}
+
+export interface RecordOperationApplyResult {
+  records: ProjectRecord[];
+  deleted_ids: string[];
+}
+
 export interface WorkbookImportRow {
   row_number: number;
   record_id: string | null;
@@ -174,6 +189,11 @@ export interface AuditLog {
   entity_id: string | null;
   details: Record<string, unknown>;
   created_at: string;
+}
+
+export interface BulkDeleteResult {
+  deleted: number;
+  deleted_records: ProjectRecord[];
 }
 
 export interface AuditLogPage {

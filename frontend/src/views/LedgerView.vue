@@ -6,6 +6,7 @@ import {
   Document,
   Download,
   Lock,
+  Minus,
   Plus,
   Refresh,
   Search,
@@ -30,19 +31,26 @@ import { commitWorkbookImport, previewWorkbookImport } from "@/api/imports";
 import {
   DEFAULT_LEDGER_DISPLAY_SETTINGS,
   DEFAULT_LEDGER_SHORTCUT_SETTINGS,
+  LEDGER_FONT_FAMILY_OPTIONS,
   LEDGER_DISPLAY_SETTINGS_KEY,
+  LEDGER_ZOOM_MAX,
+  LEDGER_ZOOM_MIN,
+  LEDGER_ZOOM_STEP,
   LEDGER_SHORTCUT_SETTINGS_KEY,
   getSetting,
   normalizeLedgerDisplaySettings,
   normalizeLedgerShortcutSettings,
+  putSetting,
   type LedgerDisplaySettings,
   type LedgerShortcutSettings,
 } from "@/api/system";
 import {
   assignRecordProject,
+  applyRecordOperation,
   createRecord,
   deleteRecord,
   executeBulkDelete,
+  getRecord,
   previewBulkDelete,
   listRecords,
   setRecordLock,
@@ -50,11 +58,18 @@ import {
   setRecordsReportGenerated,
   updateRecord,
 } from "@/api/records";
+import type { RecordSearchScope } from "@/api/records";
 import EditableChoiceInput from "@/components/EditableChoiceInput.vue";
 import EditableDateInput from "@/components/EditableDateInput.vue";
 import ProjectFieldManager from "@/components/ProjectFieldManager.vue";
 import { updateField } from "@/api/projects";
 import { useAppStore } from "@/stores/app";
+import {
+  cloneLedgerRecord,
+  createLedgerHistoryEntry,
+  useLedgerHistory,
+  type LedgerHistoryEntry,
+} from "@/composables/useLedgerHistory";
 import type {
   FieldDefinition,
   BulkDeleteFilter,
@@ -71,6 +86,10 @@ import { exportWorkbook } from "@/utils/workbook";
 const route = useRoute();
 const router = useRouter();
 const appStore = useAppStore();
+const ledgerHistory = useLedgerHistory();
+const canUndoHistory = ledgerHistory.canUndo;
+const canRedoHistory = ledgerHistory.canRedo;
+const historyBusy = ledgerHistory.busy;
 
 const activeProjectId = ref("");
 type LedgerRow = ProjectRecord & { _draft?: true };
@@ -126,6 +145,7 @@ let suppressSelectionClick = false;
 const selectionDragThreshold = 10;
 let bottomScrollTimers: number[] = [];
 const loading = ref(false);
+const historyReplayLoading = ref(false);
 const savingIds = ref(new Set<string>());
 const fieldErrors = ref<Record<string, string>>({});
 const managerVisible = ref(false);
@@ -136,16 +156,25 @@ const assignProjectId = ref("");
 const searchText = ref("");
 const searchStatus = ref("");
 const searchDate = ref("");
+const searchScope = ref<RecordSearchScope>("all");
+const searchProjectIds = ref<string[]>([]);
 const appliedSearch = reactive({
   text: "",
   status: "",
   date: "",
+  // The scope control defaults to all projects, but the initial ledger load
+  // remains a normal current-project data load until the user clicks Query.
+  scope: "current" as RecordSearchScope,
+  projectIds: [] as string[],
 });
 const exportFilter = reactive({
   start: "",
   end: "",
 });
 const draftRows = ref<LedgerRow[]>([]);
+const globalSearchResults = ref<ProjectRecord[]>([]);
+const globalSearchTotal = ref(0);
+const focusRecordId = ref("");
 const importFileInput = ref<HTMLInputElement | null>(null);
 const importFile = ref<File | null>(null);
 const importSheetName = ref("");
@@ -264,6 +293,7 @@ const persistedValues = new Map<string, string>();
 let draftSequence = 0;
 let loadSequence = 0;
 let ledgerInitialized = false;
+let projectLoadPromise: Promise<void> | null = null;
 
 const currentProject = computed(() => appStore.projectById(activeProjectId.value));
 // Keep the table schema on the previous project while the next project's
@@ -280,13 +310,23 @@ const fields = computed(() =>
 );
 const selectedCount = computed(() => selectedRecords.value.length);
 const tableRows = computed<LedgerRow[]>(() => [...records.value, ...draftRows.value]);
+const ledgerFontOption = computed(
+  () =>
+    LEDGER_FONT_FAMILY_OPTIONS.find(
+      (option) => option.value === ledgerDisplaySettings.value.fontFamily,
+    ) ?? LEDGER_FONT_FAMILY_OPTIONS[0],
+);
+const globalSearchActive = computed(() => appliedSearch.scope !== "current");
 const ledgerTableStyle = computed<CSSProperties>(
   () =>
     ({
       "--ledger-row-gap": `${ledgerDisplaySettings.value.rowPaddingY}px`,
       "--ledger-editor-width": `${ledgerDisplaySettings.value.editorWidthPercent}%`,
-      "--ledger-editor-height": `${Math.round((32 * ledgerDisplaySettings.value.editorHeightPercent) / 100)}px`,
-      "--ledger-selection-min-height": "32px",
+      "--ledger-editor-height": `${Math.round((Math.max(32, ledgerDisplaySettings.value.fontSizePx + 18) * ledgerDisplaySettings.value.editorHeightPercent) / 100)}px`,
+      "--ledger-selection-min-height": `${Math.max(32, ledgerDisplaySettings.value.fontSizePx + 18)}px`,
+      "--ledger-font-family": ledgerFontOption.value?.css ?? "system-ui, sans-serif",
+      "--ledger-font-size": `${ledgerDisplaySettings.value.fontSizePx}px`,
+      "--ledger-zoom": String(ledgerDisplaySettings.value.zoomPercent / 100),
     }) as CSSProperties,
 );
 const importHasErrors = computed(
@@ -473,6 +513,27 @@ function extendGridSelection(cell: GridCellPosition, delta: { rowDelta: number; 
 
 function handleGridKeydown(event: KeyboardEvent): void {
   if (event.isComposing) return;
+  const undoModifier = event.ctrlKey || event.metaKey;
+  if (undoModifier && !event.altKey && ["z", "y"].includes(event.key.toLowerCase())) {
+    const cell = gridCellFromElement(event.target);
+    if (cell) {
+      const row = tableRows.value[cell.rowIndex];
+      const field = fields.value[cell.columnIndex];
+      const editingUncommittedValue =
+        row &&
+        field &&
+        (isDraft(row) ||
+          valueFor(row, field) !== (persistedValues.get(persistedKey(row.id, field.id)) ?? ""));
+      if (editingUncommittedValue) return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.key.toLowerCase() === "z" && !event.shiftKey) void undoLedger();
+    else if (event.key.toLowerCase() === "y" || (event.key.toLowerCase() === "z" && event.shiftKey)) {
+      void redoLedger();
+    }
+    return;
+  }
   const cell = gridCellFromElement(event.target);
   if (!cell) return;
   activeGridCell.value = cell;
@@ -547,6 +608,8 @@ async function clearGridCellRange(): Promise<void> {
   let cleared = 0;
   let skippedLocked = 0;
   let skippedRequired = 0;
+  const beforeById = new Map<string, ProjectRecord>();
+  const changedIds = new Set<string>();
   for (let rowIndex = normalized.rowStart; rowIndex <= normalized.rowEnd; rowIndex += 1) {
     for (
       let columnIndex = normalized.columnStart;
@@ -565,10 +628,26 @@ async function clearGridCellRange(): Promise<void> {
         continue;
       }
       if (!valueFor(record, field)) continue;
+      if (!isDraft(record) && !beforeById.has(record.id)) {
+        beforeById.set(record.id, snapshotRecord(record));
+      }
       setValue(record, field, "");
-      await saveField(record, field);
-      cleared += 1;
+      const saved = await saveField(record, field, { recordHistory: false });
+      if (saved) {
+        changedIds.add(record.id);
+        cleared += 1;
+      }
     }
+  }
+  if (changedIds.size) {
+    pushHistory(
+      "清空单元格",
+      [...changedIds].map((id) => beforeById.get(id)).filter((record): record is ProjectRecord => Boolean(record)),
+      records.value
+        .filter((record) => changedIds.has(record.id))
+        .map(snapshotRecord),
+      activeProjectId.value,
+    );
   }
   gridCellRange.value = null;
   activeGridCell.value = {
@@ -855,6 +934,41 @@ function valueFor(record: ProjectRecord, field: FieldDefinition): string {
   return record.values[field.id] ?? "";
 }
 
+function handleSearchScopeChange(scope: RecordSearchScope): void {
+  if (scope === "selected") {
+    if (!searchProjectIds.value.length && activeProjectId.value) {
+      searchProjectIds.value = [activeProjectId.value];
+    }
+  } else {
+    searchProjectIds.value = [];
+  }
+}
+
+function globalMatchedValue(record: ProjectRecord): string {
+  const term = appliedSearch.text.trim();
+  if (!term) return "";
+  const candidates = [
+    record.project_name,
+    record.pathology_number,
+    record.experiment_number ?? "",
+    ...Object.values(record.values),
+  ];
+  return candidates.find((value) => value.includes(term)) ?? "";
+}
+
+function scrollToFocusedRecord(): void {
+  if (!focusRecordId.value) return;
+  void nextTick(() => {
+    const row = ledgerTableCardRef.value?.querySelector<HTMLElement>(
+      ".search-focus-row",
+    );
+    row?.scrollIntoView({ block: "center" });
+    window.setTimeout(() => {
+      focusRecordId.value = "";
+    }, 2200);
+  });
+}
+
 function setValue(record: ProjectRecord, field: FieldDefinition, value: string): void {
   if (field.system_key === "pathology_number") {
     record.pathology_number = value;
@@ -962,15 +1076,76 @@ function setSaving(recordId: string, saving: boolean): void {
 function replaceRecord(updated: ProjectRecord): void {
   const index = records.value.findIndex((record) => record.id === updated.id);
   if (index >= 0) records.value.splice(index, 1, updated);
+  const selectedIndex = selectedRecords.value.findIndex((record) => record.id === updated.id);
+  if (selectedIndex >= 0) selectedRecords.value.splice(selectedIndex, 1, updated);
   rememberRecord(updated);
+}
+
+function snapshotRecord(record: ProjectRecord): ProjectRecord {
+  return cloneLedgerRecord(record);
+}
+
+function pushHistory(
+  label: string,
+  before: ProjectRecord[],
+  after: ProjectRecord[],
+  projectId = activeProjectId.value,
+): void {
+  if (!projectId || (!before.length && !after.length)) return;
+  ledgerHistory.push(createLedgerHistoryEntry(projectId, label, before, after));
+}
+
+function reconcileOperationResult(result: {
+  records: ProjectRecord[];
+  deleted_ids: string[];
+}): void {
+  const deletedIds = new Set(result.deleted_ids);
+  records.value = records.value.filter((record) => !deletedIds.has(record.id));
+  result.records.forEach((record) => {
+    const index = records.value.findIndex((current) => current.id === record.id);
+    if (index >= 0) records.value.splice(index, 1, record);
+    else records.value.push(record);
+  });
+  records.value.sort((left, right) => {
+    const created = left.created_at.localeCompare(right.created_at);
+    return created || left.id.localeCompare(right.id);
+  });
+  selectedRecords.value = [];
+  rememberAll();
+}
+
+async function replayHistoryEntry(
+  entry: LedgerHistoryEntry,
+  direction: "undo" | "redo",
+): Promise<void> {
+  historyReplayLoading.value = true;
+  try {
+    await ensureProjectLoaded(entry.projectId);
+    const result = await applyRecordOperation({
+      operation_id: entry.operationId,
+      project_id: entry.projectId,
+      direction,
+      before: entry.before,
+      after: entry.after,
+    });
+    reconcileOperationResult(result);
+    await loadRecords(entry.projectId, { showLoading: false, preserveHistory: true });
+  } catch (error) {
+    ledgerHistory.clear();
+    await loadRecords(activeProjectId.value, { showLoading: false, preserveHistory: true });
+    throw error;
+  } finally {
+    historyReplayLoading.value = false;
+  }
 }
 
 function reconcileCommittedPaste(
   entries: Array<{ record: LedgerRow; rowNumber: number }>,
   committedIds: string[],
-): boolean {
-  if (entries.length !== committedIds.length) return false;
+): ProjectRecord[] | null {
+  if (entries.length !== committedIds.length) return null;
   const committedDraftIds = new Set<string>();
+  const committedRecords: ProjectRecord[] = [];
   entries.forEach(({ record }, index) => {
     const committedId = committedIds[index];
     if (!committedId) return;
@@ -978,17 +1153,19 @@ function reconcileCommittedPaste(
       const persistedRecord = { ...record, id: committedId } as LedgerRow;
       delete persistedRecord._draft;
       records.value.push(persistedRecord as ProjectRecord);
+      committedRecords.push(persistedRecord as ProjectRecord);
       committedDraftIds.add(record.id);
       return;
     }
     rememberRecord(record);
+    committedRecords.push(record);
   });
   if (committedDraftIds.size) {
     draftRows.value = draftRows.value.filter((row) => !committedDraftIds.has(row.id));
   }
   rememberAll();
   scrollTableToBottom();
-  return true;
+  return committedRecords;
 }
 
 async function persistDraft(record: LedgerRow, notify = true): Promise<boolean> {
@@ -1034,6 +1211,7 @@ async function persistDraft(record: LedgerRow, notify = true): Promise<boolean> 
       rememberRecord(created);
       scrollTableToBottom();
     }
+    pushHistory("新增台账记录", [], [created], projectId);
     if (notify) ElMessage.success("病理号已自动保存，记录已加入表格底部");
     return true;
   } catch (error) {
@@ -1044,7 +1222,12 @@ async function persistDraft(record: LedgerRow, notify = true): Promise<boolean> 
   }
 }
 
-async function saveField(record: LedgerRow, field: FieldDefinition): Promise<void> {
+async function saveField(
+  record: LedgerRow,
+  field: FieldDefinition,
+  options: { recordHistory?: boolean } = {},
+): Promise<boolean> {
+  const recordHistory = options.recordHistory ?? true;
   if (isDraft(record)) {
     if (field.system_key === "experiment_date") {
       try {
@@ -1058,21 +1241,23 @@ async function saveField(record: LedgerRow, field: FieldDefinition): Promise<voi
           error instanceof Error ? error.message : "日期格式无效",
         );
       }
-      return;
+      return false;
     }
     if (field.system_key === "pathology_number") {
-      await persistDraft(record);
+      return persistDraft(record);
     }
-    return;
+    return false;
   }
-  if (record.locked) return;
+  if (record.locked) return false;
   const key = persistedKey(record.id, field.id);
   const before = persistedValues.get(key) ?? "";
   const current = valueFor(record, field);
   if (current === before) {
     clearFieldError(record, field);
-    return;
+    return false;
   }
+  const beforeRecord = snapshotRecord(record);
+  setValue(beforeRecord, field, before);
 
   let payload: RecordUpdateInput;
   try {
@@ -1089,16 +1274,21 @@ async function saveField(record: LedgerRow, field: FieldDefinition): Promise<voi
       setValue(record, field, before);
       ElMessage.error(error instanceof Error ? error.message : "单元格保存失败");
     }
-    return;
+    return false;
   }
 
   setSaving(record.id, true);
   try {
     const updated = await updateRecord(record.id, payload);
     replaceRecord(updated);
+    if (recordHistory) {
+      pushHistory(`编辑 ${field.label}`, [beforeRecord], [updated], updated.project_id);
+    }
+    return true;
   } catch (error) {
     setValue(record, field, before);
     ElMessage.error(error instanceof Error ? error.message : "单元格保存失败");
+    return false;
   } finally {
     setSaving(record.id, false);
   }
@@ -1108,8 +1298,59 @@ async function loadLedgerDisplaySettings(): Promise<void> {
   try {
     const result = await getSetting<Partial<LedgerDisplaySettings>>(LEDGER_DISPLAY_SETTINGS_KEY);
     ledgerDisplaySettings.value = normalizeLedgerDisplaySettings(result.value);
+    refreshTableLayout();
   } catch (error) {
     ElMessage.warning(error instanceof Error ? error.message : "台账显示设置读取失败");
+  }
+}
+
+async function persistZoomSetting(): Promise<void> {
+  ledgerDisplaySettings.value = normalizeLedgerDisplaySettings(ledgerDisplaySettings.value);
+  refreshTableLayout();
+  try {
+    const result = await putSetting(LEDGER_DISPLAY_SETTINGS_KEY, ledgerDisplaySettings.value);
+    ledgerDisplaySettings.value = normalizeLedgerDisplaySettings(result.value);
+  } catch (error) {
+    ElMessage.warning(error instanceof Error ? error.message : "台账缩放设置保存失败");
+  }
+}
+
+function zoomOut(): void {
+  ledgerDisplaySettings.value.zoomPercent = Math.max(
+    LEDGER_ZOOM_MIN,
+    ledgerDisplaySettings.value.zoomPercent - LEDGER_ZOOM_STEP,
+  );
+  void persistZoomSetting();
+}
+
+function zoomIn(): void {
+  ledgerDisplaySettings.value.zoomPercent = Math.min(
+    LEDGER_ZOOM_MAX,
+    ledgerDisplaySettings.value.zoomPercent + LEDGER_ZOOM_STEP,
+  );
+  void persistZoomSetting();
+}
+
+function resetZoom(): void {
+  ledgerDisplaySettings.value.zoomPercent = 100;
+  void persistZoomSetting();
+}
+
+async function undoLedger(): Promise<void> {
+  try {
+    const applied = await ledgerHistory.undo((entry) => replayHistoryEntry(entry, "undo"));
+    if (applied) ElMessage.success("已撤销上一步台账操作");
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "台账撤销失败");
+  }
+}
+
+async function redoLedger(): Promise<void> {
+  try {
+    const applied = await ledgerHistory.redo((entry) => replayHistoryEntry(entry, "redo"));
+    if (applied) ElMessage.success("已恢复下一步台账操作");
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "台账恢复失败");
   }
 }
 
@@ -1124,10 +1365,14 @@ async function loadLedgerShortcutSettings(): Promise<void> {
 
 async function loadRecords(
   projectId = activeProjectId.value,
-  options: { showLoading?: boolean } = {},
+  options: { showLoading?: boolean; preserveHistory?: boolean } = {},
 ): Promise<void> {
-  if (!projectId) {
+  if (!options.preserveHistory) ledgerHistory.clear();
+  const isGlobalScope = appliedSearch.scope !== "current";
+  if (!projectId && !isGlobalScope) {
     records.value = [];
+    globalSearchResults.value = [];
+    globalSearchTotal.value = 0;
     return;
   }
   const showLoading = options.showLoading ?? true;
@@ -1136,27 +1381,43 @@ async function loadRecords(
   try {
     const loaded: ProjectRecord[] = [];
     let offset = 0;
+    let total = 0;
     while (true) {
       const page = await listRecords({
-        project_id: projectId,
+        scope: appliedSearch.scope,
+        project_id: isGlobalScope ? undefined : projectId,
+        project_ids:
+          appliedSearch.scope === "selected" ? [...appliedSearch.projectIds] : undefined,
         status: appliedSearch.status || undefined,
         search: appliedSearch.text || undefined,
         experiment_date: appliedSearch.date || undefined,
         limit: 1000,
         offset,
       });
+      total = page.total;
       loaded.push(...page.items);
       offset += page.items.length;
       if (offset >= page.total || page.items.length === 0) break;
     }
     if (requestSequence !== loadSequence || projectId !== activeProjectId.value) return;
-    records.value = loaded;
-    tableProjectId.value = projectId;
+    if (isGlobalScope) {
+      records.value = [];
+      draftRows.value = [];
+      globalSearchResults.value = loaded;
+      globalSearchTotal.value = total;
+      persistedValues.clear();
+    } else {
+      records.value = loaded;
+      globalSearchResults.value = [];
+      globalSearchTotal.value = 0;
+      tableProjectId.value = projectId;
+    }
     fieldErrors.value = {};
     selectedRecords.value = [];
-    rememberAll();
+    if (!isGlobalScope) rememberAll();
     await nextTick();
     tableRef.value?.doLayout();
+    if (!isGlobalScope) scrollToFocusedRecord();
   } catch (error) {
     if (requestSequence !== loadSequence) return;
     ElMessage.error(error instanceof Error ? error.message : "台账读取失败");
@@ -1165,12 +1426,36 @@ async function loadRecords(
   }
 }
 
+async function ensureProjectLoaded(projectId: string): Promise<void> {
+  if (activeProjectId.value !== projectId) {
+    activeProjectId.value = projectId;
+    await nextTick();
+  }
+  if (projectLoadPromise) await projectLoadPromise;
+}
+
 function applySearch(): void {
   try {
-    appliedSearch.text = searchText.value.trim();
-    appliedSearch.status = searchStatus.value;
-    appliedSearch.date = normalizeDate(searchDate.value);
-    searchDate.value = appliedSearch.date;
+    const nextText = searchText.value.trim();
+    const nextStatus = searchStatus.value;
+    const nextDate = normalizeDate(searchDate.value);
+    if (searchScope.value === "selected" && !searchProjectIds.value.length) {
+      throw new Error("请选择至少一个项目");
+    }
+    if (
+      searchScope.value !== "current" &&
+      !nextText &&
+      !nextStatus &&
+      !nextDate
+    ) {
+      throw new Error("跨项目搜索时请至少填写一个搜索条件");
+    }
+    searchDate.value = nextDate;
+    appliedSearch.text = nextText;
+    appliedSearch.status = nextStatus;
+    appliedSearch.date = nextDate;
+    appliedSearch.scope = searchScope.value;
+    appliedSearch.projectIds = [...searchProjectIds.value];
     void loadRecords();
   } catch (error) {
     ElMessage.warning(error instanceof Error ? error.message : "筛选日期无效");
@@ -1181,13 +1466,46 @@ function resetSearch(): void {
   searchText.value = "";
   searchStatus.value = "";
   searchDate.value = "";
+  searchScope.value = "current";
+  searchProjectIds.value = [];
   Object.assign(appliedSearch, { text: "", status: "", date: "" });
-  void loadRecords();
+  Object.assign(appliedSearch, {
+    scope: "current",
+    projectIds: [],
+  });
+  void loadRecords(activeProjectId.value);
+}
+
+function refreshRecords(): void {
+  void loadRecords(activeProjectId.value, { preserveHistory: true });
 }
 
 function selectProject(projectId: string): void {
-  if (activeProjectId.value === projectId) return;
+  const wasGlobalSearch = globalSearchActive.value;
+  if (wasGlobalSearch) {
+    searchScope.value = "current";
+    searchProjectIds.value = [];
+    appliedSearch.scope = "current";
+    appliedSearch.projectIds = [];
+  }
+  if (activeProjectId.value === projectId) {
+    if (wasGlobalSearch) void loadRecords(projectId, { preserveHistory: true });
+    return;
+  }
   activeProjectId.value = projectId;
+}
+
+function openGlobalSearchResult(record: ProjectRecord): void {
+  focusRecordId.value = record.id;
+  searchScope.value = "current";
+  searchProjectIds.value = [];
+  appliedSearch.scope = "current";
+  appliedSearch.projectIds = [];
+  if (activeProjectId.value === record.project_id) {
+    void loadRecords(record.project_id, { preserveHistory: true });
+  } else {
+    activeProjectId.value = record.project_id;
+  }
 }
 
 function selectAllVisible(): void {
@@ -1233,6 +1551,7 @@ function rowClassName({ row }: { row: LedgerRow }): string {
   if (isDraft(row)) classes.push("draft-row");
   else if (row.locked) classes.push("locked-row");
   if (row.highlight_color) classes.push("highlighted-row");
+  if (row.id === focusRecordId.value) classes.push("search-focus-row");
   return classes.join(" ");
 }
 
@@ -1274,9 +1593,18 @@ async function submitHighlight(color: string | null): Promise<void> {
   if (!recordIds.length) return;
   highlightLoading.value = true;
   try {
+    const before = records.value
+      .filter((record) => recordIds.includes(record.id))
+      .map(snapshotRecord);
     const updated = await setRecordsHighlight(recordIds, color);
     const updatedById = new Map(updated.map((record) => [record.id, record]));
     updated.forEach(replaceRecord);
+    pushHistory(
+      "批量修改台账底色",
+      before,
+      updated,
+      updated[0]?.project_id ?? activeProjectId.value,
+    );
     selectedRecords.value = selectedRecords.value.map(
       (record) => updatedById.get(record.id) ?? record,
     );
@@ -1351,11 +1679,13 @@ async function pasteGrid(
 ): Promise<void> {
   const text = event.clipboardData?.getData("text/plain") ?? "";
   if (!text) return;
+  const projectId = activeProjectId.value;
   event.preventDefault();
   const lines = text.replace(/\r/g, "").split("\n");
   if (lines.at(-1) === "") lines.pop();
   const matrix = lines.map((line) => line.split("\t"));
   const changedRows = new Map<string, { record: LedgerRow; rowNumber: number }>();
+  const beforeById = new Map<string, ProjectRecord>();
   let skippedLocked = 0;
   let changedCells = 0;
 
@@ -1375,6 +1705,9 @@ async function pasteGrid(
         const field = fields.value[startColumnIndex + columnOffset];
         if (!field) return;
         const value = rawValue.trim();
+        if (!isDraft(record) && !beforeById.has(record.id)) {
+          beforeById.set(record.id, snapshotRecord(record));
+        }
         // Validate core values before mutating the row.  This keeps an invalid
         // pasted date from becoming an unexplainable batch-save failure.
         payloadForField(record, field, value);
@@ -1397,9 +1730,17 @@ async function pasteGrid(
       workbookRowFor(record, rowNumber),
     );
     if (rowsToCommit.length) {
-      const result = await commitWorkbookImport(activeProjectId.value, rowsToCommit);
-      if (!reconcileCommittedPaste(committableEntries, result.record_ids)) {
-        await loadRecords(activeProjectId.value, { showLoading: false });
+      const result = await commitWorkbookImport(projectId, rowsToCommit);
+      const committedRecords = reconcileCommittedPaste(committableEntries, result.record_ids);
+      if (!committedRecords) {
+        await loadRecords(projectId, { showLoading: false });
+      } else {
+        pushHistory(
+          "粘贴台账数据",
+          [...beforeById.values()],
+          committedRecords.map(snapshotRecord),
+          projectId,
+        );
       }
       ElMessage.success(`已粘贴 ${changedCells} 个单元格${result.created ? `，新建 ${result.created} 条记录` : ""}`);
     } else if (changedCells) {
@@ -1409,7 +1750,7 @@ async function pasteGrid(
       ElMessage.info(`已跳过 ${skippedLocked} 条锁定记录`);
     }
   } catch (error) {
-    await loadRecords(activeProjectId.value, { showLoading: false });
+    await loadRecords(projectId, { showLoading: false });
     ElMessage.error(error instanceof Error ? error.message : "粘贴保存失败");
   }
 }
@@ -1422,8 +1763,10 @@ async function updateSelectedStatus(status: RecordStatus): Promise<void> {
   }
   loading.value = true;
   try {
-    await Promise.all(targets.map((record) => updateRecord(record.id, { status })));
-    await loadRecords();
+    const before = targets.map(snapshotRecord);
+    const updated = await Promise.all(targets.map((record) => updateRecord(record.id, { status })));
+    updated.forEach(replaceRecord);
+    pushHistory("批量修改状态", before, updated, targets[0]?.project_id ?? activeProjectId.value);
     ElMessage.success(`已将 ${targets.length} 条记录标记为${status}`);
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "批量状态修改失败");
@@ -1439,10 +1782,10 @@ async function updateSelectedLock(locked: boolean): Promise<void> {
   }
   loading.value = true;
   try {
-    await Promise.all(
+    const updated = await Promise.all(
       selectedRecords.value.map((record) => setRecordLock(record.id, locked)),
     );
-    await loadRecords();
+    updated.forEach(replaceRecord);
     ElMessage.success(locked ? "所选记录已锁定" : "所选记录已解锁");
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "锁定状态修改失败");
@@ -1459,11 +1802,18 @@ async function updateSelectedReportStatus(reportGenerated: boolean): Promise<voi
   }
   loading.value = true;
   try {
-    await setRecordsReportGenerated(
+    const before = targets.map(snapshotRecord);
+    const updated = await setRecordsReportGenerated(
       targets.map((record) => record.id),
       reportGenerated,
     );
-    await loadRecords();
+    updated.forEach(replaceRecord);
+    pushHistory(
+      "批量修改报告状态",
+      before,
+      updated,
+      targets[0]?.project_id ?? activeProjectId.value,
+    );
     ElMessage.success(reportGenerated ? "所选记录已标记为已生成报告" : "所选记录已恢复为未生成报告");
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "报告状态修改失败");
@@ -1513,9 +1863,18 @@ async function deleteSelectedRecords(): Promise<void> {
         .filter((_record, index) => results[index]?.status === "fulfilled")
         .map((record) => record.id),
     );
+    const deletedRecords = targets
+      .filter((record) => deletedIds.has(record.id))
+      .map(snapshotRecord);
     records.value = records.value.filter((record) => !deletedIds.has(record.id));
     selectedRecords.value = [];
     rememberAll();
+    pushHistory(
+      "批量删除台账记录",
+      deletedRecords,
+      [],
+      targets[0]?.project_id ?? activeProjectId.value,
+    );
     const failedCount = targets.length - deletedIds.size;
     if (deletedIds.size) ElMessage.success(`已删除 ${deletedIds.size} 条记录`);
     if (failedCount) ElMessage.error(`${failedCount} 条记录删除失败，请刷新后重试`);
@@ -1569,6 +1928,7 @@ async function changeImportSheet(sheetName: string): Promise<void> {
 async function confirmWorkbookImport(): Promise<void> {
   const preview = importPreview.value;
   if (!preview || !preview.rows.length || importHasErrors.value) return;
+  const projectId = activeProjectId.value;
   const rows = preview.rows.map(({ action: _action, errors: _errors, ...row }) => row);
   try {
     await ElMessageBox.confirm(
@@ -1587,11 +1947,37 @@ async function confirmWorkbookImport(): Promise<void> {
 
   importLoading.value = true;
   try {
-    const result = await commitWorkbookImport(activeProjectId.value, rows);
+    const beforeById = new Map(
+      records.value.map((record) => [record.id, snapshotRecord(record)]),
+    );
+    const importRecordIds = [
+      ...new Set(
+        rows
+          .map((row) => row.record_id)
+          .filter((id): id is string => Boolean(id)),
+      ),
+    ];
+    const missingBefore = importRecordIds.filter((recordId) => !beforeById.has(recordId));
+    if (missingBefore.length) {
+      const fetched = await Promise.all(missingBefore.map((recordId) => getRecord(recordId)));
+      fetched.forEach((record) => beforeById.set(record.id, snapshotRecord(record)));
+    }
+    const result = await commitWorkbookImport(projectId, rows);
     importDialogVisible.value = false;
     importFile.value = null;
     importPreview.value = null;
-    await loadRecords();
+    await loadRecords(projectId, { showLoading: false, preserveHistory: true });
+    const afterRecords = await Promise.all(
+      result.record_ids.map((recordId) => getRecord(recordId)),
+    );
+    pushHistory(
+      "导入 Excel 台账数据",
+      rows
+        .map((row) => row.record_id ? beforeById.get(row.record_id) : undefined)
+        .filter((record): record is ProjectRecord => Boolean(record)),
+      afterRecords.map(snapshotRecord),
+      projectId,
+    );
     ElMessage.success(`导入完成：新建 ${result.created} 条，更新 ${result.updated} 条`);
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "Excel 导入失败");
@@ -1664,7 +2050,10 @@ async function confirmDateRangeDelete(): Promise<void> {
     );
     bulkDeleteDialogVisible.value = false;
     bulkDeletePreview.value = null;
-    await loadRecords();
+    const deletedIds = new Set(result.deleted_records.map((record) => record.id));
+    records.value = records.value.filter((record) => !deletedIds.has(record.id));
+    rememberAll();
+    pushHistory("按日期批量删除台账记录", result.deleted_records, [], bulkDeleteFilter.project_id);
     ElMessage.success(`已删除 ${result.deleted} 条记录`);
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "按日期批量删除失败");
@@ -1692,7 +2081,11 @@ function openAssign(record: ProjectRecord): void {
 async function confirmAssign(): Promise<void> {
   if (!operationRecord.value || !assignProjectId.value) return;
   try {
-    await assignRecordProject(operationRecord.value.id, assignProjectId.value);
+    const assigned = await assignRecordProject(operationRecord.value.id, assignProjectId.value);
+    // The source record stays in the current project; the operation creates a
+    // new record in the target project.  Keeping the target project on the
+    // history entry lets undo/redo switch there automatically.
+    pushHistory("加入其他项目", [], [assigned], assigned.project_id);
     assignDialogVisible.value = false;
     ElMessage.success("已在目标项目建立独立台账记录");
   } catch (error) {
@@ -1715,8 +2108,10 @@ async function removeRecord(record: ProjectRecord): Promise<void> {
         type: "warning",
       },
     );
+    const before = snapshotRecord(record);
     await deleteRecord(record.id);
     records.value = records.value.filter((item) => item.id !== record.id);
+    pushHistory("删除台账记录", [before], [], before.project_id);
     ElMessage.success("台账记录已删除");
   } catch (error) {
     if (error === "cancel" || error === "close") return;
@@ -1769,27 +2164,44 @@ watch(
   { deep: true },
 );
 
+watch(
+  () => [
+    ledgerDisplaySettings.value.fontFamily,
+    ledgerDisplaySettings.value.fontSizePx,
+    ledgerDisplaySettings.value.zoomPercent,
+  ],
+  () => refreshTableLayout(),
+);
+
 watch(activeProjectId, async (projectId, previousProjectId) => {
   if (!ledgerInitialized || !projectId || projectId === previousProjectId) return;
-  activeGridCell.value = null;
-  gridCellRange.value = null;
-  draftRows.value = [];
-  selectedRecords.value = [];
-  selectionStartDate.value = "";
-  selectionEndDate.value = "";
-  importDialogVisible.value = false;
-  importFile.value = null;
-  importPreview.value = null;
-  highlightDialogVisible.value = false;
-  highlightTargetIds.value = [];
-  bulkDeleteDialogVisible.value = false;
-  bulkDeletePreview.value = null;
-  persistedValues.clear();
-  void router.replace({ query: { ...route.query, project: projectId } });
-  await loadRecords(projectId);
-  await nextTick();
-  refreshTableLayout();
-  scrollTableToBottom();
+  const load = (async () => {
+    activeGridCell.value = null;
+    gridCellRange.value = null;
+    draftRows.value = [];
+    selectedRecords.value = [];
+    selectionStartDate.value = "";
+    selectionEndDate.value = "";
+    importDialogVisible.value = false;
+    importFile.value = null;
+    importPreview.value = null;
+    highlightDialogVisible.value = false;
+    highlightTargetIds.value = [];
+    bulkDeleteDialogVisible.value = false;
+    bulkDeletePreview.value = null;
+    persistedValues.clear();
+    void router.replace({ query: { ...route.query, project: projectId } });
+    await loadRecords(projectId, { preserveHistory: true });
+    await nextTick();
+    refreshTableLayout();
+    scrollTableToBottom();
+  })();
+  projectLoadPromise = load;
+  try {
+    await load;
+  } finally {
+    if (projectLoadPromise === load) projectLoadPromise = null;
+  }
 }, { flush: "sync" });
 
 async function initializeLedger(): Promise<void> {
@@ -1808,6 +2220,8 @@ async function initializeLedger(): Promise<void> {
     records.value = [];
     return;
   }
+  appliedSearch.scope = "current";
+  appliedSearch.projectIds = [];
   await router.replace({ query: { ...route.query, project: initialProjectId } });
   await loadRecords(initialProjectId);
   await nextTick();
@@ -1823,6 +2237,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  ledgerHistory.clear();
   document.removeEventListener("click", handleSelectionClickCapture, true);
   stopSelectionDrag();
   activeGridCell.value = null;
@@ -1850,57 +2265,109 @@ onBeforeUnmount(() => {
     <section class="page-card">
       <div class="page-card-body">
         <div class="ledger-toolbar">
-          <EditableDateInput
-            v-model="searchDate"
-            class="date-filter"
-            placeholder="按实验日期筛选"
-            @change="searchDate = $event"
-          />
-          <el-input
-            v-model="searchText"
-            clearable
-            placeholder="搜索病理号或任意表头内容"
-            :prefix-icon="Search"
-            @keyup.enter="applySearch"
-            @clear="applySearch"
-          />
-          <el-select v-model="searchStatus" clearable placeholder="全部状态">
-            <el-option label="待实验" value="待实验" />
-            <el-option label="已完成" value="已完成" />
-          </el-select>
-          <el-button type="primary" :icon="Search" @click="applySearch">查询</el-button>
-          <el-button @click="resetSearch">重置</el-button>
-          <el-button :icon="Refresh" @click="loadRecords()">刷新</el-button>
-          <div class="toolbar-spacer" />
-          <el-button
-            :icon="Plus"
-            type="primary"
-            plain
-            @click="appendDraftRow"
-          >
-            新增记录
-          </el-button>
-          <el-button :icon="Download" @click="exportVisible = !exportVisible">
-            导出 Excel
-          </el-button>
-          <input
-            ref="importFileInput"
-            class="hidden-file-input"
-            type="file"
-            accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            @change="handleWorkbookFile"
-          />
-          <el-button :icon="Upload" :loading="importLoading" @click="chooseWorkbookImport">
-            导入 Excel
-          </el-button>
-          <el-button type="danger" plain :icon="Delete" @click="openBulkDeleteDialog">
-            按日期批量删除
-          </el-button>
+          <div class="ledger-filter-group">
+            <EditableDateInput
+              v-model="searchDate"
+              class="date-filter"
+              placeholder="按实验日期筛选"
+              @change="searchDate = $event"
+            />
+            <el-input
+              v-model="searchText"
+              clearable
+              placeholder="搜索项目、病理号或任意表头内容"
+              :prefix-icon="Search"
+              @keyup.enter="applySearch"
+              @clear="applySearch"
+            />
+            <el-select v-model="searchStatus" clearable placeholder="全部状态">
+              <el-option label="待实验" value="待实验" />
+              <el-option label="已完成" value="已完成" />
+            </el-select>
+            <el-select
+              v-model="searchScope"
+              class="search-scope-select"
+              @change="handleSearchScopeChange"
+            >
+              <el-option label="当前项目" value="current" />
+              <el-option label="全部项目" value="all" />
+              <el-option label="选定项目" value="selected" />
+            </el-select>
+            <el-button class="ledger-query-button" type="primary" :icon="Search" @click="applySearch">
+              查询
+            </el-button>
+            <el-button class="ledger-reset-button" @click="resetSearch">重置</el-button>
+            <el-button class="ledger-refresh-button" :icon="Refresh" @click="refreshRecords">
+              刷新
+            </el-button>
+          </div>
+          <div v-if="!globalSearchActive" class="ledger-operation-group">
+            <el-button
+              class="ledger-history-button"
+              text
+              :disabled="!canUndoHistory"
+              :loading="historyBusy"
+              @click="undoLedger"
+            >
+              撤销
+            </el-button>
+            <el-button
+              class="ledger-history-button"
+              text
+              :disabled="!canRedoHistory"
+              :loading="historyBusy"
+              @click="redoLedger"
+            >
+              恢复
+            </el-button>
+            <el-button
+              :icon="Plus"
+              type="primary"
+              plain
+              @click="appendDraftRow"
+            >
+              新增记录
+            </el-button>
+            <el-button :icon="Download" @click="exportVisible = !exportVisible">
+              导出 Excel
+            </el-button>
+            <input
+              ref="importFileInput"
+              class="hidden-file-input"
+              type="file"
+              accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              @change="handleWorkbookFile"
+            />
+            <el-button :icon="Upload" :loading="importLoading" @click="chooseWorkbookImport">
+              导入 Excel
+            </el-button>
+            <el-button type="danger" plain :icon="Delete" @click="openBulkDeleteDialog">
+              按日期批量删除
+            </el-button>
+          </div>
+          <div v-if="searchScope === 'selected'" class="ledger-search-advanced">
+            <el-select
+              v-model="searchProjectIds"
+              class="search-project-select"
+              multiple
+              collapse-tags
+              collapse-tags-tooltip
+              filterable
+              placeholder="选择项目"
+            >
+              <el-option
+                v-for="project in appStore.projects"
+                :key="project.id"
+                :label="project.name"
+                :value="project.id"
+              />
+            </el-select>
+          </div>
         </div>
       </div>
     </section>
 
-    <section v-if="exportVisible" class="page-card export-panel">
+    <section v-if="exportVisible && !globalSearchActive" class="page-card export-panel">
       <div class="page-card-header">
         <div>
           <h2 class="page-card-title">导出当前项目台账</h2>
@@ -1922,7 +2389,45 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <section class="selection-bar">
+    <section v-if="globalSearchActive" class="page-card global-search-results">
+      <div class="page-card-header">
+        <div>
+          <h2 class="page-card-title">跨项目搜索结果</h2>
+          <p class="page-description">
+            共 {{ globalSearchTotal }} 条记录；点击结果可切换到对应项目并定位记录。
+          </p>
+        </div>
+        <el-tag effect="plain">{{ appliedSearch.scope === "all" ? "全部项目" : "选定项目" }}</el-tag>
+      </div>
+      <el-table
+        :data="globalSearchResults"
+        border
+        height="420"
+        v-loading="loading"
+        empty-text="没有匹配的跨项目记录"
+        @row-click="openGlobalSearchResult"
+      >
+        <el-table-column prop="project_name" label="项目" min-width="160" />
+        <el-table-column prop="pathology_number" label="病理号" min-width="150" />
+        <el-table-column prop="experiment_number" label="实验编号" min-width="150" />
+        <el-table-column prop="status" label="状态" width="100" />
+        <el-table-column prop="experiment_date" label="实验日期" width="130" />
+        <el-table-column label="命中内容" min-width="220">
+          <template #default="{ row }: { row: ProjectRecord }">
+            {{ globalMatchedValue(row) }}
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="110" fixed="right">
+          <template #default="{ row }: { row: ProjectRecord }">
+            <el-button link type="primary" @click.stop="openGlobalSearchResult(row)">
+              打开台账
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </section>
+
+    <section v-if="!globalSearchActive" class="selection-bar">
       <strong>已选 {{ selectedCount }} 条</strong>
       <div class="selection-quick-actions" aria-label="快速选择">
         <el-button @click="selectAllVisible">全选</el-button>
@@ -1988,6 +2493,7 @@ onBeforeUnmount(() => {
     </section>
 
     <section
+      v-if="!globalSearchActive"
       ref="ledgerTableCardRef"
       class="page-card ledger-table-card"
       @pointerdown.capture="handleGridPointerDown"
@@ -1996,10 +2502,10 @@ onBeforeUnmount(() => {
       @copy.capture="handleGridCopy"
       @paste.capture="handleGridPaste"
     >
+      <div class="ledger-table-surface" :style="ledgerTableStyle">
       <el-table
         ref="tableRef"
         :class="{ 'selection-dragging': selectionDragging }"
-        :style="ledgerTableStyle"
         v-loading="loading"
         element-loading-text="正在切换或读取项目数据…"
         element-loading-background="#ffffff"
@@ -2150,6 +2656,32 @@ onBeforeUnmount(() => {
           </template>
         </el-table-column>
       </el-table>
+      </div>
+      <div class="ledger-zoom-footer">
+        <div class="ledger-zoom-control" aria-label="台账缩放">
+          <el-button text :icon="Minus" :disabled="historyReplayLoading" @click="zoomOut" />
+          <el-slider
+            v-model="ledgerDisplaySettings.zoomPercent"
+            class="ledger-zoom-slider"
+            :min="LEDGER_ZOOM_MIN"
+            :max="LEDGER_ZOOM_MAX"
+            :step="LEDGER_ZOOM_STEP"
+            :disabled="historyReplayLoading"
+            :show-tooltip="false"
+            @change="persistZoomSetting"
+          />
+          <button
+            type="button"
+            class="ledger-zoom-value"
+            aria-label="重置台账缩放"
+            @click="resetZoom"
+          >
+            {{ ledgerDisplaySettings.zoomPercent }}%
+          </button>
+          <el-button text :icon="Plus" :disabled="historyReplayLoading" @click="zoomIn" />
+          <el-button text :disabled="historyReplayLoading" @click="resetZoom">重置</el-button>
+        </div>
+      </div>
     </section>
   </div>
 
@@ -2643,15 +3175,41 @@ onBeforeUnmount(() => {
 }
 
 .ledger-toolbar {
+  display: grid;
+  gap: 8px;
+}
+
+.ledger-filter-group,
+.ledger-operation-group {
   display: flex;
-  flex-wrap: wrap;
+  min-width: 0;
   align-items: center;
   gap: 8px;
 }
 
-.toolbar-spacer {
-  min-width: 12px;
-  flex: 1 1 12px;
+.ledger-filter-group {
+  flex-wrap: nowrap;
+}
+
+.ledger-search-advanced {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.search-scope-select {
+  width: 130px;
+}
+
+.search-project-select {
+  width: 280px;
+}
+
+.ledger-operation-group {
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .date-filter,
@@ -2659,13 +3217,69 @@ onBeforeUnmount(() => {
   width: 190px;
 }
 
-.ledger-toolbar > :deep(.el-input):not(.date-filter) {
+.ledger-filter-group > :deep(.el-input):not(.date-filter) {
   min-width: 260px;
   flex: 1 1 320px;
 }
 
-.ledger-toolbar > :deep(.el-select) {
+.ledger-filter-group > :deep(.el-select) {
+  flex: 0 0 130px;
   width: 130px;
+}
+
+.ledger-filter-group > :deep(.el-button) {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.ledger-query-button {
+  min-width: 94px;
+}
+
+.ledger-reset-button {
+  min-width: 72px;
+}
+
+.ledger-refresh-button {
+  min-width: 96px;
+}
+
+.ledger-history-button {
+  width: 72px;
+  min-width: 72px;
+}
+
+.global-search-results {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.global-search-results :deep(.el-table) {
+  width: 100%;
+}
+
+:deep(.search-focus-row > td) {
+  background: #e6f4ff !important;
+  transition: background-color 300ms ease;
+}
+
+@media (max-width: 900px) {
+  .ledger-filter-group {
+    flex-wrap: wrap;
+  }
+
+  .ledger-filter-group > :deep(.el-input):not(.date-filter) {
+    min-width: 220px;
+  }
+
+  .ledger-operation-group {
+    justify-content: flex-start;
+  }
+
+  .ledger-search-advanced > :deep(.el-input),
+  .ledger-search-advanced > :deep(.el-select) {
+    width: 100%;
+  }
 }
 
 .export-panel {
@@ -2734,6 +3348,56 @@ onBeforeUnmount(() => {
 .ledger-table-card :deep(.el-table) {
   min-height: 0;
   flex: 1;
+}
+
+.ledger-table-surface {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+  zoom: var(--ledger-zoom, 1);
+  font-family: var(--ledger-font-family, inherit);
+  font-size: var(--ledger-font-size, 14px);
+}
+
+.ledger-table-surface :deep(.el-table) {
+  height: 100%;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.ledger-zoom-footer {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  padding-top: 4px;
+}
+
+.ledger-zoom-control {
+  display: inline-flex;
+  min-width: 260px;
+  align-items: center;
+  gap: 4px;
+}
+
+.ledger-zoom-slider {
+  width: 110px;
+}
+
+.ledger-zoom-value {
+  min-width: 42px;
+  border: 0;
+  background: transparent;
+  color: var(--app-muted);
+  cursor: pointer;
+  font-size: 12px;
+  text-align: center;
+}
+
+.ledger-zoom-value:hover {
+  color: var(--app-primary);
 }
 
 .row-lock {
@@ -2873,6 +3537,16 @@ onBeforeUnmount(() => {
   word-break: break-all;
   line-height: 20px;
   padding: max(1px, calc((var(--ledger-editor-height, 32px) - 20px) / 2)) 8px;
+}
+
+:deep(.ledger-table-surface .el-table th),
+:deep(.ledger-table-surface .el-table td),
+:deep(.ledger-table-surface .el-table .cell),
+:deep(.ledger-table-surface .el-input__inner),
+:deep(.ledger-table-surface .el-select__selected-item),
+:deep(.ledger-table-surface .editable-date-input) {
+  font-family: var(--ledger-font-family, inherit);
+  font-size: var(--ledger-font-size, 14px);
 }
 
 :deep(.el-table .cell) {

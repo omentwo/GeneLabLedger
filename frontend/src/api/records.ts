@@ -2,14 +2,21 @@ import { apiRequest, jsonBody } from "@/api/client";
 import type {
   BulkDeleteFilter,
   BulkDeletePreview,
+  BulkDeleteResult,
   ProjectRecord,
   RecordCreateInput,
   RecordList,
+  RecordOperationApplyInput,
+  RecordOperationApplyResult,
   RecordUpdateInput,
 } from "@/types/api";
 
+export type RecordSearchScope = "current" | "all" | "selected";
+
 export interface RecordQuery {
   project_id?: string;
+  scope?: RecordSearchScope;
+  project_ids?: string[];
   status?: string;
   search?: string;
   experiment_date?: string;
@@ -21,6 +28,12 @@ export interface RecordQuery {
 function queryString(query: RecordQuery): string {
   const params = new URLSearchParams();
   Object.entries(query).forEach(([key, value]) => {
+    if (Array.isArray(value)) {
+      value.forEach((item) => {
+        if (item !== "") params.append(key, String(item));
+      });
+      return;
+    }
     if (value !== undefined && value !== "") params.set(key, String(value));
   });
   const encoded = params.toString();
@@ -29,6 +42,10 @@ function queryString(query: RecordQuery): string {
 
 export function listRecords(query: RecordQuery = {}): Promise<RecordList> {
   return apiRequest<RecordList>(`/records${queryString(query)}`);
+}
+
+export function getRecord(recordId: string): Promise<ProjectRecord> {
+  return apiRequest<ProjectRecord>(`/records/${recordId}`);
 }
 
 export function createRecord(payload: RecordCreateInput): Promise<ProjectRecord> {
@@ -44,6 +61,15 @@ export function updateRecord(
 ): Promise<ProjectRecord> {
   return apiRequest<ProjectRecord>(`/records/${recordId}`, {
     method: "PATCH",
+    body: jsonBody(payload),
+  });
+}
+
+export function applyRecordOperation(
+  payload: RecordOperationApplyInput,
+): Promise<RecordOperationApplyResult> {
+  return apiRequest<RecordOperationApplyResult>("/records/operations/apply", {
+    method: "POST",
     body: jsonBody(payload),
   });
 }
@@ -120,8 +146,8 @@ export function previewBulkDelete(
 export function executeBulkDelete(
   filter: BulkDeleteFilter,
   expectedRecordIds: string[],
-): Promise<{ deleted: number }> {
-  return apiRequest<{ deleted: number }>("/records/bulk-delete/execute", {
+): Promise<BulkDeleteResult> {
+  return apiRequest<BulkDeleteResult>("/records/bulk-delete/execute", {
     method: "POST",
     body: jsonBody({
       filter,

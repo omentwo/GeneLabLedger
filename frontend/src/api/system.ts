@@ -9,11 +9,56 @@ export const LEDGER_EDITOR_WIDTH_MIN = 50;
 export const LEDGER_EDITOR_HEIGHT_MIN = 75;
 export const LEDGER_EDITOR_SIZE_MAX = 100;
 export const LEDGER_EDITOR_SIZE_STEP = 5;
+export const LEDGER_FONT_SIZE_MIN = 8;
+export const LEDGER_FONT_SIZE_MAX = 28;
+export const LEDGER_FONT_SIZE_STEP = 1;
+export const LEDGER_ZOOM_MIN = 50;
+export const LEDGER_ZOOM_MAX = 200;
+export const LEDGER_ZOOM_STEP = 5;
+
+export const LEDGER_FONT_FAMILY_VALUES = [
+  "system",
+  "microsoft-yahei",
+  "simsun",
+  "consolas",
+] as const;
+
+export type LedgerFontFamily = (typeof LEDGER_FONT_FAMILY_VALUES)[number];
+
+export const LEDGER_FONT_FAMILY_OPTIONS: Array<{
+  value: LedgerFontFamily;
+  label: string;
+  css: string;
+}> = [
+  {
+    value: "system",
+    label: "系统默认",
+    css: 'Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
+  },
+  {
+    value: "microsoft-yahei",
+    label: "微软雅黑",
+    css: '"Microsoft YaHei", "PingFang SC", sans-serif',
+  },
+  {
+    value: "simsun",
+    label: "宋体",
+    css: 'SimSun, "Songti SC", serif',
+  },
+  {
+    value: "consolas",
+    label: "Consolas 等宽",
+    css: 'Consolas, "SFMono-Regular", monospace',
+  },
+];
 
 export type LedgerDisplaySettings = {
   rowPaddingY: number;
   editorWidthPercent: number;
   editorHeightPercent: number;
+  fontFamily: LedgerFontFamily;
+  fontSizePx: number;
+  zoomPercent: number;
 };
 
 export const LEDGER_SHORTCUT_MODIFIER_VALUES = [
@@ -35,6 +80,9 @@ export const DEFAULT_LEDGER_DISPLAY_SETTINGS = {
   rowPaddingY: 5,
   editorWidthPercent: LEDGER_EDITOR_SIZE_MAX,
   editorHeightPercent: LEDGER_EDITOR_SIZE_MAX,
+  fontFamily: "system",
+  fontSizePx: 14,
+  zoomPercent: 100,
 } as const;
 
 export const DEFAULT_LEDGER_SHORTCUT_SETTINGS = {
@@ -63,11 +111,29 @@ export function normalizeLedgerDisplaySettings(value: unknown): LedgerDisplaySet
     typeof rawHeightPercent === "number" && Number.isFinite(rawHeightPercent)
       ? Math.min(LEDGER_EDITOR_SIZE_MAX, Math.max(LEDGER_EDITOR_HEIGHT_MIN, Math.round(rawHeightPercent)))
       : DEFAULT_LEDGER_DISPLAY_SETTINGS.editorHeightPercent;
+  const fontFamily = LEDGER_FONT_FAMILY_VALUES.includes(
+    candidate.fontFamily as LedgerFontFamily,
+  )
+    ? (candidate.fontFamily as LedgerFontFamily)
+    : DEFAULT_LEDGER_DISPLAY_SETTINGS.fontFamily;
+  const rawFontSize = candidate.fontSizePx;
+  const fontSizePx =
+    typeof rawFontSize === "number" && Number.isFinite(rawFontSize)
+      ? Math.min(LEDGER_FONT_SIZE_MAX, Math.max(LEDGER_FONT_SIZE_MIN, Math.round(rawFontSize)))
+      : DEFAULT_LEDGER_DISPLAY_SETTINGS.fontSizePx;
+  const rawZoom = candidate.zoomPercent;
+  const zoomPercent =
+    typeof rawZoom === "number" && Number.isFinite(rawZoom)
+      ? Math.min(LEDGER_ZOOM_MAX, Math.max(LEDGER_ZOOM_MIN, Math.round(rawZoom / LEDGER_ZOOM_STEP) * LEDGER_ZOOM_STEP))
+      : DEFAULT_LEDGER_DISPLAY_SETTINGS.zoomPercent;
 
   return {
     rowPaddingY,
     editorWidthPercent,
     editorHeightPercent,
+    fontFamily,
+    fontSizePx,
+    zoomPercent,
   };
 }
 

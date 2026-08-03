@@ -205,6 +205,169 @@ def test_records_are_listed_oldest_first_and_custom_fields_are_independent(
     assert client.get(f"/api/records/{first['id']}").json()["values"][custom["id"]] == "100ng"
 
 
+def test_record_search_supports_project_scopes(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    tb = seeded_projects["TB"]
+    braf = seeded_projects["BRAFV600E"]
+    current_record = client.post(
+        "/api/records",
+        json={
+            "project_id": tb["id"],
+            "pathology_number": "SCOPE-CURRENT",
+        },
+    ).json()
+    other_project = client.post(
+        "/api/records",
+        json={
+            "project_id": braf["id"],
+            "pathology_number": "SCOPE-OTHER",
+        },
+    ).json()
+
+    current_result = client.get(
+        "/api/records",
+        params={
+            "scope": "current",
+            "project_id": tb["id"],
+            "search": "SCOPE-",
+        },
+    )
+    assert [record["id"] for record in current_result.json()["items"]] == [current_record["id"]]
+
+    all_result = client.get(
+        "/api/records",
+        params={"scope": "all", "search": "SCOPE-OTHER"},
+    )
+    assert [record["id"] for record in all_result.json()["items"]] == [other_project["id"]]
+
+    selected_result = client.get(
+        "/api/records",
+        params=[
+            ("scope", "selected"),
+            ("project_ids", braf["id"]),
+            ("search", "SCOPE-OTHER"),
+        ],
+    )
+    assert [record["id"] for record in selected_result.json()["items"]] == [other_project["id"]]
+
+
+def test_record_operation_undo_redo_updates_and_restores_exact_record_id(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    tb = seeded_projects["TB"]
+    custom = client.post(
+        f"/api/projects/{tb['id']}/fields",
+        json={"label": "撤销字段", "data_type": "text"},
+    ).json()
+    created = client.post(
+        "/api/records",
+        json={
+            "project_id": tb["id"],
+            "pathology_number": "HISTORY-001",
+            "values": {custom["id"]: "before"},
+        },
+    ).json()
+    before = client.get(f"/api/records/{created['id']}").json()
+    updated = client.patch(
+        f"/api/records/{created['id']}",
+        json={"status": "已完成", "values": {custom["id"]: "after"}},
+    )
+    assert updated.status_code == 200
+    after = updated.json()
+
+    undone = client.post(
+        "/api/records/operations/apply",
+        json={
+            "operation_id": "history-update-1",
+            "project_id": tb["id"],
+            "direction": "undo",
+            "before": [before],
+            "after": [after],
+        },
+    )
+    assert undone.status_code == 200
+    assert undone.json()["records"][0]["id"] == created["id"]
+    assert undone.json()["records"][0]["status"] == "待实验"
+    assert undone.json()["records"][0]["values"][custom["id"]] == "before"
+
+    redone = client.post(
+        "/api/records/operations/apply",
+        json={
+            "operation_id": "history-update-1",
+            "project_id": tb["id"],
+            "direction": "redo",
+            "before": [before],
+            "after": [after],
+        },
+    )
+    assert redone.status_code == 200
+    assert redone.json()["records"][0]["id"] == created["id"]
+    assert redone.json()["records"][0]["status"] == "已完成"
+    assert redone.json()["records"][0]["values"][custom["id"]] == "after"
+
+    assert client.delete(f"/api/records/{created['id']}").status_code == 204
+    restored = client.post(
+        "/api/records/operations/apply",
+        json={
+            "operation_id": "history-delete-1",
+            "project_id": tb["id"],
+            "direction": "undo",
+            "before": [after],
+            "after": [],
+        },
+    )
+    assert restored.status_code == 200
+    assert restored.json()["records"][0]["id"] == created["id"]
+    assert client.get(f"/api/records/{created['id']}").json()["values"][custom["id"]] == "after"
+
+    deleted_again = client.post(
+        "/api/records/operations/apply",
+        json={
+            "operation_id": "history-delete-1",
+            "project_id": tb["id"],
+            "direction": "redo",
+            "before": [after],
+            "after": [],
+        },
+    )
+    assert deleted_again.status_code == 200
+    assert deleted_again.json()["deleted_ids"] == [created["id"]]
+    assert client.get(f"/api/records/{created['id']}").status_code == 404
+
+
+def test_record_operation_rejects_conflicts_without_partial_changes(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    tb_id = seeded_projects["TB"]["id"]
+    record = client.post(
+        "/api/records",
+        json={"project_id": tb_id, "pathology_number": "HISTORY-CONFLICT"},
+    ).json()
+    before = client.get(f"/api/records/{record['id']}").json()
+    changed = client.patch(
+        f"/api/records/{record['id']}",
+        json={"pathology_number": "HISTORY-CONFLICT-EXTERNAL"},
+    ).json()
+    response = client.post(
+        "/api/records/operations/apply",
+        json={
+            "operation_id": "history-conflict-1",
+            "project_id": tb_id,
+            "direction": "undo",
+            "before": [before],
+            "after": [record],
+        },
+    )
+    assert response.status_code == 409
+    assert client.get(f"/api/records/{record['id']}").json()["pathology_number"] == changed[
+        "pathology_number"
+    ]
+
+
 def test_excel_export_can_be_previewed_and_imported_by_uuid(
     client: TestClient,
     seeded_projects: dict[str, dict],
@@ -339,7 +502,12 @@ def test_bulk_delete_by_ledger_date_requires_fresh_preview_and_unlocked_records(
         json={"filter": delete_filter, "expected_record_ids": preview["record_ids"]},
     )
     assert deleted.status_code == 200
-    assert deleted.json() == {"deleted": 2}
+    deleted_payload = deleted.json()
+    assert deleted_payload["deleted"] == 2
+    assert {record["id"] for record in deleted_payload["deleted_records"]} == {
+        first["id"],
+        second["id"],
+    }
     assert client.get(f"/api/records/{first['id']}").status_code == 404
     assert client.get(f"/api/records/{second['id']}").status_code == 404
 
