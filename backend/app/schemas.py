@@ -22,6 +22,23 @@ def normalize_highlight_color(value: str | None) -> str | None:
     return cleaned.lower()
 
 
+def normalize_cell_highlight_colors(value: dict[str, str] | None) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("单元格底色必须是字段 ID 到颜色的映射")
+    result: dict[str, str] = {}
+    for field_id, color in value.items():
+        if not isinstance(field_id, str) or not field_id.strip():
+            raise ValueError("单元格底色字段 ID 不能为空")
+        if not isinstance(color, str):
+            raise ValueError("单元格底色必须使用十六进制颜色")
+        normalized = normalize_highlight_color(color)
+        if normalized is not None:
+            result[field_id.strip()] = normalized
+    return result
+
+
 MappingSourceType = Literal[
     "unmapped",
     "field",
@@ -224,6 +241,29 @@ class RecordHighlightUpdate(BaseModel):
         return normalize_highlight_color(value)
 
 
+class RecordCellHighlightTarget(BaseModel):
+    record_id: str = Field(min_length=1, max_length=36)
+    field_id: str = Field(min_length=1, max_length=36)
+
+    @field_validator("record_id", "field_id")
+    @classmethod
+    def clean_id(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("ID 不能为空")
+        return cleaned
+
+
+class RecordCellHighlightUpdate(BaseModel):
+    cells: list[RecordCellHighlightTarget] = Field(min_length=1, max_length=10000)
+    highlight_color: str | None = Field(default=None, max_length=7)
+
+    @field_validator("highlight_color")
+    @classmethod
+    def clean_highlight_color(cls, value: str | None) -> str | None:
+        return normalize_highlight_color(value)
+
+
 class RecordAssignProject(BaseModel):
     target_project_id: str
 
@@ -239,6 +279,7 @@ class RecordRead(BaseModel):
     report_generated: bool
     locked: bool
     highlight_color: str | None
+    cell_highlight_colors: dict[str, str] = Field(default_factory=dict)
     values: dict[str, str]
     created_at: datetime
     updated_at: datetime
@@ -256,6 +297,7 @@ class RecordOperationSnapshot(BaseModel):
     report_generated: bool = False
     locked: bool = False
     highlight_color: str | None = Field(default=None, max_length=7)
+    cell_highlight_colors: dict[str, str] = Field(default_factory=dict)
     values: dict[str, str] = Field(default_factory=dict)
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -274,6 +316,11 @@ class RecordOperationSnapshot(BaseModel):
     @classmethod
     def clean_snapshot_highlight_color(cls, value: str | None) -> str | None:
         return normalize_highlight_color(value)
+
+    @field_validator("cell_highlight_colors")
+    @classmethod
+    def clean_snapshot_cell_highlight_colors(cls, value: dict[str, str]) -> dict[str, str]:
+        return normalize_cell_highlight_colors(value)
 
 
 class RecordOperationApply(BaseModel):

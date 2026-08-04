@@ -50,6 +50,7 @@ import {
   previewBulkDelete,
   listRecords,
   setRecordLock,
+  setCellsHighlight,
   setRecordsHighlight,
   setRecordsReportGenerated,
   updateRecord,
@@ -107,6 +108,10 @@ const tableRef = ref<{
 type GridCellPosition = { rowIndex: number; columnIndex: number };
 type GridCellRange = { anchor: GridCellPosition; focus: GridCellPosition };
 type GridCellEditSnapshot = { rowId: string; fieldId: string; value: string };
+type GridCellDragMode = "replace" | "shift" | "add";
+type GridClipboardCell = { rowOffset: number; columnOffset: number; value: string };
+type GridClipboardPayload = { version: 1; cells: GridClipboardCell[] };
+type GridPasteEntry = GridClipboardCell;
 type GridCellDragState = {
   pointerId: number;
   anchor: GridCellPosition;
@@ -116,11 +121,15 @@ type GridCellDragState = {
   lastX: number;
   lastY: number;
   dragging: boolean;
+  mode: GridCellDragMode;
+  initialSelectionKeys: Set<string>;
   tableElement: HTMLElement;
   scrollDirection: -1 | 0 | 1;
 };
 const activeGridCell = ref<GridCellPosition | null>(null);
 const gridCellRange = ref<GridCellRange | null>(null);
+const selectedGridCellKeys = ref<Set<string>>(new Set());
+const gridSelectionAnchor = ref<GridCellPosition | null>(null);
 const editingGridCell = ref<GridCellPosition | null>(null);
 const editingGridSnapshot = ref<GridCellEditSnapshot | null>(null);
 const gridSelectionDragging = ref(false);
@@ -128,6 +137,7 @@ let gridCellDragState: GridCellDragState | null = null;
 let gridCellAutoScrollTimer: number | null = null;
 let gridCellWheelUpdateTimer: number | null = null;
 let gridCellEditFinishPromise: Promise<boolean> | null = null;
+let lastGridClipboard: { plainText: string; payload: GridClipboardPayload } | null = null;
 let suppressGridClick = false;
 let suppressGridFocusReset = false;
 type SelectionRowInfo = {
@@ -201,6 +211,10 @@ const highlightDialogVisible = ref(false);
 const highlightLoading = ref(false);
 const highlightColor = ref("#fff2cc");
 const highlightTargetIds = ref<string[]>([]);
+type HighlightMode = "record" | "cell";
+type CellHighlightTarget = { recordId: string; fieldId: string };
+const highlightMode = ref<HighlightMode>("record");
+const highlightCellTargets = ref<CellHighlightTarget[]>([]);
 const bulkDeleteFilter = reactive<BulkDeleteFilter>({
   project_id: "",
   date_field: "experiment_date",
@@ -323,6 +337,8 @@ const fields = computed(() =>
 );
 const selectedCount = computed(() => selectedRecords.value.length);
 const tableRows = computed<LedgerRow[]>(() => [...records.value, ...draftRows.value]);
+const gridCellSelectionCount = computed(() => selectedGridCellKeys.value.size);
+const hasGridCellSelection = computed(() => gridCellSelectionCount.value > 0);
 const ledgerFontOption = computed(
   () =>
     LEDGER_FONT_FAMILY_OPTIONS.find(
@@ -393,6 +409,85 @@ function normalizedGridRange(range: GridCellRange): {
   };
 }
 
+const GRID_CELL_KEY_SEPARATOR = "\u0000";
+
+function gridCellKey(position: GridCellPosition): string {
+  const row = tableRows.value[position.rowIndex];
+  const field = fields.value[position.columnIndex];
+  return row && field ? `${row.id}${GRID_CELL_KEY_SEPARATOR}${field.id}` : "";
+}
+
+function gridCellPositionsForRange(range: GridCellRange): GridCellPosition[] {
+  const normalized = normalizedGridRange(range);
+  const positions: GridCellPosition[] = [];
+  for (let rowIndex = normalized.rowStart; rowIndex <= normalized.rowEnd; rowIndex += 1) {
+    for (
+      let columnIndex = normalized.columnStart;
+      columnIndex <= normalized.columnEnd;
+      columnIndex += 1
+    ) {
+      if (gridCellKey({ rowIndex, columnIndex })) positions.push({ rowIndex, columnIndex });
+    }
+  }
+  return positions;
+}
+
+function selectedGridCellPositions(): GridCellPosition[] {
+  const selectedKeys = selectedGridCellKeys.value;
+  if (!selectedKeys.size) return [];
+  const positions: GridCellPosition[] = [];
+  for (let rowIndex = 0; rowIndex < tableRows.value.length; rowIndex += 1) {
+    for (let columnIndex = 0; columnIndex < fields.value.length; columnIndex += 1) {
+      if (selectedKeys.has(gridCellKey({ rowIndex, columnIndex }))) {
+        positions.push({ rowIndex, columnIndex });
+      }
+    }
+  }
+  return positions;
+}
+
+function isGridCellSelected(position: GridCellPosition): boolean {
+  const key = gridCellKey(position);
+  return Boolean(key && selectedGridCellKeys.value.has(key));
+}
+
+function replaceGridCellSelection(
+  positions: GridCellPosition[],
+  active: GridCellPosition,
+  anchor: GridCellPosition = active,
+  range: GridCellRange | null = null,
+): void {
+  const keys = new Set(positions.map(gridCellKey).filter(Boolean));
+  selectedGridCellKeys.value = keys;
+  activeGridCell.value = clampGridCell(active);
+  gridSelectionAnchor.value = clampGridCell(anchor);
+  gridCellRange.value = range
+    ? {
+        anchor: { ...range.anchor },
+        focus: { ...range.focus },
+      }
+    : null;
+}
+
+function toggleGridCell(position: GridCellPosition): void {
+  const nextPosition = clampGridCell(position);
+  const key = gridCellKey(nextPosition);
+  if (!key) return;
+  const keys = new Set(selectedGridCellKeys.value);
+  if (keys.has(key)) keys.delete(key);
+  else keys.add(key);
+  selectedGridCellKeys.value = keys;
+  activeGridCell.value = nextPosition;
+  if (!gridSelectionAnchor.value) gridSelectionAnchor.value = nextPosition;
+  gridCellRange.value = null;
+}
+
+function clearGridCellSelection(): void {
+  selectedGridCellKeys.value = new Set();
+  gridCellRange.value = null;
+  gridSelectionAnchor.value = null;
+}
+
 function sameGridCell(left: GridCellPosition | null, right: GridCellPosition | null): boolean {
   return Boolean(
     left &&
@@ -408,32 +503,30 @@ function isGridCellEditing(position: GridCellPosition | null): boolean {
 
 function selectGridCell(position: GridCellPosition): void {
   const nextPosition = clampGridCell(position);
-  activeGridCell.value = nextPosition;
-  gridCellRange.value = {
-    anchor: { ...nextPosition },
-    focus: { ...nextPosition },
-  };
+  replaceGridCellSelection(
+    [nextPosition],
+    nextPosition,
+    nextPosition,
+    { anchor: { ...nextPosition }, focus: { ...nextPosition } },
+  );
 }
 
 const gridCellClassName = computed(() => {
   const currentRows = tableRows.value;
   const currentFields = fields.value;
-  const range = gridCellRange.value;
-  const normalizedRange = range ? normalizedGridRange(range) : null;
   const active = activeGridCell.value;
+  const selectedKeys = selectedGridCellKeys.value;
   return ({ row, columnIndex }: { row: LedgerRow; columnIndex: number }): string => {
     const fieldIndex = columnIndex - 2;
     if (fieldIndex < 0 || fieldIndex >= currentFields.length) return "";
     const rowIndex = currentRows.findIndex((candidate) => candidate.id === row.id);
     if (rowIndex < 0) return "";
     const classes: string[] = [];
-    if (
-      normalizedRange &&
-      rowIndex >= normalizedRange.rowStart &&
-      rowIndex <= normalizedRange.rowEnd &&
-      fieldIndex >= normalizedRange.columnStart &&
-      fieldIndex <= normalizedRange.columnEnd
-    ) {
+    const field = currentFields[fieldIndex];
+    if (field && row.cell_highlight_colors?.[field.id]) {
+      classes.push("cell-highlighted");
+    }
+    if (field && selectedKeys.has(`${row.id}${GRID_CELL_KEY_SEPARATOR}${field.id}`)) {
       classes.push("grid-cell-selected");
     }
     if (active?.rowIndex === rowIndex && active.columnIndex === fieldIndex) {
@@ -569,7 +662,7 @@ function enterGridCellEdit(position: GridCellPosition): void {
     return;
   }
   activeGridCell.value = nextPosition;
-  gridCellRange.value = null;
+  clearGridCellSelection();
   editingGridCell.value = nextPosition;
   editingGridSnapshot.value = {
     rowId: data.record.id,
@@ -599,7 +692,7 @@ function handleGridFocusIn(event: FocusEvent): void {
   if (!cell) return;
   activeGridCell.value = cell;
   if (!suppressGridFocusReset && !isGridCellEditing(cell)) {
-    selectGridCell(cell);
+    if (!isGridCellSelected(cell)) selectGridCell(cell);
     if (event.target === gridEditorRoot(cell)) void focusGridCell(cell);
   }
 }
@@ -719,10 +812,23 @@ function updateGridCellDrag(cell: GridCellPosition): void {
   if (!state) return;
   state.focus = clampGridCell(cell);
   activeGridCell.value = state.focus;
-  gridCellRange.value = {
+  const range = {
     anchor: { ...state.anchor },
     focus: { ...state.focus },
   };
+  if (state.mode === "add") {
+    const keys = new Set(state.initialSelectionKeys);
+    gridCellPositionsForRange(range).forEach((position) => keys.add(gridCellKey(position)));
+    selectedGridCellKeys.value = keys;
+    gridCellRange.value = null;
+  } else {
+    replaceGridCellSelection(
+      gridCellPositionsForRange(range),
+      state.focus,
+      state.anchor,
+      range,
+    );
+  }
 }
 
 function handleGridPointerMove(event: PointerEvent): void {
@@ -772,7 +878,14 @@ function handleGridPointerDown(event: PointerEvent): void {
   if (editingGridCell.value) void finishGridCellEdit(true, false);
 
   stopGridCellDrag(false);
-  selectGridCell(cell);
+  const modifierAdd = event.ctrlKey || event.metaKey;
+  const modifierShift = event.shiftKey;
+  const mode: GridCellDragMode = modifierAdd ? "add" : modifierShift ? "shift" : "replace";
+  const anchor = modifierShift
+    ? gridSelectionAnchor.value ?? activeGridCell.value ?? cell
+    : cell;
+  if (mode === "replace") selectGridCell(cell);
+  else activeGridCell.value = cell;
   void focusGridCell(cell);
   gridCellDragState = {
     pointerId: event.pointerId,
@@ -783,9 +896,12 @@ function handleGridPointerDown(event: PointerEvent): void {
     lastX: event.clientX,
     lastY: event.clientY,
     dragging: false,
+    mode,
+    initialSelectionKeys: new Set(selectedGridCellKeys.value),
     tableElement,
     scrollDirection: 0,
   };
+  if (mode === "shift") gridCellDragState.anchor = clampGridCell(anchor);
   document.addEventListener("pointermove", handleGridPointerMove, { passive: false });
   document.addEventListener("pointerup", handleGridPointerUp, true);
   document.addEventListener("pointercancel", handleGridPointerCancel, true);
@@ -802,7 +918,22 @@ function handleGridClick(event: MouseEvent): void {
     return;
   }
   if (isGridCellEditing(cell)) {
-    gridCellRange.value = null;
+    clearGridCellSelection();
+    return;
+  }
+  if (event.ctrlKey || event.metaKey) {
+    toggleGridCell(cell);
+    return;
+  }
+  if (event.shiftKey) {
+    const anchor = gridSelectionAnchor.value ?? activeGridCell.value ?? cell;
+    const range = { anchor: clampGridCell(anchor), focus: clampGridCell(cell) };
+    replaceGridCellSelection(
+      gridCellPositionsForRange(range),
+      cell,
+      range.anchor,
+      range,
+    );
     return;
   }
   selectGridCell(cell);
@@ -863,7 +994,7 @@ function handleGridKeydown(event: KeyboardEvent): void {
   }
 
   if (
-    gridCellRange.value &&
+    selectedGridCellKeys.value.size > 0 &&
     (event.key === "Delete" || event.key === "Backspace")
   ) {
     event.preventDefault();
@@ -874,12 +1005,8 @@ function handleGridKeydown(event: KeyboardEvent): void {
 
   const delta = gridArrowDelta(event.key);
   if (!delta) return;
-  const range = gridCellRange.value;
-  if (range && !sameGridCell(range.anchor, range.focus)) {
-    return;
-  }
+  if (selectedGridCellKeys.value.size !== 1) return;
   if (event.altKey || event.shiftKey || event.ctrlKey || event.metaKey) return;
-  if (!range) return;
   event.preventDefault();
   event.stopPropagation();
   const nextCell = moveGridCell(cell, delta.rowDelta, delta.columnDelta);
@@ -887,43 +1014,110 @@ function handleGridKeydown(event: KeyboardEvent): void {
   void focusGridCell(nextCell);
 }
 
-function hasInputTextSelection(element: EventTarget | null): boolean {
-  if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) {
-    return false;
+const GRID_CLIPBOARD_MIME = "application/x-gene-lab-ledger-cells";
+
+function parseGridClipboardPayload(raw: string): GridClipboardPayload | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    const candidate = parsed as { version?: unknown; cells?: unknown };
+    if (candidate.version !== 1 || !Array.isArray(candidate.cells) || !candidate.cells.length) {
+      return null;
+    }
+    const cells: GridClipboardCell[] = [];
+    for (const item of candidate.cells) {
+      if (!item || typeof item !== "object") return null;
+      const cell = item as {
+        rowOffset?: unknown;
+        columnOffset?: unknown;
+        value?: unknown;
+      };
+      if (
+        !Number.isInteger(cell.rowOffset) ||
+        !Number.isInteger(cell.columnOffset) ||
+        typeof cell.value !== "string"
+      ) {
+        return null;
+      }
+      cells.push({
+        rowOffset: cell.rowOffset as number,
+        columnOffset: cell.columnOffset as number,
+        value: cell.value,
+      });
+    }
+    return { version: 1, cells };
+  } catch {
+    return null;
   }
-  const start = element.selectionStart;
-  const end = element.selectionEnd;
-  return start !== null && end !== null && start !== end;
+}
+
+function gridClipboardSelection(eventCell: GridCellPosition | null): {
+  positions: GridCellPosition[];
+  active: GridCellPosition;
+} | null {
+  let positions = selectedGridCellPositions();
+  if (!positions.length && eventCell) positions = [clampGridCell(eventCell)];
+  if (!positions.length) return null;
+  const firstPosition = positions[0];
+  if (!firstPosition) return null;
+  const activeCandidate = activeGridCell.value;
+  const active =
+    (activeCandidate && positions.some((position) => sameGridCell(position, activeCandidate))
+      ? activeCandidate
+      : firstPosition);
+  return { positions, active: clampGridCell(active) };
 }
 
 function handleGridCopy(event: ClipboardEvent): void {
-  const range = gridCellRange.value;
   const eventCell = gridCellFromElement(event.target);
   // Editing keeps the browser's native text-copy behavior. Cell/range copy
   // is only active while the grid itself owns the selection.
-  if (!range && eventCell && isGridCellEditing(eventCell)) return;
-  if (!range && hasInputTextSelection(event.target)) return;
-  // A click/focus can select one active cell without an extended range. Treat
-  // the cell that owns the copy event as a one-cell range as a fallback.
-  const copyRange = range ?? (eventCell ? { anchor: eventCell, focus: eventCell } : null);
-  if (!copyRange) return;
-  const normalized = normalizedGridRange(copyRange);
+  if (eventCell && isGridCellEditing(eventCell)) {
+    lastGridClipboard = null;
+    return;
+  }
+  const selection = gridClipboardSelection(eventCell);
+  if (!selection) return;
+  const { positions, active } = selection;
+  const selectedKeys = new Set(positions.map(gridCellKey));
+  const rowStart = Math.min(...positions.map((position) => position.rowIndex));
+  const rowEnd = Math.max(...positions.map((position) => position.rowIndex));
+  const columnStart = Math.min(...positions.map((position) => position.columnIndex));
+  const columnEnd = Math.max(...positions.map((position) => position.columnIndex));
   const matrix: string[] = [];
-  for (let rowIndex = normalized.rowStart; rowIndex <= normalized.rowEnd; rowIndex += 1) {
+  for (let rowIndex = rowStart; rowIndex <= rowEnd; rowIndex += 1) {
     const row = tableRows.value[rowIndex];
     if (!row) continue;
     const values: string[] = [];
-    for (
-      let columnIndex = normalized.columnStart;
-      columnIndex <= normalized.columnEnd;
-      columnIndex += 1
-    ) {
+    for (let columnIndex = columnStart; columnIndex <= columnEnd; columnIndex += 1) {
       const field = fields.value[columnIndex];
-      values.push(field ? valueFor(row, field) : "");
+      const key = gridCellKey({ rowIndex, columnIndex });
+      values.push(field && selectedKeys.has(key) ? valueFor(row, field) : "");
     }
     matrix.push(values.join("\t"));
   }
-  event.clipboardData?.setData("text/plain", matrix.join("\n"));
+  const payload: GridClipboardPayload = {
+    version: 1,
+    cells: positions.map((position) => ({
+      rowOffset: position.rowIndex - active.rowIndex,
+      columnOffset: position.columnIndex - active.columnIndex,
+      value: (() => {
+        const row = tableRows.value[position.rowIndex];
+        const field = fields.value[position.columnIndex];
+        return row && field ? valueFor(row, field) : "";
+      })(),
+    })),
+  };
+  const clipboard = event.clipboardData;
+  if (!clipboard) return;
+  const plainText = matrix.join("\n");
+  lastGridClipboard = { plainText, payload };
+  try {
+    clipboard.setData(GRID_CLIPBOARD_MIME, JSON.stringify(payload));
+  } catch {
+    // Browsers may reject custom clipboard MIME types; text/plain remains usable.
+  }
+  clipboard.setData("text/plain", plainText);
   event.preventDefault();
   event.stopPropagation();
 }
@@ -931,55 +1125,59 @@ function handleGridCopy(event: ClipboardEvent): void {
 function handleGridPaste(event: ClipboardEvent): void {
   const eventCell = gridCellFromElement(event.target);
   if (eventCell && isGridCellEditing(eventCell)) return;
-  const range = gridCellRange.value;
-  const text = event.clipboardData?.getData("text/plain") ?? "";
-  if (!range || !text) return;
-  const normalized = normalizedGridRange(range);
+  const destination = eventCell ?? activeGridCell.value;
+  if (!destination) return;
+  const clipboard = event.clipboardData;
+  if (!clipboard) return;
+  const text = clipboard.getData("text/plain");
+  const customPayload =
+    parseGridClipboardPayload(clipboard.getData(GRID_CLIPBOARD_MIME)) ??
+    (lastGridClipboard?.plainText === text ? lastGridClipboard.payload : null);
+  if (!customPayload && !text) return;
   event.preventDefault();
   event.stopPropagation();
-  void pasteGrid(event, normalized.rowStart, normalized.columnStart).then(() => {
-    const start = { rowIndex: normalized.rowStart, columnIndex: normalized.columnStart };
-    selectGridCell(start);
+  const start = clampGridCell(destination);
+  void pasteGrid(
+    event,
+    start.rowIndex,
+    start.columnIndex,
+    customPayload?.cells,
+  ).then((positions) => {
+    const targetPositions = positions.length ? positions : [start];
+    replaceGridCellSelection(targetPositions, start, start, null);
     void focusGridCell(start);
   });
 }
 
 async function clearGridCellRange(): Promise<void> {
-  const range = gridCellRange.value;
-  if (!range) return;
-  const normalized = normalizedGridRange(range);
+  const positions = selectedGridCellPositions();
+  if (!positions.length) return;
   let cleared = 0;
   let skippedLocked = 0;
   let skippedRequired = 0;
   const beforeById = new Map<string, ProjectRecord>();
   const changedIds = new Set<string>();
-  for (let rowIndex = normalized.rowStart; rowIndex <= normalized.rowEnd; rowIndex += 1) {
-    for (
-      let columnIndex = normalized.columnStart;
-      columnIndex <= normalized.columnEnd;
-      columnIndex += 1
-    ) {
-      const record = tableRows.value[rowIndex];
-      const field = fields.value[columnIndex];
-      if (!record || !field) continue;
-      if (record.locked) {
-        skippedLocked += 1;
-        continue;
-      }
-      if (field.system_key === "pathology_number" || field.system_key === "status") {
-        skippedRequired += 1;
-        continue;
-      }
-      if (!valueFor(record, field)) continue;
-      if (!isDraft(record) && !beforeById.has(record.id)) {
-        beforeById.set(record.id, snapshotRecord(record));
-      }
-      setValue(record, field, "");
-      const saved = await saveField(record, field, { recordHistory: false });
-      if (saved) {
-        changedIds.add(record.id);
-        cleared += 1;
-      }
+  for (const { rowIndex, columnIndex } of positions) {
+    const record = tableRows.value[rowIndex];
+    const field = fields.value[columnIndex];
+    if (!record || !field) continue;
+    if (record.locked) {
+      skippedLocked += 1;
+      continue;
+    }
+    if (field.system_key === "pathology_number" || field.system_key === "status") {
+      skippedRequired += 1;
+      continue;
+    }
+    if (!valueFor(record, field)) continue;
+    if (!isDraft(record) && !beforeById.has(record.id)) {
+      beforeById.set(record.id, snapshotRecord(record));
+    }
+    setValue(record, field, "");
+    const saved = await saveField(record, field, { recordHistory: false });
+    if (saved) {
+      changedIds.add(record.id);
+      cleared += 1;
     }
   }
   if (changedIds.size) {
@@ -992,12 +1190,18 @@ async function clearGridCellRange(): Promise<void> {
       activeProjectId.value,
     );
   }
-  const start = {
-    rowIndex: normalized.rowStart,
-    columnIndex: normalized.columnStart,
-  };
-  selectGridCell(start);
-  void focusGridCell(start);
+  const currentActive = activeGridCell.value;
+  const active =
+    currentActive && positions.some((position) => sameGridCell(position, currentActive))
+      ? clampGridCell(currentActive)
+      : positions[0];
+  if (!active) return;
+  selectedGridCellKeys.value = new Set(positions.map(gridCellKey).filter(Boolean));
+  activeGridCell.value = active;
+  gridCellRange.value = positions.length === 1
+    ? { anchor: { ...active }, focus: { ...active } }
+    : null;
+  void focusGridCell(active);
   if (cleared) ElMessage.success(`已清空 ${cleared} 个单元格`);
   if (skippedLocked) ElMessage.info(`已跳过 ${skippedLocked} 个锁定单元格`);
   if (skippedRequired) ElMessage.info(`已跳过 ${skippedRequired} 个必填状态单元格`);
@@ -1228,6 +1432,7 @@ function makeDraftRow(): LedgerRow {
     report_generated: false,
     locked: false,
     highlight_color: null,
+    cell_highlight_colors: {},
     values: {},
     created_at: now,
     updated_at: now,
@@ -1425,6 +1630,14 @@ function replaceRecord(updated: ProjectRecord): void {
   rememberRecord(updated);
 }
 
+function handleTableSelectionChange(rows: ProjectRecord[]): void {
+  selectedRecords.value = rows;
+  if (rows.length) {
+    activeGridCell.value = null;
+    clearGridCellSelection();
+  }
+}
+
 function snapshotRecord(record: ProjectRecord): ProjectRecord {
   return cloneLedgerRecord(record);
 }
@@ -1455,6 +1668,8 @@ function reconcileOperationResult(result: {
     return created || left.id.localeCompare(right.id);
   });
   selectedRecords.value = [];
+  activeGridCell.value = null;
+  clearGridCellSelection();
   rememberAll();
 }
 
@@ -1746,6 +1961,8 @@ async function loadRecords(
       globalSearchTotal.value = 0;
       tableProjectId.value = projectId;
     }
+    activeGridCell.value = null;
+    clearGridCellSelection();
     fieldErrors.value = {};
     selectedRecords.value = [];
     if (!isGlobalScope) rememberAll();
@@ -1876,7 +2093,21 @@ function selectByDateRange(): void {
   }
 }
 
-function rowCellStyle({ row }: { row: LedgerRow }): CSSProperties {
+function rowCellStyle({
+  row,
+  column,
+  columnIndex,
+}: {
+  row: LedgerRow;
+  column?: { columnKey?: string };
+  columnIndex?: number;
+}): CSSProperties {
+  const fieldIndex = typeof columnIndex === "number" ? columnIndex - 2 : -1;
+  const fieldId = column?.columnKey ?? fields.value[fieldIndex]?.id;
+  const cellColor = fieldId ? row.cell_highlight_colors?.[fieldId] : undefined;
+  if (cellColor) {
+    return { "--cell-highlight-color": cellColor } as CSSProperties;
+  }
   return row.highlight_color ? { backgroundColor: row.highlight_color } : {};
 }
 
@@ -1895,12 +2126,25 @@ function rowStyle({ row }: { row: LedgerRow }): CSSProperties {
     : {};
 }
 
+function collectGridCellHighlightTargets(): CellHighlightTarget[] {
+  const targets: CellHighlightTarget[] = [];
+  for (const { rowIndex, columnIndex } of selectedGridCellPositions()) {
+    const row = tableRows.value[rowIndex];
+    const field = fields.value[columnIndex];
+    if (!row || !field || isDraft(row)) continue;
+    targets.push({ recordId: row.id, fieldId: field.id });
+  }
+  return targets;
+}
+
 function openHighlightDialog(targets: ProjectRecord[]): void {
   const uniqueTargets = [...new Map(targets.map((record) => [record.id, record])).values()];
   if (!uniqueTargets.length) {
     ElMessage.warning("请先勾选需要标记的记录");
     return;
   }
+  highlightMode.value = "record";
+  highlightCellTargets.value = [];
   highlightTargetIds.value = uniqueTargets.map((record) => record.id);
   const firstColor = uniqueTargets[0]?.highlight_color ?? null;
   highlightColor.value =
@@ -1914,6 +2158,31 @@ function openSelectedHighlightDialog(): void {
   openHighlightDialog(selectedRecords.value);
 }
 
+function openCellHighlightDialog(): void {
+  const targets = collectGridCellHighlightTargets();
+  if (!targets.length) {
+    ElMessage.warning("当前选区没有可设置底色的已保存单元格");
+    return;
+  }
+  highlightMode.value = "cell";
+  highlightTargetIds.value = [];
+  highlightCellTargets.value = targets;
+  const colors = targets.map(
+    ({ recordId, fieldId }) =>
+      records.value.find((record) => record.id === recordId)?.cell_highlight_colors?.[fieldId] ??
+      null,
+  );
+  const firstColor = colors[0];
+  highlightColor.value =
+    firstColor && colors.every((color) => color === firstColor) ? firstColor : "#fff2cc";
+  highlightDialogVisible.value = true;
+}
+
+function openCurrentHighlightDialog(): void {
+  if (hasGridCellSelection.value) openCellHighlightDialog();
+  else openSelectedHighlightDialog();
+}
+
 function selectHighlightColor(color: string): void {
   highlightColor.value = color;
 }
@@ -1923,6 +2192,39 @@ function isHighlightColorSelected(color: string): boolean {
 }
 
 async function submitHighlight(color: string | null): Promise<void> {
+  if (highlightMode.value === "cell") {
+    const targets = highlightCellTargets.value;
+    if (!targets.length) return;
+    const recordIds = [...new Set(targets.map((target) => target.recordId))];
+    highlightLoading.value = true;
+    try {
+      const before = records.value
+        .filter((record) => recordIds.includes(record.id))
+        .map(snapshotRecord);
+      const updated = await setCellsHighlight(
+        targets.map(({ recordId, fieldId }) => ({ record_id: recordId, field_id: fieldId })),
+        color,
+      );
+      updated.forEach(replaceRecord);
+      pushHistory(
+        "批量修改单元格底色",
+        before,
+        updated,
+        updated[0]?.project_id ?? activeProjectId.value,
+      );
+      highlightDialogVisible.value = false;
+      ElMessage.success(
+        color
+          ? `已为 ${targets.length} 个单元格设置底色`
+          : `已清除 ${targets.length} 个单元格的底色标记`,
+      );
+    } catch (error) {
+      ElMessage.error(error instanceof Error ? error.message : "单元格底色保存失败");
+    } finally {
+      highlightLoading.value = false;
+    }
+    return;
+  }
   const recordIds = highlightTargetIds.value;
   if (!recordIds.length) return;
   highlightLoading.value = true;
@@ -1958,6 +2260,18 @@ function clearHighlight(): Promise<void> {
 }
 
 async function clearSelectedHighlight(): Promise<void> {
+  if (hasGridCellSelection.value) {
+    const targets = collectGridCellHighlightTargets();
+    if (!targets.length) {
+      ElMessage.warning("当前选区没有可清除底色的已保存单元格");
+      return;
+    }
+    highlightMode.value = "cell";
+    highlightTargetIds.value = [];
+    highlightCellTargets.value = targets;
+    await submitHighlight(null);
+    return;
+  }
   const recordIds = [...new Set(selectedRecords.value.map((record) => record.id))];
   if (!recordIds.length) {
     ElMessage.warning("请先勾选需要清除底色的记录");
@@ -2010,55 +2324,71 @@ async function pasteGrid(
   event: ClipboardEvent,
   startRowIndex: number,
   startColumnIndex: number,
-): Promise<void> {
-  const text = event.clipboardData?.getData("text/plain") ?? "";
-  if (!text) return;
+  exactCells?: GridPasteEntry[],
+): Promise<GridCellPosition[]> {
+  const text = exactCells ? "" : event.clipboardData?.getData("text/plain") ?? "";
+  if (!exactCells && !text) return [];
   const projectId = activeProjectId.value;
   event.preventDefault();
   // Pasting should preserve the current viewport and the starting cell.  A
   // pending "add record" scroll or a newly-created draft row must not move
   // the table to the bottom while the paste is being committed.
   clearBottomScrollTimers();
-  const lines = text.replace(/\r/g, "").split("\n");
+  const lines = exactCells ? [] : text.replace(/\r/g, "").split("\n");
   if (lines.at(-1) === "") lines.pop();
   const matrix = lines.map((line) => line.split("\t"));
+  const entries: GridPasteEntry[] =
+    exactCells ??
+    matrix.flatMap((rowValues, rowOffset) =>
+      rowValues.map((value, columnOffset) => ({ rowOffset, columnOffset, value })),
+    );
+  if (!entries.length) return [];
   const changedRows = new Map<string, { record: LedgerRow; rowNumber: number }>();
   const beforeById = new Map<string, ProjectRecord>();
+  const changedPositions: GridCellPosition[] = [];
+  const changedPositionKeys = new Set<string>();
   let skippedLocked = 0;
   let changedCells = 0;
 
   try {
-    const missingRows = startRowIndex + matrix.length - tableRows.value.length;
+    const maxRowOffset = Math.max(...entries.map((entry) => entry.rowOffset), 0);
+    const missingRows = startRowIndex + maxRowOffset + 1 - tableRows.value.length;
     for (let index = 0; index < missingRows; index += 1) appendDraftRow(false);
     const rows = tableRows.value;
 
-    matrix.forEach((rowValues, rowOffset) => {
-      const record = rows[startRowIndex + rowOffset];
+    entries.forEach((entry) => {
+      const targetRowIndex = startRowIndex + entry.rowOffset;
+      const targetColumnIndex = startColumnIndex + entry.columnOffset;
+      const record = rows[targetRowIndex];
       if (!record) return;
+      const field = fields.value[targetColumnIndex];
+      if (!field || targetColumnIndex < 0 || targetRowIndex < 0) return;
+      const position = { rowIndex: targetRowIndex, columnIndex: targetColumnIndex };
+      const positionKey = `${targetRowIndex}:${targetColumnIndex}`;
+      if (!changedPositionKeys.has(positionKey)) {
+        changedPositionKeys.add(positionKey);
+        changedPositions.push(position);
+      }
       if (record.locked) {
         skippedLocked += 1;
         return;
       }
-      rowValues.forEach((rawValue, columnOffset) => {
-        const field = fields.value[startColumnIndex + columnOffset];
-        if (!field) return;
-        const value = rawValue.trim();
-        if (!isDraft(record) && !beforeById.has(record.id)) {
-          beforeById.set(record.id, snapshotRecord(record));
-        }
-        // Validate core values before mutating the row.  This keeps an invalid
-        // pasted date from becoming an unexplainable batch-save failure.
-        payloadForField(record, field, value);
-        setValue(record, field, value);
-        if (field.system_key === "experiment_date") {
-          record.experiment_date = normalizeDate(value) || null;
-        }
-        changedRows.set(record.id, {
-          record,
-          rowNumber: startRowIndex + rowOffset + 2,
-        });
-        changedCells += 1;
+      const value = exactCells ? entry.value : entry.value.trim();
+      if (!isDraft(record) && !beforeById.has(record.id)) {
+        beforeById.set(record.id, snapshotRecord(record));
+      }
+      // Validate core values before mutating the row.  This keeps an invalid
+      // pasted date from becoming an unexplainable batch-save failure.
+      payloadForField(record, field, value);
+      setValue(record, field, value);
+      if (field.system_key === "experiment_date") {
+        record.experiment_date = normalizeDate(value) || null;
+      }
+      changedRows.set(record.id, {
+        record,
+        rowNumber: targetRowIndex + 2,
       });
+      changedCells += 1;
     });
 
     const committableEntries = [...changedRows.values()].filter(
@@ -2085,11 +2415,13 @@ async function pasteGrid(
       ElMessage.success(`已粘贴 ${changedCells} 个单元格，填写病理号后将自动保存`);
     }
     if (skippedLocked) {
-      ElMessage.info(`已跳过 ${skippedLocked} 条锁定记录`);
+      ElMessage.info(`已跳过 ${skippedLocked} 个锁定单元格`);
     }
+    return changedPositions;
   } catch (error) {
     await loadRecords(projectId, { showLoading: false });
     ElMessage.error(error instanceof Error ? error.message : "粘贴保存失败");
+    return [];
   }
 }
 
@@ -2206,6 +2538,8 @@ async function deleteSelectedRecords(): Promise<void> {
       .map(snapshotRecord);
     records.value = records.value.filter((record) => !deletedIds.has(record.id));
     selectedRecords.value = [];
+    activeGridCell.value = null;
+    clearGridCellSelection();
     rememberAll();
     pushHistory(
       "批量删除台账记录",
@@ -2390,6 +2724,8 @@ async function confirmDateRangeDelete(): Promise<void> {
     bulkDeletePreview.value = null;
     const deletedIds = new Set(result.deleted_records.map((record) => record.id));
     records.value = records.value.filter((record) => !deletedIds.has(record.id));
+    activeGridCell.value = null;
+    clearGridCellSelection();
     rememberAll();
     pushHistory("按日期批量删除台账记录", result.deleted_records, [], bulkDeleteFilter.project_id);
     ElMessage.success(`已删除 ${result.deleted} 条记录`);
@@ -2449,6 +2785,8 @@ async function removeRecord(record: ProjectRecord): Promise<void> {
     const before = snapshotRecord(record);
     await deleteRecord(record.id);
     records.value = records.value.filter((item) => item.id !== record.id);
+    activeGridCell.value = null;
+    clearGridCellSelection();
     pushHistory("删除台账记录", [before], [], before.project_id);
     ElMessage.success("台账记录已删除");
   } catch (error) {
@@ -2518,7 +2856,7 @@ watch(activeProjectId, async (projectId, previousProjectId) => {
     editingGridCell.value = null;
     editingGridSnapshot.value = null;
     activeGridCell.value = null;
-    gridCellRange.value = null;
+    clearGridCellSelection();
     draftRows.value = [];
     selectedRecords.value = [];
     selectionStartDate.value = "";
@@ -2528,6 +2866,8 @@ watch(activeProjectId, async (projectId, previousProjectId) => {
     importPreview.value = null;
     highlightDialogVisible.value = false;
     highlightTargetIds.value = [];
+    highlightMode.value = "record";
+    highlightCellTargets.value = [];
     bulkDeleteDialogVisible.value = false;
     bulkDeletePreview.value = null;
     persistedValues.clear();
@@ -2584,7 +2924,8 @@ onBeforeUnmount(() => {
   editingGridCell.value = null;
   editingGridSnapshot.value = null;
   activeGridCell.value = null;
-  gridCellRange.value = null;
+  clearGridCellSelection();
+  lastGridClipboard = null;
   bottomScrollTimers.forEach((timer) => window.clearTimeout(timer));
   bottomScrollTimers = [];
 });
@@ -2771,7 +3112,8 @@ onBeforeUnmount(() => {
     </section>
 
     <section v-if="!globalSearchActive" class="selection-bar">
-      <strong>已选 {{ selectedCount }} 条</strong>
+      <strong v-if="hasGridCellSelection">已选 {{ gridCellSelectionCount }} 个单元格</strong>
+      <strong v-else>已选 {{ selectedCount }} 条记录</strong>
       <div class="selection-quick-actions" aria-label="快速选择">
         <el-button @click="selectAllVisible">全选</el-button>
         <el-button @click="invertVisibleSelection">反选</el-button>
@@ -2796,19 +3138,19 @@ onBeforeUnmount(() => {
       </el-button>
       <el-button
         :icon="Brush"
-        :disabled="!selectedCount"
-        @click="openSelectedHighlightDialog"
+        :disabled="!selectedCount && !hasGridCellSelection"
+        @click="openCurrentHighlightDialog"
       >
-        设置底色
+        {{ hasGridCellSelection ? "设置单元格底色" : "设置底色" }}
       </el-button>
       <el-button
         :icon="Delete"
         plain
         :loading="highlightLoading"
-        :disabled="!selectedCount"
+        :disabled="!selectedCount && !hasGridCellSelection"
         @click="clearSelectedHighlight"
       >
-        清除底色
+        {{ hasGridCellSelection ? "清除单元格底色" : "清除底色" }}
       </el-button>
       <el-button :icon="Lock" @click="updateSelectedLock(true)">
         锁定
@@ -2871,7 +3213,7 @@ onBeforeUnmount(() => {
         :row-style="rowStyle"
         :cell-style="rowCellStyle"
         :cell-class-name="gridCellClassName"
-        @selection-change="selectedRecords = $event"
+        @selection-change="handleTableSelectionChange"
         @pointerdown="handleSelectionPointerDown"
         @header-dragend="handleHeaderResize"
       >
@@ -3063,13 +3405,22 @@ onBeforeUnmount(() => {
 
   <el-dialog
     v-model="highlightDialogVisible"
-    :title="`设置记录底色（${highlightTargetIds.length} 条）`"
+    :title="
+      highlightMode === 'cell'
+        ? `设置单元格底色（${highlightCellTargets.length} 个）`
+        : `设置记录底色（${highlightTargetIds.length} 条）`
+    "
     width="430px"
     destroy-on-close
   >
     <div class="highlight-dialog-body">
       <p class="dialog-note">
-        选择一种底色后，会应用到当前选中的记录；锁定记录也可以设置或清除底色标记。
+        <template v-if="highlightMode === 'cell'">
+          选择一种底色后，会应用到当前选中的单元格；矩形选区中的草稿行不会写入台账。
+        </template>
+        <template v-else>
+          选择一种底色后，会应用到当前选中的记录；锁定记录也可以设置或清除底色标记。
+        </template>
       </p>
       <div class="highlight-palette-section">
         <div class="highlight-palette-title">主题颜色</div>
@@ -3882,6 +4233,17 @@ onBeforeUnmount(() => {
 :deep(.el-table .highlighted-row .el-select__wrapper),
 :deep(.el-table .highlighted-row .el-textarea__inner) {
   background-color: var(--record-highlight-color);
+}
+
+:deep(.el-table td.cell-highlighted),
+:deep(.el-table td.cell-highlighted:hover) {
+  background-color: var(--cell-highlight-color) !important;
+}
+
+:deep(.el-table td.cell-highlighted .el-input__wrapper),
+:deep(.el-table td.cell-highlighted .el-select__wrapper),
+:deep(.el-table td.cell-highlighted .el-textarea__inner) {
+  background-color: var(--cell-highlight-color) !important;
 }
 
 :deep(.el-table td.grid-cell-selected) {

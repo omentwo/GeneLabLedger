@@ -134,6 +134,21 @@ export function setRecordsHighlight(
   });
 }
 
+export type RecordCellHighlightTarget = { record_id: string; field_id: string };
+
+export function setCellsHighlight(
+  cells: RecordCellHighlightTarget[],
+  highlightColor: string | null,
+): Promise<ProjectRecord[]> {
+  return apiRequest<ProjectRecord[]>("/records/cell-highlights", {
+    method: "PUT",
+    body: jsonBody({
+      cells,
+      highlight_color: highlightColor,
+    }),
+  });
+}
+
 export function previewBulkDelete(
   filter: BulkDeleteFilter,
 ): Promise<BulkDeletePreview> {

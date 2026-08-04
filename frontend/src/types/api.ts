@@ -47,6 +47,7 @@ export interface ProjectRecord {
   report_generated: boolean;
   locked: boolean;
   highlight_color: string | null;
+  cell_highlight_colors?: Record<string, string>;
   values: Record<string, string>;
   created_at: string;
   updated_at: string;

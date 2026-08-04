@@ -15,6 +15,7 @@ def record_dict(record: ProjectRecord) -> dict:
         "report_generated": record.report_generated,
         "locked": record.locked,
         "highlight_color": record.highlight_color,
+        "cell_highlight_colors": dict(record.cell_highlight_colors or {}),
         "values": {value.field_id: value.value_text for value in record.values},
         "created_at": record.created_at,
         "updated_at": record.updated_at,

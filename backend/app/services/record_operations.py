@@ -32,6 +32,7 @@ def snapshot_record(record: ProjectRecord) -> dict:
         "report_generated": record.report_generated,
         "locked": record.locked,
         "highlight_color": record.highlight_color,
+        "cell_highlight_colors": dict(record.cell_highlight_colors or {}),
         "values": {value.field_id: value.value_text for value in record.values},
         "created_at": record.created_at,
         "updated_at": record.updated_at,
@@ -56,6 +57,8 @@ def _snapshot_matches(record: ProjectRecord, snapshot: RecordOperationSnapshot) 
     if record.locked != snapshot.locked:
         return False
     if record.highlight_color != snapshot.highlight_color:
+        return False
+    if dict(record.cell_highlight_colors or {}) != snapshot.cell_highlight_colors:
         return False
     if {value.field_id: value.value_text for value in record.values} != snapshot.values:
         return False
@@ -83,6 +86,7 @@ def _apply_snapshot(
     record.report_generated = snapshot.report_generated
     record.locked = snapshot.locked
     record.highlight_color = snapshot.highlight_color
+    record.cell_highlight_colors = dict(snapshot.cell_highlight_colors)
     if snapshot.created_at is not None:
         record.created_at = snapshot.created_at
     if snapshot.updated_at is not None:
@@ -111,6 +115,7 @@ def _create_from_snapshot(
         report_generated=snapshot.report_generated,
         locked=snapshot.locked,
         highlight_color=snapshot.highlight_color,
+        cell_highlight_colors=dict(snapshot.cell_highlight_colors),
     )
     if snapshot.created_at is not None:
         record.created_at = snapshot.created_at

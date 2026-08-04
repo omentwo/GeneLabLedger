@@ -635,6 +635,34 @@ def test_records_can_be_highlighted_individually_or_in_batch(
     assert batch.status_code == 200
     assert [record["highlight_color"] for record in batch.json()] == ["#fff2cc", "#fff2cc"]
 
+    field_ids = [field["id"] for field in seeded_projects["TB"]["fields"][:2]]
+    cells = client.put(
+        "/api/records/cell-highlights",
+        json={
+            "cells": [
+                {"record_id": first["id"], "field_id": field_ids[0]},
+                {"record_id": second["id"], "field_id": field_ids[1]},
+            ],
+            "highlight_color": "#D9EAD3",
+        },
+    )
+    assert cells.status_code == 200
+    highlighted_by_id = {record["id"]: record for record in cells.json()}
+    assert highlighted_by_id[first["id"]]["cell_highlight_colors"] == {field_ids[0]: "#d9ead3"}
+    assert highlighted_by_id[second["id"]]["cell_highlight_colors"] == {field_ids[1]: "#d9ead3"}
+
+    clear_cells = client.put(
+        "/api/records/cell-highlights",
+        json={
+            "cells": [{"record_id": first["id"], "field_id": field_ids[0]}],
+            "highlight_color": None,
+        },
+    )
+    assert clear_cells.status_code == 200
+    assert field_ids[0] not in clear_cells.json()[0]["cell_highlight_colors"]
+    assert clear_cells.json()[0]["cell_highlight_colors"] == {}
+    assert clear_cells.json()[0]["id"] == first["id"]
+
     locked = client.put(f"/api/records/{first['id']}/lock", json={"locked": True})
     assert locked.status_code == 200
     clear = client.put(

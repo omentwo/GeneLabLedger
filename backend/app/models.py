@@ -122,6 +122,7 @@ class ProjectRecord(Base, TimestampMixin):
     report_generated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     locked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     highlight_color: Mapped[str | None] = mapped_column(String(7), nullable=True)
+    cell_highlight_colors: Mapped[dict[str, str]] = mapped_column(JSON, default=dict, nullable=False)
 
     project: Mapped[Project] = relationship(back_populates="records")
     values: Mapped[list[RecordValue]] = relationship(

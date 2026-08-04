@@ -10,13 +10,14 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.audit import audit
 from app.database import get_session
-from app.models import Project, ProjectRecord, RecordValue
+from app.models import FieldDefinition, Project, ProjectRecord, RecordValue
 from app.schemas import (
     BulkDeleteExecute,
     BulkDeleteFilter,
     BulkDeletePreviewRead,
     BulkDeleteResult,
     RecordAssignProject,
+    RecordCellHighlightUpdate,
     RecordCreate,
     RecordExperimentNumberBatch,
     RecordHighlightUpdate,
@@ -371,6 +372,90 @@ def update_highlight(
                 "project_record",
                 record.id,
                 {"before": before, "after": record.highlight_color},
+            )
+    session.commit()
+    return [record_dict(require_record(session, record.id, include_values=True)) for record in ordered]
+
+
+@router.put("/cell-highlights", response_model=list[RecordRead])
+def update_cell_highlights(
+    payload: RecordCellHighlightUpdate,
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    targets = list(
+        dict.fromkeys((cell.record_id, cell.field_id) for cell in payload.cells)
+    )
+    record_ids = list(dict.fromkeys(record_id for record_id, _ in targets))
+    field_ids = list(dict.fromkeys(field_id for _, field_id in targets))
+    if not targets:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="记录 ID 和字段 ID 不能为空",
+        )
+    records = list(
+        session.scalars(
+            select(ProjectRecord)
+            .where(ProjectRecord.id.in_(record_ids))
+            .options(*record_load_options())
+        )
+    )
+    by_id = {record.id: record for record in records}
+    missing = [record_id for record_id in record_ids if record_id not in by_id]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"部分台账记录不存在：{', '.join(missing)}",
+        )
+    field_rows = list(
+        session.execute(
+            select(FieldDefinition.id, FieldDefinition.project_id).where(FieldDefinition.id.in_(field_ids))
+        )
+    )
+    field_projects = {field_id: project_id for field_id, project_id in field_rows}
+    missing_fields = [field_id for field_id in field_ids if field_id not in field_projects]
+    if missing_fields:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"部分字段不存在：{', '.join(missing_fields)}",
+        )
+    targets_by_record: dict[str, set[str]] = {}
+    invalid_fields: list[str] = []
+    for record_id, field_id in targets:
+        record = by_id[record_id]
+        if field_projects[field_id] != record.project_id:
+            invalid_fields.append(record_id)
+            continue
+        targets_by_record.setdefault(record_id, set()).add(field_id)
+    if invalid_fields:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="选中的字段不属于对应台账记录所在项目",
+        )
+
+    ordered = [by_id[record_id] for record_id in record_ids]
+    for record in ordered:
+        before = dict(record.cell_highlight_colors or {})
+        next_colors = dict(before)
+        for field_id in targets_by_record.get(record.id, set()):
+            if payload.highlight_color is None:
+                next_colors.pop(field_id, None)
+            else:
+                next_colors[field_id] = payload.highlight_color
+        if next_colors != before:
+            record.cell_highlight_colors = next_colors
+            audit(
+                session,
+                "record.cell_highlight.update",
+                "project_record",
+                record.id,
+                {
+                    "cells": [
+                        {"record_id": record.id, "field_id": field_id}
+                        for field_id in sorted(targets_by_record.get(record.id, set()))
+                    ],
+                    "before": before,
+                    "after": next_colors,
+                },
             )
     session.commit()
     return [record_dict(require_record(session, record.id, include_values=True)) for record in ordered]

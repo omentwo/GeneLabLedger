@@ -16,6 +16,7 @@ export function cloneLedgerRecord(record: ProjectRecord): ProjectRecord {
   return {
     ...record,
     values: { ...record.values },
+    cell_highlight_colors: { ...record.cell_highlight_colors },
   };
 }
 

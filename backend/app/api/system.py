@@ -31,6 +31,7 @@ AUDIT_ACTION_SEARCH_LABELS = {
     "record.create": "新增台账记录",
     "record.update": "修改台账记录",
     "record.highlight.update": "标记台账底色",
+    "record.cell_highlight.update": "标记单元格底色",
     "record.delete": "删除台账记录",
     "record.lock": "锁定台账记录",
     "record.unlock": "解锁台账记录",
