@@ -19,15 +19,10 @@ import {
   LEDGER_ZOOM_MAX,
   LEDGER_ZOOM_MIN,
   LEDGER_ZOOM_STEP,
-  LEDGER_SHORTCUT_SETTINGS_KEY,
-  DEFAULT_LEDGER_SHORTCUT_SETTINGS,
   getSetting,
   normalizeLedgerDisplaySettings,
-  normalizeLedgerShortcutSettings,
   putSetting,
   type LedgerDisplaySettings,
-  type LedgerShortcutModifier,
-  type LedgerShortcutSettings,
 } from "@/api/system";
 import { desktopBridge } from "@/utils/desktop";
 
@@ -43,31 +38,6 @@ const ledgerDisplaySettings = reactive<LedgerDisplaySettings>({
 });
 const ledgerDisplayLoading = ref(false);
 const ledgerDisplaySaving = ref(false);
-const ledgerShortcutSettings = reactive<LedgerShortcutSettings>({
-  navigation: [...DEFAULT_LEDGER_SHORTCUT_SETTINGS.navigation],
-  extendSelection: [...DEFAULT_LEDGER_SHORTCUT_SETTINGS.extendSelection],
-});
-const ledgerShortcutLoading = ref(false);
-const ledgerShortcutSaving = ref(false);
-const shortcutModifierOptions: Array<{ value: LedgerShortcutModifier; label: string }> = [
-  { value: "Alt", label: "Alt" },
-  { value: "Shift", label: "Shift" },
-  { value: "Control", label: "Ctrl" },
-  { value: "Meta", label: "Cmd / Meta" },
-  { value: "CapsLock", label: "CapsLock" },
-];
-const shortcutModifierLabels: Record<LedgerShortcutModifier, string> = {
-  Alt: "Alt",
-  Shift: "Shift",
-  Control: "Ctrl",
-  Meta: "Cmd / Meta",
-  CapsLock: "CapsLock",
-};
-
-function formatLedgerShortcut(modifiers: LedgerShortcutModifier[]): string {
-  const labels = modifiers.map((modifier) => shortcutModifierLabels[modifier]);
-  return `${labels.join(" + ")} + 方向键`;
-}
 
 async function loadLedgerDisplaySettings(): Promise<void> {
   ledgerDisplayLoading.value = true;
@@ -97,54 +67,6 @@ async function saveLedgerDisplaySettings(): Promise<void> {
 
 function resetLedgerDisplaySettings(): void {
   Object.assign(ledgerDisplaySettings, DEFAULT_LEDGER_DISPLAY_SETTINGS);
-}
-
-async function loadLedgerShortcutSettings(): Promise<void> {
-  ledgerShortcutLoading.value = true;
-  try {
-    const result = await getSetting<Partial<LedgerShortcutSettings>>(LEDGER_SHORTCUT_SETTINGS_KEY);
-    const normalized = normalizeLedgerShortcutSettings(result.value);
-    ledgerShortcutSettings.navigation = normalized.navigation;
-    ledgerShortcutSettings.extendSelection = normalized.extendSelection;
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "台账快捷键设置读取失败");
-  } finally {
-    ledgerShortcutLoading.value = false;
-  }
-}
-
-async function saveLedgerShortcutSettings(): Promise<void> {
-  if (!ledgerShortcutSettings.navigation.length || !ledgerShortcutSettings.extendSelection.length) {
-    ElMessage.warning("导航和扩大选区快捷键至少各选择一个修饰键");
-    return;
-  }
-  const normalized = normalizeLedgerShortcutSettings(ledgerShortcutSettings);
-  if (
-    normalized.navigation.length === normalized.extendSelection.length &&
-    normalized.navigation.every(
-      (modifier, index) => modifier === normalized.extendSelection[index],
-    )
-  ) {
-    ElMessage.warning("导航和扩大选区快捷键不能完全相同");
-    return;
-  }
-  ledgerShortcutSaving.value = true;
-  try {
-    const result = await putSetting(LEDGER_SHORTCUT_SETTINGS_KEY, normalized);
-    const savedNormalized = normalizeLedgerShortcutSettings(result.value);
-    ledgerShortcutSettings.navigation = savedNormalized.navigation;
-    ledgerShortcutSettings.extendSelection = savedNormalized.extendSelection;
-    ElMessage.success("台账快捷键设置已保存");
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "台账快捷键设置保存失败");
-  } finally {
-    ledgerShortcutSaving.value = false;
-  }
-}
-
-function resetLedgerShortcutSettings(): void {
-  ledgerShortcutSettings.navigation = [...DEFAULT_LEDGER_SHORTCUT_SETTINGS.navigation];
-  ledgerShortcutSettings.extendSelection = [...DEFAULT_LEDGER_SHORTCUT_SETTINGS.extendSelection];
 }
 
 async function changeDataDirectory(): Promise<void> {
@@ -211,7 +133,6 @@ async function updateAlwaysOnTop(value: string | number | boolean): Promise<void
 
 onMounted(() => {
   void loadLedgerDisplaySettings();
-  void loadLedgerShortcutSettings();
   void loadAlwaysOnTop();
 });
 </script>
@@ -264,90 +185,6 @@ onMounted(() => {
             @click="restartApplication"
           >
             立即重启并切换
-          </el-button>
-        </div>
-      </div>
-    </section>
-
-    <section class="page-card overflow-hidden">
-      <div class="page-card-header">
-        <div>
-          <h2 class="page-card-title">台账快捷键</h2>
-          <p class="page-description">自定义方向键导航和矩形选区扩展使用的修饰键。</p>
-        </div>
-        <el-tag type="info">台账页面</el-tag>
-      </div>
-      <div class="grid gap-5 p-5">
-        <div class="grid max-w-4xl gap-5 lg:grid-cols-2">
-          <div class="grid gap-2">
-            <div class="flex items-center justify-between gap-3">
-              <span class="text-sm font-semibold text-slate-700">单元格导航</span>
-              <span class="text-sm text-slate-500">
-                {{ formatLedgerShortcut(ledgerShortcutSettings.navigation) }}
-              </span>
-            </div>
-            <el-select
-              v-model="ledgerShortcutSettings.navigation"
-              multiple
-              collapse-tags
-              collapse-tags-tooltip
-              :disabled="ledgerShortcutLoading || ledgerShortcutSaving"
-              placeholder="选择修饰键"
-            >
-              <el-option
-                v-for="option in shortcutModifierOptions"
-                :key="option.value"
-                :label="option.label"
-                :value="option.value"
-              />
-            </el-select>
-            <p class="text-xs leading-5 text-slate-500">
-              按下所选修饰键和方向键，可在上下左右单元格之间移动。
-            </p>
-          </div>
-
-          <div class="grid gap-2">
-            <div class="flex items-center justify-between gap-3">
-              <span class="text-sm font-semibold text-slate-700">扩大矩形选区</span>
-              <span class="text-sm text-slate-500">
-                {{ formatLedgerShortcut(ledgerShortcutSettings.extendSelection) }}
-              </span>
-            </div>
-            <el-select
-              v-model="ledgerShortcutSettings.extendSelection"
-              multiple
-              collapse-tags
-              collapse-tags-tooltip
-              :disabled="ledgerShortcutLoading || ledgerShortcutSaving"
-              placeholder="选择修饰键"
-            >
-              <el-option
-                v-for="option in shortcutModifierOptions"
-                :key="option.value"
-                :label="option.label"
-                :value="option.value"
-              />
-            </el-select>
-            <p class="text-xs leading-5 text-slate-500">
-              从当前单元格起，使用所选修饰键和方向键扩大选区；复制、粘贴、清空仍使用系统标准快捷键。
-            </p>
-          </div>
-        </div>
-
-        <div class="flex flex-wrap gap-2">
-          <el-button
-            type="primary"
-            :loading="ledgerShortcutSaving"
-            :disabled="ledgerShortcutLoading"
-            @click="saveLedgerShortcutSettings"
-          >
-            保存台账快捷键
-          </el-button>
-          <el-button
-            :disabled="ledgerShortcutLoading || ledgerShortcutSaving"
-            @click="resetLedgerShortcutSettings"
-          >
-            恢复默认
           </el-button>
         </div>
       </div>

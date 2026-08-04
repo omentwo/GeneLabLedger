@@ -2,9 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   DEFAULT_LEDGER_DISPLAY_SETTINGS,
-  DEFAULT_LEDGER_SHORTCUT_SETTINGS,
   normalizeLedgerDisplaySettings,
-  normalizeLedgerShortcutSettings,
 } from "@/api/system";
 
 describe("ledger display settings", () => {
@@ -48,24 +46,6 @@ describe("ledger display settings", () => {
     expect(normalizeLedgerDisplaySettings({ fontSizePx: 1, zoomPercent: 49 })).toMatchObject({
       fontSizePx: 8,
       zoomPercent: 50,
-    });
-  });
-});
-
-describe("ledger shortcut settings", () => {
-  it("falls back to default modifier combinations", () => {
-    expect(normalizeLedgerShortcutSettings(null)).toEqual(DEFAULT_LEDGER_SHORTCUT_SETTINGS);
-  });
-
-  it("keeps supported modifiers in a stable order", () => {
-    expect(
-      normalizeLedgerShortcutSettings({
-        navigation: ["Shift", "Alt", "Shift", "unknown"],
-        extendSelection: ["CapsLock", "Control"],
-      }),
-    ).toEqual({
-      navigation: ["Alt", "Shift"],
-      extendSelection: ["Control", "CapsLock"],
     });
   });
 });

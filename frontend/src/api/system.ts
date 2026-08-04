@@ -2,7 +2,6 @@ import { apiRequest } from "@/api/client";
 import type { AuditLogPage, HealthStatus } from "@/types/api";
 
 export const LEDGER_DISPLAY_SETTINGS_KEY = "ledger_display_settings";
-export const LEDGER_SHORTCUT_SETTINGS_KEY = "ledger_shortcut_settings";
 export const LEDGER_ROW_PADDING_MIN = 0;
 export const LEDGER_ROW_PADDING_MAX = 12;
 export const LEDGER_EDITOR_WIDTH_MIN = 50;
@@ -61,21 +60,6 @@ export type LedgerDisplaySettings = {
   zoomPercent: number;
 };
 
-export const LEDGER_SHORTCUT_MODIFIER_VALUES = [
-  "Alt",
-  "Shift",
-  "Control",
-  "Meta",
-  "CapsLock",
-] as const;
-
-export type LedgerShortcutModifier = (typeof LEDGER_SHORTCUT_MODIFIER_VALUES)[number];
-
-export type LedgerShortcutSettings = {
-  navigation: LedgerShortcutModifier[];
-  extendSelection: LedgerShortcutModifier[];
-};
-
 export const DEFAULT_LEDGER_DISPLAY_SETTINGS = {
   rowPaddingY: 5,
   editorWidthPercent: LEDGER_EDITOR_SIZE_MAX,
@@ -83,11 +67,6 @@ export const DEFAULT_LEDGER_DISPLAY_SETTINGS = {
   fontFamily: "system",
   fontSizePx: 14,
   zoomPercent: 100,
-} as const;
-
-export const DEFAULT_LEDGER_SHORTCUT_SETTINGS = {
-  navigation: ["Alt"],
-  extendSelection: ["Control", "Shift"],
 } as const;
 
 export function normalizeLedgerDisplaySettings(value: unknown): LedgerDisplaySettings {
@@ -134,40 +113,6 @@ export function normalizeLedgerDisplaySettings(value: unknown): LedgerDisplaySet
     fontFamily,
     fontSizePx,
     zoomPercent,
-  };
-}
-
-export function normalizeLedgerShortcutSettings(value: unknown): LedgerShortcutSettings {
-  const candidate =
-    value && typeof value === "object" ? (value as Record<string, unknown>) : {};
-  const allowed = new Set<string>(LEDGER_SHORTCUT_MODIFIER_VALUES);
-
-  function normalizeModifiers(
-    raw: unknown,
-    fallback: readonly LedgerShortcutModifier[],
-  ): LedgerShortcutModifier[] {
-    const values = Array.isArray(raw)
-      ? raw.filter(
-          (modifier): modifier is string =>
-            typeof modifier === "string" && allowed.has(modifier),
-        )
-      : [];
-    const selected = new Set(values);
-    const normalized = LEDGER_SHORTCUT_MODIFIER_VALUES.filter((modifier) =>
-      selected.has(modifier),
-    );
-    return normalized.length ? normalized : [...fallback];
-  }
-
-  return {
-    navigation: normalizeModifiers(
-      candidate.navigation,
-      DEFAULT_LEDGER_SHORTCUT_SETTINGS.navigation,
-    ),
-    extendSelection: normalizeModifiers(
-      candidate.extendSelection,
-      DEFAULT_LEDGER_SHORTCUT_SETTINGS.extendSelection,
-    ),
   };
 }
 

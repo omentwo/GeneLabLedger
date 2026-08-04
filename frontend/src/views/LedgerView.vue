@@ -30,19 +30,15 @@ import { useRoute, useRouter } from "vue-router";
 import { commitWorkbookImport, previewWorkbookImport } from "@/api/imports";
 import {
   DEFAULT_LEDGER_DISPLAY_SETTINGS,
-  DEFAULT_LEDGER_SHORTCUT_SETTINGS,
   LEDGER_FONT_FAMILY_OPTIONS,
   LEDGER_DISPLAY_SETTINGS_KEY,
   LEDGER_ZOOM_MAX,
   LEDGER_ZOOM_MIN,
   LEDGER_ZOOM_STEP,
-  LEDGER_SHORTCUT_SETTINGS_KEY,
   getSetting,
   normalizeLedgerDisplaySettings,
-  normalizeLedgerShortcutSettings,
   putSetting,
   type LedgerDisplaySettings,
-  type LedgerShortcutSettings,
 } from "@/api/system";
 import {
   assignRecordProject,
@@ -98,10 +94,6 @@ const selectedRecords = ref<ProjectRecord[]>([]);
 const ledgerDisplaySettings = ref<LedgerDisplaySettings>({
   ...DEFAULT_LEDGER_DISPLAY_SETTINGS,
 });
-const ledgerShortcutSettings = ref<LedgerShortcutSettings>({
-  navigation: [...DEFAULT_LEDGER_SHORTCUT_SETTINGS.navigation],
-  extendSelection: [...DEFAULT_LEDGER_SHORTCUT_SETTINGS.extendSelection],
-});
 const selectionStartDate = ref("");
 const selectionEndDate = ref("");
 const ledgerTableCardRef = ref<HTMLElement | null>(null);
@@ -114,8 +106,29 @@ const tableRef = ref<{
 } | null>(null);
 type GridCellPosition = { rowIndex: number; columnIndex: number };
 type GridCellRange = { anchor: GridCellPosition; focus: GridCellPosition };
+type GridCellEditSnapshot = { rowId: string; fieldId: string; value: string };
+type GridCellDragState = {
+  pointerId: number;
+  anchor: GridCellPosition;
+  focus: GridCellPosition;
+  startX: number;
+  startY: number;
+  lastX: number;
+  lastY: number;
+  dragging: boolean;
+  tableElement: HTMLElement;
+  scrollDirection: -1 | 0 | 1;
+};
 const activeGridCell = ref<GridCellPosition | null>(null);
 const gridCellRange = ref<GridCellRange | null>(null);
+const editingGridCell = ref<GridCellPosition | null>(null);
+const editingGridSnapshot = ref<GridCellEditSnapshot | null>(null);
+const gridSelectionDragging = ref(false);
+let gridCellDragState: GridCellDragState | null = null;
+let gridCellAutoScrollTimer: number | null = null;
+let gridCellWheelUpdateTimer: number | null = null;
+let gridCellEditFinishPromise: Promise<boolean> | null = null;
+let suppressGridClick = false;
 let suppressGridFocusReset = false;
 type SelectionRowInfo = {
   row: LedgerRow;
@@ -380,6 +393,28 @@ function normalizedGridRange(range: GridCellRange): {
   };
 }
 
+function sameGridCell(left: GridCellPosition | null, right: GridCellPosition | null): boolean {
+  return Boolean(
+    left &&
+      right &&
+      left.rowIndex === right.rowIndex &&
+      left.columnIndex === right.columnIndex,
+  );
+}
+
+function isGridCellEditing(position: GridCellPosition | null): boolean {
+  return sameGridCell(editingGridCell.value, position);
+}
+
+function selectGridCell(position: GridCellPosition): void {
+  const nextPosition = clampGridCell(position);
+  activeGridCell.value = nextPosition;
+  gridCellRange.value = {
+    anchor: { ...nextPosition },
+    focus: { ...nextPosition },
+  };
+}
+
 const gridCellClassName = computed(() => {
   const currentRows = tableRows.value;
   const currentFields = fields.value;
@@ -422,6 +457,18 @@ function gridEditorRoot(position: GridCellPosition): HTMLElement | null {
   );
 }
 
+function clearGridEditorTextSelection(editor: HTMLElement | null): void {
+  if (!editor) return;
+  editor.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea").forEach((input) => {
+    try {
+      input.setSelectionRange(0, 0);
+    } catch {
+      // Date inputs do not expose a text selection range.
+    }
+  });
+  window.getSelection()?.removeAllRanges();
+}
+
 async function focusGridCell(position: GridCellPosition): Promise<void> {
   if (!tableRows.value.length || !fields.value.length) return;
   const nextPosition = clampGridCell(position);
@@ -429,12 +476,13 @@ async function focusGridCell(position: GridCellPosition): Promise<void> {
   suppressGridFocusReset = true;
   await nextTick();
   const editor = gridEditorRoot(nextPosition);
-  const focusTarget =
-    editor?.matches("input, textarea, button, [tabindex]")
-      ? editor
-      : editor?.querySelector<HTMLElement>(
-          "input:not([type='date']), textarea, button, [tabindex]:not([tabindex='-1'])",
-        );
+  const editing = isGridCellEditing(nextPosition);
+  if (!editing) clearGridEditorTextSelection(editor);
+  const focusTarget = editing
+    ? editor?.querySelector<HTMLElement>(
+        "input:not([type='date']), textarea, button, [tabindex]:not([tabindex='-1'])",
+      )
+    : editor;
   if (focusTarget) {
     focusTarget.focus({ preventScroll: true });
     editor?.scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -442,25 +490,6 @@ async function focusGridCell(position: GridCellPosition): Promise<void> {
   window.setTimeout(() => {
     suppressGridFocusReset = false;
   }, 0);
-}
-
-function shortcutModifierIsActive(event: KeyboardEvent, modifier: string): boolean {
-  if (modifier === "Alt") return event.altKey;
-  if (modifier === "Shift") return event.shiftKey;
-  if (modifier === "Control") return event.ctrlKey;
-  if (modifier === "Meta") return event.metaKey;
-  if (modifier === "CapsLock") return event.getModifierState("CapsLock");
-  return false;
-}
-
-function matchesGridShortcut(event: KeyboardEvent, modifiers: readonly string[]): boolean {
-  if (!event.key.startsWith("Arrow") || !modifiers.length) return false;
-  const required = new Set(modifiers);
-  for (const modifier of ["Alt", "Shift", "Control", "Meta"]) {
-    if (shortcutModifierIsActive(event, modifier) !== required.has(modifier)) return false;
-  }
-  if (shortcutModifierIsActive(event, "CapsLock") !== required.has("CapsLock")) return false;
-  return true;
 }
 
 function gridArrowDelta(key: string): { rowDelta: number; columnDelta: number } | null {
@@ -471,17 +500,6 @@ function gridArrowDelta(key: string): { rowDelta: number; columnDelta: number } 
   return null;
 }
 
-function textareaOwnsArrowKey(event: KeyboardEvent): boolean {
-  const target = event.target;
-  if (!(target instanceof HTMLTextAreaElement)) return false;
-  if (event.altKey || event.ctrlKey || event.metaKey) return false;
-  const cursor = target.selectionStart;
-  if (cursor === null) return false;
-  if (event.key === "ArrowUp") return target.value.slice(0, cursor).includes("\n");
-  if (event.key === "ArrowDown") return target.value.slice(cursor).includes("\n");
-  return false;
-}
-
 function selectOwnsArrowKey(event: KeyboardEvent): boolean {
   const target = event.target instanceof Element ? event.target : null;
   if (!target?.closest(".el-select")) return false;
@@ -489,26 +507,314 @@ function selectOwnsArrowKey(event: KeyboardEvent): boolean {
   return Boolean(dropdown && dropdown.getBoundingClientRect().height > 0);
 }
 
+function gridCellData(position: GridCellPosition): {
+  record: LedgerRow;
+  field: (typeof fields.value)[number];
+} | null {
+  const record = tableRows.value[position.rowIndex];
+  const field = fields.value[position.columnIndex];
+  return record && field ? { record, field } : null;
+}
+
+async function finishGridCellEdit(commit = true, focusAfter = true): Promise<boolean> {
+  if (gridCellEditFinishPromise) return gridCellEditFinishPromise;
+  const editing = editingGridCell.value;
+  const snapshot = editingGridSnapshot.value;
+  if (!editing || !snapshot) return true;
+  const finish = (async (): Promise<boolean> => {
+    const data = gridCellData(editing);
+    if (!data) {
+      editingGridCell.value = null;
+      editingGridSnapshot.value = null;
+      return true;
+    }
+
+    if (!commit) {
+      setValue(data.record, data.field, snapshot.value);
+      clearFieldError(data.record, data.field);
+    } else {
+      await saveField(data.record, data.field);
+      if (fieldErrorFor(data.record, data.field)) return false;
+    }
+
+    editingGridCell.value = null;
+    editingGridSnapshot.value = null;
+    clearGridEditorTextSelection(gridEditorRoot(editing));
+    if (focusAfter || sameGridCell(activeGridCell.value, editing)) {
+      selectGridCell(editing);
+      if (focusAfter) void focusGridCell(editing);
+    }
+    return true;
+  })();
+  gridCellEditFinishPromise = finish;
+  try {
+    return await finish;
+  } finally {
+    if (gridCellEditFinishPromise === finish) gridCellEditFinishPromise = null;
+  }
+}
+
+function enterGridCellEdit(position: GridCellPosition): void {
+  const nextPosition = clampGridCell(position);
+  const data = gridCellData(nextPosition);
+  if (!data || data.record.locked) return;
+  if (isGridCellEditing(nextPosition)) {
+    void focusGridCell(nextPosition);
+    return;
+  }
+  if (editingGridCell.value) {
+    void finishGridCellEdit(true, false).then((saved) => {
+      if (saved && !editingGridCell.value) enterGridCellEdit(nextPosition);
+    });
+    return;
+  }
+  activeGridCell.value = nextPosition;
+  gridCellRange.value = null;
+  editingGridCell.value = nextPosition;
+  editingGridSnapshot.value = {
+    rowId: data.record.id,
+    fieldId: data.field.id,
+    value: valueFor(data.record, data.field),
+  };
+  void focusGridCell(nextPosition);
+}
+
+function handleGridFocusOut(event: FocusEvent): void {
+  const editing = editingGridCell.value;
+  if (!editing) return;
+  const relatedCell = gridCellFromElement(event.relatedTarget);
+  if (sameGridCell(relatedCell, editing)) return;
+  window.setTimeout(() => {
+    if (!isGridCellEditing(editing)) return;
+    const activeElement = document.activeElement;
+    if (sameGridCell(gridCellFromElement(activeElement), editing)) return;
+    const dropdown = document.querySelector<HTMLElement>(".el-select-dropdown");
+    if (dropdown?.contains(activeElement)) return;
+    void finishGridCellEdit(true, false);
+  }, 0);
+}
+
 function handleGridFocusIn(event: FocusEvent): void {
   const cell = gridCellFromElement(event.target);
   if (!cell) return;
   activeGridCell.value = cell;
-  if (!suppressGridFocusReset) gridCellRange.value = null;
+  if (!suppressGridFocusReset && !isGridCellEditing(cell)) {
+    selectGridCell(cell);
+    if (event.target === gridEditorRoot(cell)) void focusGridCell(cell);
+  }
+}
+
+function stopGridCellDrag(resetClickSuppression = true): void {
+  clearGridCellAutoScroll();
+  clearGridCellWheelUpdate();
+  document.removeEventListener("pointermove", handleGridPointerMove);
+  document.removeEventListener("pointerup", handleGridPointerUp, true);
+  document.removeEventListener("pointercancel", handleGridPointerCancel, true);
+  document.removeEventListener("wheel", handleGridWheelDuringDrag);
+  gridCellDragState = null;
+  gridSelectionDragging.value = false;
+  if (resetClickSuppression) {
+    window.setTimeout(() => {
+      suppressGridClick = false;
+    }, 0);
+  }
+}
+
+function gridCellAtPoint(x: number, y: number): GridCellPosition | null {
+  const element = document.elementFromPoint?.(x, y) ?? null;
+  return gridCellFromElement(element);
+}
+
+function gridTableBodyScrollElement(tableElement: HTMLElement): HTMLElement | null {
+  return (
+    tableElement.querySelector<HTMLElement>(
+      ".el-table__body-wrapper .el-scrollbar__wrap",
+    ) ?? tableElement.querySelector<HTMLElement>(".el-table__body-wrapper")
+  );
+}
+
+function clearGridCellAutoScroll(): void {
+  if (gridCellAutoScrollTimer === null) return;
+  window.clearInterval(gridCellAutoScrollTimer);
+  gridCellAutoScrollTimer = null;
+}
+
+function clearGridCellWheelUpdate(): void {
+  if (gridCellWheelUpdateTimer === null) return;
+  window.clearTimeout(gridCellWheelUpdateTimer);
+  gridCellWheelUpdateTimer = null;
+}
+
+function gridCellAtDragPoint(state: GridCellDragState): GridCellPosition | null {
+  const body = gridTableBodyScrollElement(state.tableElement);
+  const rect = body?.getBoundingClientRect();
+  if (!rect || rect.width <= 0 || rect.height <= 0) {
+    return gridCellAtPoint(state.lastX, state.lastY);
+  }
+  const x = Math.max(rect.left + 1, Math.min(rect.right - 1, state.lastX));
+  const y = Math.max(rect.top + 1, Math.min(rect.bottom - 1, state.lastY));
+  return gridCellAtPoint(x, y);
+}
+
+function updateGridCellAutoScroll(event: PointerEvent): void {
+  const state = gridCellDragState;
+  if (!state || !state.dragging) return;
+  const body = gridTableBodyScrollElement(state.tableElement);
+  const rect = body?.getBoundingClientRect() ?? state.tableElement.getBoundingClientRect();
+  const edgeSize = 42;
+  let direction: -1 | 0 | 1 = 0;
+  if (event.clientX >= rect.left && event.clientX <= rect.right) {
+    if (event.clientY < rect.top + edgeSize) direction = -1;
+    else if (event.clientY > rect.bottom - edgeSize) direction = 1;
+  }
+  if (state.scrollDirection === direction) return;
+
+  state.scrollDirection = direction;
+  clearGridCellAutoScroll();
+  if (direction === 0) return;
+
+  gridCellAutoScrollTimer = window.setInterval(() => {
+    const currentState = gridCellDragState;
+    if (!currentState) {
+      clearGridCellAutoScroll();
+      return;
+    }
+    const currentBody = gridTableBodyScrollElement(currentState.tableElement);
+    const currentTop = currentBody?.scrollTop ?? 0;
+    const maxTop = currentBody
+      ? Math.max(0, currentBody.scrollHeight - currentBody.clientHeight)
+      : 0;
+    const nextTop = Math.max(0, Math.min(maxTop, currentTop + direction * 24));
+    if (nextTop === currentTop) {
+      currentState.scrollDirection = 0;
+      clearGridCellAutoScroll();
+      return;
+    }
+    if (tableRef.value?.setScrollTop) tableRef.value.setScrollTop(nextTop);
+    else if (currentBody) currentBody.scrollTop = nextTop;
+    const cell = gridCellAtDragPoint(currentState);
+    if (cell) updateGridCellDrag(cell);
+  }, 50);
+}
+
+function handleGridWheelDuringDrag(event: WheelEvent): void {
+  const state = gridCellDragState;
+  if (!state?.dragging) return;
+  if (event.clientX || event.clientY) {
+    state.lastX = event.clientX;
+    state.lastY = event.clientY;
+  }
+  if (gridCellWheelUpdateTimer !== null) return;
+  gridCellWheelUpdateTimer = window.setTimeout(() => {
+    gridCellWheelUpdateTimer = null;
+    const currentState = gridCellDragState;
+    if (!currentState?.dragging) return;
+    const cell = gridCellAtDragPoint(currentState);
+    if (cell) updateGridCellDrag(cell);
+  }, 0);
+}
+
+function updateGridCellDrag(cell: GridCellPosition): void {
+  const state = gridCellDragState;
+  if (!state) return;
+  state.focus = clampGridCell(cell);
+  activeGridCell.value = state.focus;
+  gridCellRange.value = {
+    anchor: { ...state.anchor },
+    focus: { ...state.focus },
+  };
+}
+
+function handleGridPointerMove(event: PointerEvent): void {
+  const state = gridCellDragState;
+  if (!state || state.pointerId !== event.pointerId) return;
+  if ((event.buttons & 1) !== 1) {
+    stopGridCellDrag();
+    return;
+  }
+  state.lastX = event.clientX;
+  state.lastY = event.clientY;
+  if (!state.dragging) {
+    const movedX = event.clientX - state.startX;
+    const movedY = event.clientY - state.startY;
+    if (Math.hypot(movedX, movedY) < selectionDragThreshold) return;
+    state.dragging = true;
+    gridSelectionDragging.value = true;
+    suppressGridClick = true;
+    event.preventDefault();
+  } else {
+    event.preventDefault();
+  }
+  const cell = gridCellAtPoint(event.clientX, event.clientY);
+  if (cell) updateGridCellDrag(cell);
+  updateGridCellAutoScroll(event);
+}
+
+function handleGridPointerUp(event: PointerEvent): void {
+  if (!gridCellDragState || gridCellDragState.pointerId !== event.pointerId) return;
+  if (gridCellDragState.dragging) event.preventDefault();
+  stopGridCellDrag();
+}
+
+function handleGridPointerCancel(event: PointerEvent): void {
+  if (!gridCellDragState || gridCellDragState.pointerId !== event.pointerId) return;
+  stopGridCellDrag();
 }
 
 function handleGridPointerDown(event: PointerEvent): void {
+  if (event.button !== 0 || event.isPrimary === false) return;
   const cell = gridCellFromElement(event.target);
   if (!cell) return;
-  activeGridCell.value = cell;
-  gridCellRange.value = null;
+  if (isGridCellEditing(cell)) return;
+  const tableElement =
+    event.target instanceof Element ? event.target.closest<HTMLElement>(".el-table") : null;
+  if (!tableElement) return;
+  if (editingGridCell.value) void finishGridCellEdit(true, false);
+
+  stopGridCellDrag(false);
+  selectGridCell(cell);
+  void focusGridCell(cell);
+  gridCellDragState = {
+    pointerId: event.pointerId,
+    anchor: { ...cell },
+    focus: { ...cell },
+    startX: event.clientX,
+    startY: event.clientY,
+    lastX: event.clientX,
+    lastY: event.clientY,
+    dragging: false,
+    tableElement,
+    scrollDirection: 0,
+  };
+  document.addEventListener("pointermove", handleGridPointerMove, { passive: false });
+  document.addEventListener("pointerup", handleGridPointerUp, true);
+  document.addEventListener("pointercancel", handleGridPointerCancel, true);
+  document.addEventListener("wheel", handleGridWheelDuringDrag, { passive: true });
 }
 
-function extendGridSelection(cell: GridCellPosition, delta: { rowDelta: number; columnDelta: number }): void {
-  const currentRange = gridCellRange.value;
-  const anchor = currentRange?.anchor ?? cell;
-  const focus = moveGridCell(currentRange?.focus ?? cell, delta.rowDelta, delta.columnDelta);
-  gridCellRange.value = { anchor: { ...anchor }, focus: { ...focus } };
-  void focusGridCell(focus);
+function handleGridClick(event: MouseEvent): void {
+  const cell = gridCellFromElement(event.target);
+  if (!cell) return;
+  if (suppressGridClick) {
+    event.preventDefault();
+    event.stopPropagation();
+    suppressGridClick = false;
+    return;
+  }
+  if (isGridCellEditing(cell)) {
+    gridCellRange.value = null;
+    return;
+  }
+  selectGridCell(cell);
+}
+
+function handleGridDoubleClick(event: MouseEvent): void {
+  const cell = gridCellFromElement(event.target);
+  if (!cell) return;
+  if (isGridCellEditing(cell)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  enterGridCellEdit(cell);
 }
 
 function handleGridKeydown(event: KeyboardEvent): void {
@@ -538,6 +844,24 @@ function handleGridKeydown(event: KeyboardEvent): void {
   if (!cell) return;
   activeGridCell.value = cell;
 
+  if (isGridCellEditing(cell)) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      void finishGridCellEdit(false);
+      return;
+    }
+    if (event.key === "Enter" && !event.shiftKey && !selectOwnsArrowKey(event)) {
+      event.preventDefault();
+      event.stopPropagation();
+      void finishGridCellEdit(true);
+      return;
+    }
+    // Once editing has started, arrow keys and other editing keys belong to
+    // the native input/select control rather than grid navigation.
+    return;
+  }
+
   if (
     gridCellRange.value &&
     (event.key === "Delete" || event.key === "Backspace")
@@ -549,25 +873,41 @@ function handleGridKeydown(event: KeyboardEvent): void {
   }
 
   const delta = gridArrowDelta(event.key);
-  if (!delta || textareaOwnsArrowKey(event) || selectOwnsArrowKey(event)) return;
-  if (matchesGridShortcut(event, ledgerShortcutSettings.value.extendSelection)) {
-    event.preventDefault();
-    event.stopPropagation();
-    extendGridSelection(cell, delta);
+  if (!delta) return;
+  const range = gridCellRange.value;
+  if (range && !sameGridCell(range.anchor, range.focus)) {
     return;
   }
-  if (matchesGridShortcut(event, ledgerShortcutSettings.value.navigation)) {
-    event.preventDefault();
-    event.stopPropagation();
-    gridCellRange.value = null;
-    void focusGridCell(moveGridCell(cell, delta.rowDelta, delta.columnDelta));
+  if (event.altKey || event.shiftKey || event.ctrlKey || event.metaKey) return;
+  if (!range) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const nextCell = moveGridCell(cell, delta.rowDelta, delta.columnDelta);
+  selectGridCell(nextCell);
+  void focusGridCell(nextCell);
+}
+
+function hasInputTextSelection(element: EventTarget | null): boolean {
+  if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) {
+    return false;
   }
+  const start = element.selectionStart;
+  const end = element.selectionEnd;
+  return start !== null && end !== null && start !== end;
 }
 
 function handleGridCopy(event: ClipboardEvent): void {
   const range = gridCellRange.value;
-  if (!range) return;
-  const normalized = normalizedGridRange(range);
+  const eventCell = gridCellFromElement(event.target);
+  // Editing keeps the browser's native text-copy behavior. Cell/range copy
+  // is only active while the grid itself owns the selection.
+  if (!range && eventCell && isGridCellEditing(eventCell)) return;
+  if (!range && hasInputTextSelection(event.target)) return;
+  // A click/focus can select one active cell without an extended range. Treat
+  // the cell that owns the copy event as a one-cell range as a fallback.
+  const copyRange = range ?? (eventCell ? { anchor: eventCell, focus: eventCell } : null);
+  if (!copyRange) return;
+  const normalized = normalizedGridRange(copyRange);
   const matrix: string[] = [];
   for (let rowIndex = normalized.rowStart; rowIndex <= normalized.rowEnd; rowIndex += 1) {
     const row = tableRows.value[rowIndex];
@@ -589,6 +929,8 @@ function handleGridCopy(event: ClipboardEvent): void {
 }
 
 function handleGridPaste(event: ClipboardEvent): void {
+  const eventCell = gridCellFromElement(event.target);
+  if (eventCell && isGridCellEditing(eventCell)) return;
   const range = gridCellRange.value;
   const text = event.clipboardData?.getData("text/plain") ?? "";
   if (!range || !text) return;
@@ -596,8 +938,9 @@ function handleGridPaste(event: ClipboardEvent): void {
   event.preventDefault();
   event.stopPropagation();
   void pasteGrid(event, normalized.rowStart, normalized.columnStart).then(() => {
-    gridCellRange.value = null;
-    void focusGridCell({ rowIndex: normalized.rowStart, columnIndex: normalized.columnStart });
+    const start = { rowIndex: normalized.rowStart, columnIndex: normalized.columnStart };
+    selectGridCell(start);
+    void focusGridCell(start);
   });
 }
 
@@ -649,15 +992,12 @@ async function clearGridCellRange(): Promise<void> {
       activeProjectId.value,
     );
   }
-  gridCellRange.value = null;
-  activeGridCell.value = {
+  const start = {
     rowIndex: normalized.rowStart,
     columnIndex: normalized.columnStart,
   };
-  void focusGridCell({
-    rowIndex: normalized.rowStart,
-    columnIndex: normalized.columnStart,
-  });
+  selectGridCell(start);
+  void focusGridCell(start);
   if (cleared) ElMessage.success(`已清空 ${cleared} 个单元格`);
   if (skippedLocked) ElMessage.info(`已跳过 ${skippedLocked} 个锁定单元格`);
   if (skippedRequired) ElMessage.info(`已跳过 ${skippedRequired} 个必填状态单元格`);
@@ -894,9 +1234,13 @@ function makeDraftRow(): LedgerRow {
   };
 }
 
-function scrollTableToBottom(): void {
+function clearBottomScrollTimers(): void {
   bottomScrollTimers.forEach((timer) => window.clearTimeout(timer));
   bottomScrollTimers = [];
+}
+
+function scrollTableToBottom(): void {
+  clearBottomScrollTimers();
   const applyScroll = () => {
     tableRef.value?.setScrollTop?.(Number.MAX_SAFE_INTEGER);
   };
@@ -913,10 +1257,10 @@ function refreshTableLayout(): void {
   });
 }
 
-function appendDraftRow(): void {
+function appendDraftRow(scrollToBottom = true): void {
   if (!currentProject.value || loading.value) return;
   draftRows.value.push(makeDraftRow());
-  scrollTableToBottom();
+  if (scrollToBottom) scrollTableToBottom();
 }
 
 function fieldOptions(field: FieldDefinition): string[] {
@@ -1164,7 +1508,6 @@ function reconcileCommittedPaste(
     draftRows.value = draftRows.value.filter((row) => !committedDraftIds.has(row.id));
   }
   rememberAll();
-  scrollTableToBottom();
   return committedRecords;
 }
 
@@ -1351,15 +1694,6 @@ async function redoLedger(): Promise<void> {
     if (applied) ElMessage.success("已恢复下一步台账操作");
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "台账恢复失败");
-  }
-}
-
-async function loadLedgerShortcutSettings(): Promise<void> {
-  try {
-    const result = await getSetting<Partial<LedgerShortcutSettings>>(LEDGER_SHORTCUT_SETTINGS_KEY);
-    ledgerShortcutSettings.value = normalizeLedgerShortcutSettings(result.value);
-  } catch (error) {
-    ElMessage.warning(error instanceof Error ? error.message : "台账快捷键设置读取失败");
   }
 }
 
@@ -1681,6 +2015,10 @@ async function pasteGrid(
   if (!text) return;
   const projectId = activeProjectId.value;
   event.preventDefault();
+  // Pasting should preserve the current viewport and the starting cell.  A
+  // pending "add record" scroll or a newly-created draft row must not move
+  // the table to the bottom while the paste is being committed.
+  clearBottomScrollTimers();
   const lines = text.replace(/\r/g, "").split("\n");
   if (lines.at(-1) === "") lines.pop();
   const matrix = lines.map((line) => line.split("\t"));
@@ -1691,7 +2029,7 @@ async function pasteGrid(
 
   try {
     const missingRows = startRowIndex + matrix.length - tableRows.value.length;
-    for (let index = 0; index < missingRows; index += 1) appendDraftRow();
+    for (let index = 0; index < missingRows; index += 1) appendDraftRow(false);
     const rows = tableRows.value;
 
     matrix.forEach((rowValues, rowOffset) => {
@@ -2176,6 +2514,9 @@ watch(
 watch(activeProjectId, async (projectId, previousProjectId) => {
   if (!ledgerInitialized || !projectId || projectId === previousProjectId) return;
   const load = (async () => {
+    stopGridCellDrag(false);
+    editingGridCell.value = null;
+    editingGridSnapshot.value = null;
     activeGridCell.value = null;
     gridCellRange.value = null;
     draftRows.value = [];
@@ -2232,14 +2573,16 @@ async function initializeLedger(): Promise<void> {
 onMounted(() => {
   document.addEventListener("click", handleSelectionClickCapture, true);
   void loadLedgerDisplaySettings();
-  void loadLedgerShortcutSettings();
   void initializeLedger();
 });
 
 onBeforeUnmount(() => {
   ledgerHistory.clear();
   document.removeEventListener("click", handleSelectionClickCapture, true);
+  stopGridCellDrag(false);
   stopSelectionDrag();
+  editingGridCell.value = null;
+  editingGridSnapshot.value = null;
   activeGridCell.value = null;
   gridCellRange.value = null;
   bottomScrollTimers.forEach((timer) => window.clearTimeout(timer));
@@ -2497,7 +2840,10 @@ onBeforeUnmount(() => {
       ref="ledgerTableCardRef"
       class="page-card ledger-table-card"
       @pointerdown.capture="handleGridPointerDown"
+      @click.capture="handleGridClick"
+      @dblclick.capture="handleGridDoubleClick"
       @focusin.capture="handleGridFocusIn"
+      @focusout.capture="handleGridFocusOut"
       @keydown.capture="handleGridKeydown"
       @copy.capture="handleGridCopy"
       @paste.capture="handleGridPaste"
@@ -2505,7 +2851,10 @@ onBeforeUnmount(() => {
       <div class="ledger-table-surface" :style="ledgerTableStyle">
       <el-table
         ref="tableRef"
-        :class="{ 'selection-dragging': selectionDragging }"
+        :class="{
+          'selection-dragging': selectionDragging,
+          'grid-selection-dragging': gridSelectionDragging,
+        }"
         v-loading="loading"
         element-loading-text="正在切换或读取项目数据…"
         element-loading-background="#ffffff"
@@ -2554,60 +2903,53 @@ onBeforeUnmount(() => {
         >
           <template #default="{ row, $index }: { row: LedgerRow; $index: number }">
             <div
-              v-if="field.data_type === 'date' || field.system_key === 'experiment_date'"
               class="cell-field"
-              :class="{ 'cell-field-invalid': fieldErrorFor(row, field) }"
+              :class="{
+                'cell-field-invalid': fieldErrorFor(row, field),
+                'cell-field-editing': isGridCellEditing({ rowIndex: $index, columnIndex }),
+              }"
               :data-row-id="row.id"
               :data-field-index="columnIndex"
+              :tabindex="isGridCellEditing({ rowIndex: $index, columnIndex }) ? -1 : 0"
             >
               <EditableDateInput
+                v-if="field.data_type === 'date' || field.system_key === 'experiment_date'"
                 :model-value="valueFor(row, field)"
-                :readonly="row.locked"
+                :readonly="row.locked || !isGridCellEditing({ rowIndex: $index, columnIndex })"
                 @update:model-value="setValue(row, field, $event)"
                 @change="saveField(row, field)"
-                @paste="pasteGrid($event, $index, columnIndex)"
+              />
+              <EditableChoiceInput
+                v-else-if="field.options.length || field.data_type === 'select'"
+                :model-value="valueFor(row, field)"
+                :options="fieldOptions(field)"
+                :readonly="row.locked || !isGridCellEditing({ rowIndex: $index, columnIndex })"
+                @update:model-value="setValue(row, field, $event)"
+                @change="saveField(row, field)"
+              />
+              <el-input
+                v-else-if="!field.is_core"
+                type="textarea"
+                :autosize="{ minRows: 1, maxRows: 5 }"
+                resize="none"
+                :model-value="valueFor(row, field)"
+                :readonly="row.locked || !isGridCellEditing({ rowIndex: $index, columnIndex })"
+                :inputmode="field.data_type === 'number' ? 'decimal' : undefined"
+                @update:model-value="setValue(row, field, String($event))"
+                @change="saveField(row, field)"
+              />
+              <el-input
+                v-else
+                :model-value="valueFor(row, field)"
+                :readonly="row.locked || !isGridCellEditing({ rowIndex: $index, columnIndex })"
+                :inputmode="field.data_type === 'number' ? 'decimal' : undefined"
+                @update:model-value="setValue(row, field, String($event))"
+                @change="saveField(row, field)"
               />
               <span v-if="fieldErrorFor(row, field)" class="cell-field-error">
                 {{ fieldErrorFor(row, field) }}
               </span>
             </div>
-            <EditableChoiceInput
-              v-else-if="field.options.length || field.data_type === 'select'"
-              :data-row-id="row.id"
-              :data-field-index="columnIndex"
-              :model-value="valueFor(row, field)"
-              :options="fieldOptions(field)"
-              :readonly="row.locked"
-              @update:model-value="setValue(row, field, $event)"
-              @change="saveField(row, field)"
-              @paste="pasteGrid($event, $index, columnIndex)"
-            />
-            <el-input
-              v-else-if="!field.is_core"
-              :data-row-id="row.id"
-              :data-field-index="columnIndex"
-              type="textarea"
-              :autosize="{ minRows: 1, maxRows: 5 }"
-              resize="none"
-              :model-value="valueFor(row, field)"
-              :readonly="row.locked"
-              :inputmode="field.data_type === 'number' ? 'decimal' : undefined"
-              @update:model-value="setValue(row, field, String($event))"
-              @change="saveField(row, field)"
-              @paste="pasteGrid($event, $index, columnIndex)"
-            />
-            <el-input
-              v-else
-              :data-row-id="row.id"
-              :data-field-index="columnIndex"
-              :model-value="valueFor(row, field)"
-              :readonly="row.locked"
-              :inputmode="field.data_type === 'number' ? 'decimal' : undefined"
-              @update:model-value="setValue(row, field, String($event))"
-              @change="saveField(row, field)"
-              @keyup.enter="saveField(row, field)"
-              @paste="pasteGrid($event, $index, columnIndex)"
-            />
           </template>
         </el-table-column>
 
@@ -3460,6 +3802,34 @@ onBeforeUnmount(() => {
   gap: 2px;
 }
 
+.cell-field:not(.cell-field-editing) {
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.cell-field-editing {
+  cursor: text;
+}
+
+.cell-field:not(.cell-field-editing) :deep(*) {
+  user-select: none;
+  -webkit-user-select: none;
+  pointer-events: none;
+}
+
+.cell-field:not(.cell-field-editing) :deep(.el-input),
+.cell-field:not(.cell-field-editing) :deep(.el-select),
+.cell-field:not(.cell-field-editing) :deep(.editable-date-input) {
+  pointer-events: none;
+}
+
+.cell-field:not(.cell-field-editing) :deep(.el-input__wrapper),
+.cell-field:not(.cell-field-editing) :deep(.el-select__wrapper) {
+  background: transparent;
+  box-shadow: none;
+}
+
 .cell-field-error {
   color: #b42318;
   font-size: 11px;
@@ -3589,10 +3959,10 @@ onBeforeUnmount(() => {
   justify-content: center;
 }
 
-:deep(.el-table td.ledger-editor-column > .cell > .el-input),
-:deep(.el-table td.ledger-editor-column > .cell > .el-textarea),
-:deep(.el-table td.ledger-editor-column > .cell > .el-select),
-:deep(.el-table td.ledger-editor-column > .cell > .editable-date-input) {
+:deep(.el-table td.ledger-editor-column > .cell > .cell-field > .el-input),
+:deep(.el-table td.ledger-editor-column > .cell > .cell-field > .el-textarea),
+:deep(.el-table td.ledger-editor-column > .cell > .cell-field > .el-select),
+:deep(.el-table td.ledger-editor-column > .cell > .cell-field > .editable-date-input) {
   width: var(--ledger-editor-width, 100%);
   max-width: 100%;
   min-height: var(--ledger-editor-height, 32px);
@@ -3642,6 +4012,10 @@ onBeforeUnmount(() => {
 
 :deep(.el-table.selection-dragging td.el-table-column--selection .el-checkbox__inner) {
   cursor: grabbing;
+}
+
+:deep(.el-table.grid-selection-dragging) {
+  user-select: none;
 }
 
 :deep(.el-table th.el-table__cell) {
