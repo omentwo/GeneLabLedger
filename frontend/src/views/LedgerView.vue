@@ -509,24 +509,23 @@ function clearSelectionsAfterLedgerViewChange(): void {
   tableRef.value?.clearSelection();
 }
 
-function restoreGridFocusAfterLedgerViewChange(
+async function restoreGridFocusAfterLedgerViewChange(
   activeIdentity: { rowId: string; fieldId: string } | null,
   anchorIdentity: { rowId: string; fieldId: string } | null,
-): void {
-  void nextTick(() => {
-    const active = restoreGridIdentity(activeIdentity);
-    const anchor = restoreGridIdentity(anchorIdentity);
-    if (!active) {
-      activeGridCell.value = null;
-      gridSelectionAnchor.value = null;
-      gridCellRange.value = null;
-      return;
-    }
-    activeGridCell.value = active;
-    gridSelectionAnchor.value = anchor ?? active;
+): Promise<void> {
+  await nextTick();
+  const active = restoreGridIdentity(activeIdentity);
+  const anchor = restoreGridIdentity(anchorIdentity);
+  if (!active) {
+    activeGridCell.value = null;
+    gridSelectionAnchor.value = null;
     gridCellRange.value = null;
-    void focusGridCell(active);
-  });
+    return;
+  }
+  activeGridCell.value = active;
+  gridSelectionAnchor.value = anchor ?? active;
+  gridCellRange.value = null;
+  await focusGridCell(active);
 }
 
 function resetColumnToolsDraft(field: FieldDefinition): void {
@@ -571,17 +570,46 @@ function toggleColumnTools(): void {
   if (!columnToolsVisible.value) closeColumnTools();
 }
 
+type LedgerTableScrollPosition = {
+  top: number;
+  left: number;
+};
+
+function captureLedgerTableScroll(): LedgerTableScrollPosition | null {
+  const tableRoot = ledgerTableCardRef.value;
+  if (!tableRoot) return null;
+  const body = gridTableBodyScrollElement(tableRoot);
+  return body ? { top: body.scrollTop, left: body.scrollLeft } : null;
+}
+
+function restoreLedgerTableScroll(position: LedgerTableScrollPosition | null): void {
+  if (!position) return;
+  const tableRoot = ledgerTableCardRef.value;
+  if (!tableRoot) return;
+  const body = gridTableBodyScrollElement(tableRoot);
+  if (!body) return;
+  body.scrollTop = position.top;
+  body.scrollLeft = position.left;
+}
+
 function setLedgerSort(field: FieldDefinition, order: "ascending" | "descending" | null): void {
+  clearBottomScrollTimers();
   const activeIdentity = captureGridIdentity(activeGridCell.value);
   const anchorIdentity = captureGridIdentity(gridSelectionAnchor.value);
+  const scrollPosition = captureLedgerTableScroll();
   ledgerSort.value = order ? { fieldId: field.id, order } : null;
   closeColumnTools();
-  restoreGridFocusAfterLedgerViewChange(activeIdentity, anchorIdentity);
+  void (async () => {
+    await restoreGridFocusAfterLedgerViewChange(activeIdentity, anchorIdentity);
+    await nextTick();
+    restoreLedgerTableScroll(scrollPosition);
+  })();
 }
 
 function applyColumnFilter(): void {
   const field = columnToolsField.value;
   if (!field) return;
+  clearBottomScrollTimers();
   const kind = columnFilterKind(field);
   if (kind === "date-range" && columnToolsDraft.start && columnToolsDraft.end &&
       columnToolsDraft.start > columnToolsDraft.end) {
@@ -614,6 +642,7 @@ function applyColumnFilter(): void {
 function clearColumnFilter(): void {
   const field = columnToolsField.value;
   if (!field) return;
+  clearBottomScrollTimers();
   const nextFilters = { ...ledgerFilters.value };
   delete nextFilters[field.id];
   ledgerFilters.value = nextFilters;
