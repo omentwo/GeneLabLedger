@@ -237,7 +237,10 @@ def commit_workbook(
             status_code=status.HTTP_409_CONFLICT,
             detail="导入内容中存在重复实验编号",
         )
-    conflict_statement = select(ProjectRecord).where(ProjectRecord.experiment_number.in_(numbers))
+    conflict_statement = select(ProjectRecord).where(
+        ProjectRecord.project_id == payload.project_id,
+        ProjectRecord.experiment_number.in_(numbers),
+    )
     if target_ids:
         conflict_statement = conflict_statement.where(ProjectRecord.id.not_in(target_ids))
     outside_conflicts = list(session.scalars(conflict_statement))

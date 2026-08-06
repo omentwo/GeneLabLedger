@@ -14,7 +14,7 @@ import {
   Unlock,
   Upload,
 } from "@element-plus/icons-vue";
-import { ElMessage, ElMessageBox } from "element-plus";
+import { ElMessage, ElMessageBox, type TableColumnCtx } from "element-plus";
 import {
   computed,
   nextTick,
@@ -28,6 +28,11 @@ import {
 import { useRoute, useRouter } from "vue-router";
 
 import { commitWorkbookImport, previewWorkbookImport } from "@/api/imports";
+import {
+  createLedgerNativePreview,
+  getNativePreviewStatus,
+  getPreviewCapabilities,
+} from "@/api/preview";
 import {
   DEFAULT_LEDGER_DISPLAY_SETTINGS,
   LEDGER_FONT_FAMILY_OPTIONS,
@@ -58,6 +63,7 @@ import {
 import type { RecordSearchScope } from "@/api/records";
 import EditableChoiceInput from "@/components/EditableChoiceInput.vue";
 import EditableDateInput from "@/components/EditableDateInput.vue";
+import LedgerTemplateManager from "@/components/LedgerTemplateManager.vue";
 import ProjectFieldManager from "@/components/ProjectFieldManager.vue";
 import { updateField } from "@/api/projects";
 import { useAppStore } from "@/stores/app";
@@ -76,8 +82,19 @@ import type {
   RecordStatus,
   RecordUpdateInput,
   WorkbookImportRow,
+  NativePreviewAction,
+  NativePreviewTask,
+  PreviewCapabilities,
+  PrintEngine,
 } from "@/types/api";
 import { formatShanghaiDateTime } from "@/utils/datetime";
+import {
+  applyLedgerTableView,
+  getLedgerFieldValue,
+  type LedgerFieldFilter,
+  type LedgerFilterMap,
+  type LedgerSortState,
+} from "@/utils/ledgerTableView";
 import { exportWorkbook } from "@/utils/workbook";
 
 const route = useRoute();
@@ -172,6 +189,40 @@ const historyReplayLoading = ref(false);
 const savingIds = ref(new Set<string>());
 const fieldErrors = ref<Record<string, string>>({});
 const managerVisible = ref(false);
+const templateManagerVisible = ref(false);
+const previewScope = ref<"selection" | "all">("all");
+const previewEngine = ref<PrintEngine>("auto");
+const previewCapabilities = ref<PreviewCapabilities | null>(null);
+const nativePreviewLoading = ref(false);
+const columnToolsVisible = ref(false);
+const columnToolsOpenFieldId = ref("");
+const columnToolsPosition = reactive({ left: 0, top: 0 });
+type LedgerColumnToolsDraft = {
+  text: string;
+  options: string[];
+  start: string;
+  end: string;
+  emptyOnly: boolean;
+};
+const columnToolsDraft = reactive<LedgerColumnToolsDraft>({
+  text: "",
+  options: [],
+  start: "",
+  end: "",
+  emptyOnly: false,
+});
+const ledgerSort = ref<LedgerSortState>(null);
+const ledgerFilters = ref<LedgerFilterMap>({});
+type LedgerContextMenuTarget = {
+  kind: "cell" | "row";
+  rowId: string;
+  fieldId?: string;
+};
+const ledgerContextMenu = ref<{
+  x: number;
+  y: number;
+  target: LedgerContextMenuTarget;
+} | null>(null);
 const exportVisible = ref(false);
 const assignDialogVisible = ref(false);
 const operationRecord = ref<ProjectRecord | null>(null);
@@ -336,9 +387,43 @@ const fields = computed(() =>
     .sort((a, b) => a.sort_order - b.sort_order),
 );
 const selectedCount = computed(() => selectedRecords.value.length);
-const tableRows = computed<LedgerRow[]>(() => [...records.value, ...draftRows.value]);
+const baseTableRows = computed<LedgerRow[]>(() => [...records.value, ...draftRows.value]);
+const tableRows = computed<LedgerRow[]>(() =>
+  applyLedgerTableView(baseTableRows.value, fields.value, ledgerSort.value, ledgerFilters.value),
+);
 const gridCellSelectionCount = computed(() => selectedGridCellKeys.value.size);
 const hasGridCellSelection = computed(() => gridCellSelectionCount.value > 0);
+const columnToolsField = computed(
+  () => fields.value.find((field) => field.id === columnToolsOpenFieldId.value) ?? null,
+);
+const columnToolsFilterKind = computed<"text" | "options" | "date-range">(() => {
+  const field = columnToolsField.value;
+  if (!field) return "text";
+  if (field.data_type === "date" || field.system_key === "experiment_date") return "date-range";
+  if (field.data_type === "select" || field.options.length || field.system_key === "status") {
+    return "options";
+  }
+  return "text";
+});
+const columnToolOptions = computed(() =>
+  columnToolsField.value ? filterOptionsForField(columnToolsField.value) : [],
+);
+const contextMenuRow = computed<LedgerRow | null>(() => {
+  const target = ledgerContextMenu.value?.target;
+  if (!target) return null;
+  return tableRows.value.find((row) => row.id === target.rowId) ?? null;
+});
+const contextMenuCell = computed<GridCellPosition | null>(() => {
+  const target = ledgerContextMenu.value?.target;
+  if (!target?.fieldId) return null;
+  const rowIndex = tableRows.value.findIndex((row) => row.id === target.rowId);
+  const columnIndex = fields.value.findIndex((field) => field.id === target.fieldId);
+  return rowIndex >= 0 && columnIndex >= 0 ? { rowIndex, columnIndex } : null;
+});
+const contextMenuStyle = computed<CSSProperties>(() => ({
+  left: `${ledgerContextMenu.value?.x ?? 0}px`,
+  top: `${ledgerContextMenu.value?.y ?? 0}px`,
+}));
 const ledgerFontOption = computed(
   () =>
     LEDGER_FONT_FAMILY_OPTIONS.find(
@@ -366,6 +451,174 @@ const importHasErrors = computed(
 
 function isDraft(record: LedgerRow): boolean {
   return record._draft === true;
+}
+
+function columnFilterKind(field: FieldDefinition): "text" | "options" | "date-range" {
+  if (field.data_type === "date" || field.system_key === "experiment_date") return "date-range";
+  if (field.data_type === "select" || field.options.length || field.system_key === "status") {
+    return "options";
+  }
+  return "text";
+}
+
+function filterOptionsForField(field: FieldDefinition): string[] {
+  const values = new Set(fieldOptions(field));
+  if (field.system_key === "status") {
+    values.add("待实验");
+    values.add("已完成");
+  }
+  baseTableRows.value.forEach((row) => values.add(getLedgerFieldValue(row, field)));
+  return [...values].sort((left, right) => {
+    if (!left) return -1;
+    if (!right) return 1;
+    return left.localeCompare(right, "zh-CN", { numeric: true, sensitivity: "base" });
+  });
+}
+
+function closeLedgerContextMenu(): void {
+  ledgerContextMenu.value = null;
+}
+
+function closeColumnTools(): void {
+  columnToolsOpenFieldId.value = "";
+}
+
+function closeLedgerOverlays(): void {
+  closeColumnTools();
+  closeLedgerContextMenu();
+}
+
+function captureGridIdentity(position: GridCellPosition | null): { rowId: string; fieldId: string } | null {
+  if (!position) return null;
+  const row = tableRows.value[position.rowIndex];
+  const field = fields.value[position.columnIndex];
+  return row && field ? { rowId: row.id, fieldId: field.id } : null;
+}
+
+function restoreGridIdentity(identity: { rowId: string; fieldId: string } | null): GridCellPosition | null {
+  if (!identity) return null;
+  const rowIndex = tableRows.value.findIndex((row) => row.id === identity.rowId);
+  const columnIndex = fields.value.findIndex((field) => field.id === identity.fieldId);
+  return rowIndex >= 0 && columnIndex >= 0 ? { rowIndex, columnIndex } : null;
+}
+
+function clearSelectionsAfterLedgerViewChange(): void {
+  activeGridCell.value = null;
+  clearGridCellSelection();
+  selectedRecords.value = [];
+  tableRef.value?.clearSelection();
+}
+
+function restoreGridFocusAfterLedgerViewChange(
+  activeIdentity: { rowId: string; fieldId: string } | null,
+  anchorIdentity: { rowId: string; fieldId: string } | null,
+): void {
+  void nextTick(() => {
+    const active = restoreGridIdentity(activeIdentity);
+    const anchor = restoreGridIdentity(anchorIdentity);
+    if (!active) {
+      activeGridCell.value = null;
+      gridSelectionAnchor.value = null;
+      gridCellRange.value = null;
+      return;
+    }
+    activeGridCell.value = active;
+    gridSelectionAnchor.value = anchor ?? active;
+    gridCellRange.value = null;
+    void focusGridCell(active);
+  });
+}
+
+function resetColumnToolsDraft(field: FieldDefinition): void {
+  columnToolsDraft.text = "";
+  columnToolsDraft.options = [];
+  columnToolsDraft.start = "";
+  columnToolsDraft.end = "";
+  columnToolsDraft.emptyOnly = false;
+  const filter = ledgerFilters.value[field.id];
+  if (!filter) return;
+  if (filter.kind === "text") columnToolsDraft.text = filter.value;
+  else if (filter.kind === "options") {
+    if (columnFilterKind(field) === "text" && filter.values.length === 1 && filter.values[0] === "") {
+      columnToolsDraft.emptyOnly = true;
+    } else {
+      columnToolsDraft.options = [...filter.values];
+    }
+  }
+  else {
+    columnToolsDraft.start = filter.start;
+    columnToolsDraft.end = filter.end;
+  }
+}
+
+function openColumnTools(field: FieldDefinition, event: MouseEvent): void {
+  event.preventDefault();
+  event.stopPropagation();
+  resetColumnToolsDraft(field);
+  const trigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  const rect = trigger?.getBoundingClientRect();
+  const width = 330;
+  const height = columnFilterKind(field) === "options" ? 360 : 300;
+  const left = rect?.left ?? event.clientX;
+  const top = (rect?.bottom ?? event.clientY) + 6;
+  columnToolsPosition.left = Math.max(8, Math.min(left, window.innerWidth - width - 8));
+  columnToolsPosition.top = Math.max(8, Math.min(top, window.innerHeight - height - 8));
+  columnToolsOpenFieldId.value = field.id;
+}
+
+function toggleColumnTools(): void {
+  columnToolsVisible.value = !columnToolsVisible.value;
+  if (!columnToolsVisible.value) closeColumnTools();
+}
+
+function setLedgerSort(field: FieldDefinition, order: "ascending" | "descending" | null): void {
+  const activeIdentity = captureGridIdentity(activeGridCell.value);
+  const anchorIdentity = captureGridIdentity(gridSelectionAnchor.value);
+  ledgerSort.value = order ? { fieldId: field.id, order } : null;
+  closeColumnTools();
+  restoreGridFocusAfterLedgerViewChange(activeIdentity, anchorIdentity);
+}
+
+function applyColumnFilter(): void {
+  const field = columnToolsField.value;
+  if (!field) return;
+  const kind = columnFilterKind(field);
+  if (kind === "date-range" && columnToolsDraft.start && columnToolsDraft.end &&
+      columnToolsDraft.start > columnToolsDraft.end) {
+    ElMessage.warning("开始日期不能晚于结束日期");
+    return;
+  }
+  let filter: LedgerFieldFilter | undefined;
+  if (kind === "options") {
+    filter = { kind, values: [...columnToolsDraft.options] };
+  } else if (kind === "date-range") {
+    filter = { kind, start: columnToolsDraft.start, end: columnToolsDraft.end };
+  } else if (columnToolsDraft.emptyOnly) {
+    filter = { kind: "options", values: [""] };
+  } else {
+    filter = { kind, value: columnToolsDraft.text };
+  }
+  const nextFilters = { ...ledgerFilters.value };
+  if (!filter || (filter.kind === "text" && !filter.value.trim()) ||
+      (filter.kind === "options" && !filter.values.length) ||
+      (filter.kind === "date-range" && !filter.start && !filter.end)) {
+    delete nextFilters[field.id];
+  } else {
+    nextFilters[field.id] = filter;
+  }
+  ledgerFilters.value = nextFilters;
+  clearSelectionsAfterLedgerViewChange();
+  closeColumnTools();
+}
+
+function clearColumnFilter(): void {
+  const field = columnToolsField.value;
+  if (!field) return;
+  const nextFilters = { ...ledgerFilters.value };
+  delete nextFilters[field.id];
+  ledgerFilters.value = nextFilters;
+  clearSelectionsAfterLedgerViewChange();
+  closeColumnTools();
 }
 
 function gridCellFromElement(element: EventTarget | null): GridCellPosition | null {
@@ -509,6 +762,118 @@ function selectGridCell(position: GridCellPosition): void {
     nextPosition,
     { anchor: { ...nextPosition }, focus: { ...nextPosition } },
   );
+}
+
+function fieldIndexForTableColumn(column: TableColumnCtx<LedgerRow>): number {
+  if (!column.columnKey || column.type === "selection") return -1;
+  return fields.value.findIndex((field) => field.id === column.columnKey);
+}
+
+function gridColumnPositions(fieldIndex: number): GridCellPosition[] {
+  if (fieldIndex < 0 || fieldIndex >= fields.value.length) return [];
+  return tableRows.value.map((_, rowIndex) => ({ rowIndex, columnIndex: fieldIndex }));
+}
+
+const gridHeaderSelectionState = computed(() => {
+  const states = new Map<string, "selected" | "partial">();
+  const currentRows = tableRows.value;
+  if (!currentRows.length) return states;
+
+  for (const field of fields.value) {
+    let selectedCount = 0;
+    for (const row of currentRows) {
+      if (selectedGridCellKeys.value.has(`${row.id}${GRID_CELL_KEY_SEPARATOR}${field.id}`)) {
+        selectedCount += 1;
+      }
+    }
+    if (selectedCount === currentRows.length) states.set(field.id, "selected");
+    else if (selectedCount > 0) states.set(field.id, "partial");
+  }
+  return states;
+});
+
+function gridHeaderCellClassName({
+  column,
+}: {
+  row: LedgerRow;
+  rowIndex: number;
+  column: TableColumnCtx<LedgerRow>;
+  columnIndex: number;
+}): string {
+  const state = column.columnKey
+    ? gridHeaderSelectionState.value.get(column.columnKey)
+    : undefined;
+  if (state === "selected") return "grid-header-selected";
+  if (state === "partial") return "grid-header-partial";
+  return "";
+}
+
+async function handleLedgerHeaderClick(
+  column: TableColumnCtx<LedgerRow>,
+  event: PointerEvent,
+): Promise<void> {
+  const header = event.target instanceof Element ? event.target.closest("th") : null;
+  // Element Plus marks a header with `noclick` while its resize handle is being
+  // dragged. Do not turn a column-width adjustment into a grid selection.
+  if (header?.classList.contains("noclick")) return;
+
+  const fieldIndex = fieldIndexForTableColumn(column);
+  if (fieldIndex < 0 || !tableRows.value.length) return;
+
+  if (editingGridCell.value) {
+    const saved = await finishGridCellEdit(true, false);
+    if (!saved || editingGridCell.value) return;
+  }
+
+  event.preventDefault();
+  const lastRowIndex = tableRows.value.length - 1;
+  const active = { rowIndex: 0, columnIndex: fieldIndex };
+  const modifierAdd = event.ctrlKey || event.metaKey;
+
+  if (modifierAdd) {
+    const positions = gridColumnPositions(fieldIndex);
+    const targetKeys = new Set(positions.map(gridCellKey).filter(Boolean));
+    const allSelected = positions.length > 0 && positions.every((position) => {
+      const key = gridCellKey(position);
+      return Boolean(key && selectedGridCellKeys.value.has(key));
+    });
+    const nextKeys = new Set(selectedGridCellKeys.value);
+    targetKeys.forEach((key) => {
+      if (allSelected) nextKeys.delete(key);
+      else nextKeys.add(key);
+    });
+    selectedGridCellKeys.value = nextKeys;
+    activeGridCell.value = active;
+    if (!gridSelectionAnchor.value) gridSelectionAnchor.value = active;
+    gridCellRange.value = null;
+    void focusGridCell(active);
+    return;
+  }
+
+  const modifierShift = event.shiftKey;
+  if (modifierShift) {
+    const anchorColumn = Math.max(
+      0,
+      Math.min(
+        fields.value.length - 1,
+        gridSelectionAnchor.value?.columnIndex ?? activeGridCell.value?.columnIndex ?? fieldIndex,
+      ),
+    );
+    const range = {
+      anchor: { rowIndex: 0, columnIndex: anchorColumn },
+      focus: { rowIndex: lastRowIndex, columnIndex: fieldIndex },
+    };
+    replaceGridCellSelection(gridCellPositionsForRange(range), active, range.anchor, range);
+    void focusGridCell(active);
+    return;
+  }
+
+  const range = {
+    anchor: { ...active },
+    focus: { rowIndex: lastRowIndex, columnIndex: fieldIndex },
+  };
+  replaceGridCellSelection(gridColumnPositions(fieldIndex), active, active, range);
+  void focusGridCell(active);
 }
 
 const gridCellClassName = computed(() => {
@@ -1068,16 +1433,10 @@ function gridClipboardSelection(eventCell: GridCellPosition | null): {
   return { positions, active: clampGridCell(active) };
 }
 
-function handleGridCopy(event: ClipboardEvent): void {
-  const eventCell = gridCellFromElement(event.target);
-  // Editing keeps the browser's native text-copy behavior. Cell/range copy
-  // is only active while the grid itself owns the selection.
-  if (eventCell && isGridCellEditing(eventCell)) {
-    lastGridClipboard = null;
-    return;
-  }
-  const selection = gridClipboardSelection(eventCell);
-  if (!selection) return;
+function buildGridClipboardData(selection: {
+  positions: GridCellPosition[];
+  active: GridCellPosition;
+}): { plainText: string; payload: GridClipboardPayload } {
   const { positions, active } = selection;
   const selectedKeys = new Set(positions.map(gridCellKey));
   const rowStart = Math.min(...positions.map((position) => position.rowIndex));
@@ -1098,19 +1457,32 @@ function handleGridCopy(event: ClipboardEvent): void {
   }
   const payload: GridClipboardPayload = {
     version: 1,
-    cells: positions.map((position) => ({
-      rowOffset: position.rowIndex - active.rowIndex,
-      columnOffset: position.columnIndex - active.columnIndex,
-      value: (() => {
-        const row = tableRows.value[position.rowIndex];
-        const field = fields.value[position.columnIndex];
-        return row && field ? valueFor(row, field) : "";
-      })(),
-    })),
+    cells: positions.map((position) => {
+      const row = tableRows.value[position.rowIndex];
+      const field = fields.value[position.columnIndex];
+      return {
+        rowOffset: position.rowIndex - active.rowIndex,
+        columnOffset: position.columnIndex - active.columnIndex,
+        value: row && field ? valueFor(row, field) : "",
+      };
+    }),
   };
+  return { plainText: matrix.join("\n"), payload };
+}
+
+function handleGridCopy(event: ClipboardEvent): void {
+  const eventCell = gridCellFromElement(event.target);
+  // Editing keeps the browser's native text-copy behavior. Cell/range copy
+  // is only active while the grid itself owns the selection.
+  if (eventCell && isGridCellEditing(eventCell)) {
+    lastGridClipboard = null;
+    return;
+  }
+  const selection = gridClipboardSelection(eventCell);
+  if (!selection) return;
+  const { plainText, payload } = buildGridClipboardData(selection);
   const clipboard = event.clipboardData;
   if (!clipboard) return;
-  const plainText = matrix.join("\n");
   lastGridClipboard = { plainText, payload };
   try {
     clipboard.setData(GRID_CLIPBOARD_MIME, JSON.stringify(payload));
@@ -1120,6 +1492,43 @@ function handleGridCopy(event: ClipboardEvent): void {
   clipboard.setData("text/plain", plainText);
   event.preventDefault();
   event.stopPropagation();
+}
+
+async function copyGridSelectionToClipboard(
+  selectionOverride?: { positions: GridCellPosition[]; active: GridCellPosition },
+): Promise<void> {
+  const selection = selectionOverride ?? gridClipboardSelection(null);
+  if (!selection) {
+    ElMessage.warning("请先选择要复制的单元格");
+    return;
+  }
+  const { plainText, payload } = buildGridClipboardData(selection);
+  lastGridClipboard = { plainText, payload };
+  try {
+    const clipboard = navigator.clipboard;
+    if (!clipboard) throw new Error("clipboard-unavailable");
+    let written = false;
+    if (typeof ClipboardItem !== "undefined" && typeof clipboard.write === "function") {
+      try {
+        const item = new ClipboardItem({
+          "text/plain": new Blob([plainText], { type: "text/plain" }),
+          [GRID_CLIPBOARD_MIME]: new Blob([JSON.stringify(payload)], {
+            type: GRID_CLIPBOARD_MIME,
+          }),
+        });
+        await clipboard.write([item]);
+        written = true;
+      } catch {
+        // Some browsers expose ClipboardItem but reject custom MIME types.
+      }
+    }
+    if (!written) {
+      await clipboard.writeText(plainText);
+    }
+    ElMessage.success("已复制选中单元格");
+  } catch {
+    ElMessage.warning("浏览器未授予剪贴板权限，请使用 Ctrl/Cmd+C 复制");
+  }
 }
 
 function handleGridPaste(event: ClipboardEvent): void {
@@ -1147,6 +1556,141 @@ function handleGridPaste(event: ClipboardEvent): void {
     replaceGridCellSelection(targetPositions, start, start, null);
     void focusGridCell(start);
   });
+}
+
+function contextRowCopySelection(row: LedgerRow): {
+  positions: GridCellPosition[];
+  active: GridCellPosition;
+} | null {
+  const rowIndex = tableRows.value.findIndex((candidate) => candidate.id === row.id);
+  if (rowIndex < 0 || !fields.value.length) return null;
+  const positions = fields.value.map((_, columnIndex) => ({ rowIndex, columnIndex }));
+  return { positions, active: positions[0]! };
+}
+
+function positionLedgerContextMenu(event: MouseEvent): void {
+  const width = 230;
+  const height = 360;
+  ledgerContextMenu.value = {
+    x: Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8)),
+    y: Math.max(8, Math.min(event.clientY, window.innerHeight - height - 8)),
+    target: ledgerContextMenu.value!.target,
+  };
+}
+
+function handleLedgerContextMenu(event: MouseEvent): void {
+  const target = event.target instanceof Element ? event.target : null;
+  if (target?.closest(".ledger-column-tools-popover, .ledger-column-tools-trigger")) return;
+  const cell = gridCellFromElement(event.target);
+  if (cell && isGridCellEditing(cell)) return;
+  const rowInfo = selectionRowFromElement(target);
+  const row = cell ? tableRows.value[cell.rowIndex] : rowInfo?.row;
+  if (!row || isDraft(row)) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+  closeColumnTools();
+  if (cell && !isGridCellSelected(cell)) selectGridCell(cell);
+  ledgerContextMenu.value = {
+    x: event.clientX,
+    y: event.clientY,
+    target: {
+      kind: cell ? "cell" : "row",
+      rowId: row.id,
+      fieldId: cell ? fields.value[cell.columnIndex]?.id : undefined,
+    },
+  };
+  positionLedgerContextMenu(event);
+}
+
+function finishContextMenuAction(): void {
+  closeLedgerContextMenu();
+}
+
+async function contextCopy(): Promise<void> {
+  const row = contextMenuRow.value;
+  const cell = contextMenuCell.value;
+  const selection =
+    ledgerContextMenu.value?.target.kind === "row" && row
+      ? (hasGridCellSelection ? gridClipboardSelection(null) : contextRowCopySelection(row))
+      : cell
+        ? gridClipboardSelection(cell)
+        : null;
+  await copyGridSelectionToClipboard(selection ?? undefined);
+  finishContextMenuAction();
+}
+
+async function contextPaste(): Promise<void> {
+  const cell = contextMenuCell.value;
+  if (!cell) {
+    ElMessage.warning("请右键一个单元格作为粘贴起点");
+    finishContextMenuAction();
+    return;
+  }
+  try {
+    const text = await navigator.clipboard.readText();
+    const customPayload = lastGridClipboard?.plainText === text ? lastGridClipboard.payload : null;
+    if (!customPayload && !text) return;
+    const start = clampGridCell(cell);
+    const positions = await pasteGrid(
+      null,
+      start.rowIndex,
+      start.columnIndex,
+      customPayload?.cells,
+      customPayload ? undefined : text,
+    );
+    replaceGridCellSelection(positions.length ? positions : [start], start, start, null);
+    void focusGridCell(start);
+  } catch {
+    ElMessage.warning("浏览器未授予剪贴板权限，请使用 Ctrl/Cmd+V 粘贴");
+  } finally {
+    finishContextMenuAction();
+  }
+}
+
+async function contextClear(): Promise<void> {
+  if (!contextMenuCell.value) {
+    ElMessage.warning("请先选择单元格");
+    finishContextMenuAction();
+    return;
+  }
+  await clearGridCellRange();
+  finishContextMenuAction();
+}
+
+function contextSetHighlight(): void {
+  const target = ledgerContextMenu.value?.target;
+  const row = contextMenuRow.value;
+  if (!target || !row) return finishContextMenuAction();
+  if (target.kind === "row") openHighlightDialog([row]);
+  else openCurrentHighlightDialog();
+  finishContextMenuAction();
+}
+
+async function contextClearHighlight(): Promise<void> {
+  const target = ledgerContextMenu.value?.target;
+  const row = contextMenuRow.value;
+  if (!target || !row) return finishContextMenuAction();
+  if (target.kind === "row") {
+    highlightMode.value = "record";
+    highlightTargetIds.value = [row.id];
+    await submitHighlight(null);
+  } else {
+    await clearSelectedHighlight();
+  }
+  finishContextMenuAction();
+}
+
+function contextEdit(): void {
+  const cell = contextMenuCell.value;
+  if (cell && selectedGridCellKeys.value.size === 1) enterGridCellEdit(cell);
+  finishContextMenuAction();
+}
+
+async function contextToggleLock(): Promise<void> {
+  const row = contextMenuRow.value;
+  if (row && !isDraft(row)) await toggleRecordLock(row);
+  finishContextMenuAction();
 }
 
 async function clearGridCellRange(): Promise<void> {
@@ -1862,6 +2406,105 @@ async function loadLedgerDisplaySettings(): Promise<void> {
   }
 }
 
+async function loadPreviewEngineSetting(): Promise<void> {
+  try {
+    const result = await getSetting<PrintEngine>("report_print_engine");
+    if (result.value && ["auto", "word", "wps"].includes(result.value)) {
+      previewEngine.value = result.value;
+    }
+  } catch {
+    // Preview remains usable with automatic engine selection when no setting exists.
+  }
+}
+
+async function loadPreviewCapabilities(): Promise<void> {
+  try {
+    previewCapabilities.value = await getPreviewCapabilities();
+  } catch {
+    previewCapabilities.value = null;
+  }
+}
+
+function nativeEngineAvailable(engine: PrintEngine): boolean {
+  const capabilities = previewCapabilities.value;
+  if (!capabilities) return true;
+  if (engine === "auto") return capabilities.native_preview;
+  if (engine === "word") return capabilities.microsoft_spreadsheet;
+  return capabilities.wps_spreadsheet;
+}
+
+function nativeEngineLabel(): string {
+  if (previewEngine.value === "word") return "Office";
+  if (previewEngine.value === "wps") return "WPS";
+  return "Office/WPS";
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+async function monitorNativeLedgerJob(task: NativePreviewTask): Promise<void> {
+  let current = task;
+  let openedNotified = false;
+  for (let attempt = 0; attempt < 28_800; attempt += 1) {
+    if (current.status === "failed") {
+      ElMessage.error(current.error || "Office/WPS 原生窗口打开失败");
+      return;
+    }
+    if (current.status === "open" && !openedNotified) {
+      openedNotified = true;
+      ElMessage.success(`${nativeEngineLabel()} 原生窗口已打开`);
+    }
+    if (current.status === "completed") {
+      ElMessage.info(`${nativeEngineLabel()} 原生窗口已关闭`);
+      return;
+    }
+    await sleep(500);
+    current = await getNativePreviewStatus(task.job_id);
+  }
+}
+
+async function openLedgerNative(action: NativePreviewAction): Promise<void> {
+  if (!currentProject.value) return;
+  if (!nativeEngineAvailable(previewEngine.value)) {
+    ElMessage.warning("当前电脑未检测到可用的 Office/WPS 表格程序");
+    return;
+  }
+  const scope = previewScope.value;
+  const cells = scope === "selection" ? selectedPreviewCells() : [];
+  if (scope === "selection" && !cells.length) {
+    ElMessage.warning("请先选择要预览的单元格");
+    return;
+  }
+  nativePreviewLoading.value = true;
+  try {
+    const task = await createLedgerNativePreview(currentProject.value.id, {
+      action,
+      scope,
+      cells,
+      search: appliedSearch.text || undefined,
+      status: appliedSearch.status || undefined,
+      experiment_date: appliedSearch.date || undefined,
+      print_engine: previewEngine.value,
+    });
+    void monitorNativeLedgerJob(task).catch((error) => {
+      ElMessage.error(error instanceof Error ? error.message : "Office/WPS 原生窗口状态读取失败");
+    });
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "无法打开 Office/WPS 原生窗口");
+  } finally {
+    nativePreviewLoading.value = false;
+  }
+}
+
+async function savePreviewEngineSetting(): Promise<void> {
+  try {
+    await putSetting("report_print_engine", previewEngine.value);
+  } catch (error) {
+    ElMessage.warning(error instanceof Error ? error.message : "打印引擎设置保存失败");
+  }
+}
+
 async function persistZoomSetting(): Promise<void> {
   ledgerDisplaySettings.value = normalizeLedgerDisplaySettings(ledgerDisplaySettings.value);
   refreshTableLayout();
@@ -2321,15 +2964,18 @@ function workbookRowFor(record: LedgerRow, rowNumber: number): WorkbookImportRow
 }
 
 async function pasteGrid(
-  event: ClipboardEvent,
+  event: ClipboardEvent | null,
   startRowIndex: number,
   startColumnIndex: number,
   exactCells?: GridPasteEntry[],
+  textOverride?: string,
 ): Promise<GridCellPosition[]> {
-  const text = exactCells ? "" : event.clipboardData?.getData("text/plain") ?? "";
+  const text = exactCells
+    ? ""
+    : textOverride ?? event?.clipboardData?.getData("text/plain") ?? "";
   if (!exactCells && !text) return [];
   const projectId = activeProjectId.value;
-  event.preventDefault();
+  event?.preventDefault();
   // Pasting should preserve the current viewport and the starting cell.  A
   // pending "add record" scroll or a newly-created draft row must not move
   // the table to the bottom while the paste is being committed.
@@ -2829,6 +3475,17 @@ async function exportCurrentProject(): Promise<void> {
   }
 }
 
+function selectedPreviewCells(): Array<{ record_id: string; field_id: string }> {
+  const cells: Array<{ record_id: string; field_id: string }> = [];
+  for (const position of selectedGridCellPositions()) {
+    const data = gridCellData(position);
+    if (data && !isDraft(data.record)) {
+      cells.push({ record_id: data.record.id, field_id: data.field.id });
+    }
+  }
+  return cells;
+}
+
 watch(
   () => appStore.projects,
   (projects) => {
@@ -2853,6 +3510,9 @@ watch(activeProjectId, async (projectId, previousProjectId) => {
   if (!ledgerInitialized || !projectId || projectId === previousProjectId) return;
   const load = (async () => {
     stopGridCellDrag(false);
+    closeLedgerOverlays();
+    ledgerSort.value = null;
+    ledgerFilters.value = {};
     editingGridCell.value = null;
     editingGridSnapshot.value = null;
     activeGridCell.value = null;
@@ -2910,15 +3570,44 @@ async function initializeLedger(): Promise<void> {
   scrollTableToBottom();
 }
 
+function handleLedgerDocumentPointerDown(event: PointerEvent): void {
+  const target = event.target instanceof Element ? event.target : null;
+  if (target?.closest(".ledger-column-tools-popover, .ledger-column-tools-trigger, .ledger-context-menu")) {
+    return;
+  }
+  closeLedgerOverlays();
+}
+
+function handleLedgerDocumentKeydown(event: KeyboardEvent): void {
+  if (event.key !== "Escape") return;
+  if (!columnToolsOpenFieldId.value && !ledgerContextMenu.value) return;
+  closeLedgerOverlays();
+  event.stopPropagation();
+}
+
+function handleLedgerDocumentScroll(): void {
+  closeLedgerOverlays();
+}
+
 onMounted(() => {
   document.addEventListener("click", handleSelectionClickCapture, true);
+  document.addEventListener("pointerdown", handleLedgerDocumentPointerDown);
+  document.addEventListener("keydown", handleLedgerDocumentKeydown);
+  document.addEventListener("scroll", handleLedgerDocumentScroll, true);
+  window.addEventListener("resize", handleLedgerDocumentScroll);
   void loadLedgerDisplaySettings();
+  void loadPreviewEngineSetting();
+  void loadPreviewCapabilities();
   void initializeLedger();
 });
 
 onBeforeUnmount(() => {
   ledgerHistory.clear();
   document.removeEventListener("click", handleSelectionClickCapture, true);
+  document.removeEventListener("pointerdown", handleLedgerDocumentPointerDown);
+  document.removeEventListener("keydown", handleLedgerDocumentKeydown);
+  document.removeEventListener("scroll", handleLedgerDocumentScroll, true);
+  window.removeEventListener("resize", handleLedgerDocumentScroll);
   stopGridCellDrag(false);
   stopSelectionDrag();
   editingGridCell.value = null;
@@ -3014,6 +3703,41 @@ onBeforeUnmount(() => {
             </el-button>
             <el-button :icon="Download" @click="exportVisible = !exportVisible">
               导出 Excel
+            </el-button>
+            <el-button
+              :icon="Setting"
+              :type="columnToolsVisible ? 'primary' : undefined"
+              @click="toggleColumnTools"
+            >
+              排序/筛选
+            </el-button>
+            <el-select
+              v-model="previewEngine"
+              class="ledger-preview-engine"
+              aria-label="打印引擎"
+              @change="savePreviewEngineSetting"
+            >
+              <el-option label="自动选择" value="auto" />
+              <el-option label="Microsoft Office" value="word" :disabled="!nativeEngineAvailable('word')" />
+              <el-option label="WPS" value="wps" :disabled="!nativeEngineAvailable('wps')" />
+            </el-select>
+            <el-select v-model="previewScope" class="ledger-preview-scope" aria-label="预览范围">
+              <el-option label="当前选区" value="selection" :disabled="!hasGridCellSelection" />
+              <el-option label="整本台账" value="all" />
+            </el-select>
+            <el-button
+              :loading="nativePreviewLoading"
+              :disabled="!nativeEngineAvailable(previewEngine)"
+              @click="openLedgerNative('preview')"
+            >
+              {{ nativeEngineLabel() }} 原生预览
+            </el-button>
+            <el-button
+              :loading="nativePreviewLoading"
+              :disabled="!nativeEngineAvailable(previewEngine)"
+              @click="openLedgerNative('open')"
+            >
+              使用 {{ nativeEngineLabel() }} 打开
             </el-button>
             <input
               ref="importFileInput"
@@ -3189,6 +3913,7 @@ onBeforeUnmount(() => {
       @keydown.capture="handleGridKeydown"
       @copy.capture="handleGridCopy"
       @paste.capture="handleGridPaste"
+      @contextmenu.capture="handleLedgerContextMenu"
     >
       <div class="ledger-table-surface" :style="ledgerTableStyle">
       <el-table
@@ -3213,8 +3938,10 @@ onBeforeUnmount(() => {
         :row-style="rowStyle"
         :cell-style="rowCellStyle"
         :cell-class-name="gridCellClassName"
+        :header-cell-class-name="gridHeaderCellClassName"
         @selection-change="handleTableSelectionChange"
         @pointerdown="handleSelectionPointerDown"
+        @header-click="handleLedgerHeaderClick"
         @header-dragend="handleHeaderResize"
       >
         <el-table-column
@@ -3243,6 +3970,32 @@ onBeforeUnmount(() => {
           header-align="center"
           resizable
         >
+          <template #header>
+            <div class="ledger-header-label">
+              <span>{{ field.label }}</span>
+              <button
+                v-if="columnToolsVisible"
+                type="button"
+                class="ledger-column-tools-trigger"
+                :class="{
+                  active: columnToolsOpenFieldId === field.id,
+                  sorted: ledgerSort?.fieldId === field.id,
+                  filtered: Boolean(ledgerFilters[field.id]),
+                }"
+                :aria-label="`打开${field.label}排序和筛选`"
+                @pointerdown.stop
+                @click.stop="openColumnTools(field, $event)"
+                @dblclick.stop
+                @contextmenu.stop.prevent
+              >
+                <Setting />
+              </button>
+              <span v-if="ledgerSort?.fieldId === field.id" class="ledger-sort-indicator">
+                {{ ledgerSort.order === 'ascending' ? '↑' : '↓' }}
+              </span>
+              <span v-if="ledgerFilters[field.id]" class="ledger-filter-indicator" />
+            </div>
+          </template>
           <template #default="{ row, $index }: { row: LedgerRow; $index: number }">
             <div
               class="cell-field"
@@ -3341,6 +4094,127 @@ onBeforeUnmount(() => {
         </el-table-column>
       </el-table>
       </div>
+      <div
+        v-if="columnToolsField"
+        class="ledger-column-tools-popover"
+        :style="{ left: `${columnToolsPosition.left}px`, top: `${columnToolsPosition.top}px` }"
+        @pointerdown.stop
+        @click.stop
+        @contextmenu.prevent
+      >
+        <div class="ledger-column-tools-title">{{ columnToolsField.label }}</div>
+        <div class="ledger-column-tools-sort">
+          <el-button size="small" @click="setLedgerSort(columnToolsField, 'ascending')">升序</el-button>
+          <el-button size="small" @click="setLedgerSort(columnToolsField, 'descending')">降序</el-button>
+          <el-button
+            size="small"
+            :disabled="ledgerSort?.fieldId !== columnToolsField.id"
+            @click="setLedgerSort(columnToolsField, null)"
+          >
+            取消排序
+          </el-button>
+        </div>
+        <div class="ledger-column-tools-filter-label">筛选</div>
+        <el-select
+          v-if="columnToolsFilterKind === 'options'"
+          v-model="columnToolsDraft.options"
+          class="ledger-column-tools-filter-control"
+          multiple
+          collapse-tags
+          collapse-tags-tooltip
+          clearable
+          placeholder="选择筛选值"
+        >
+          <el-option
+            v-for="option in columnToolOptions"
+            :key="option"
+            :label="option || '（空白）'"
+            :value="option"
+          />
+        </el-select>
+        <el-input
+          v-else-if="columnToolsFilterKind === 'text'"
+          v-model="columnToolsDraft.text"
+          class="ledger-column-tools-filter-control"
+          clearable
+          placeholder="包含文字"
+          @keyup.enter="applyColumnFilter"
+        />
+        <el-checkbox
+          v-if="columnToolsFilterKind === 'text'"
+          v-model="columnToolsDraft.emptyOnly"
+          class="ledger-column-tools-empty-filter"
+        >
+          只显示空值
+        </el-checkbox>
+        <div v-else class="ledger-column-tools-date-range">
+          <el-date-picker
+            v-model="columnToolsDraft.start"
+            type="date"
+            value-format="YYYY-MM-DD"
+            placeholder="开始日期"
+          />
+          <el-date-picker
+            v-model="columnToolsDraft.end"
+            type="date"
+            value-format="YYYY-MM-DD"
+            placeholder="结束日期"
+          />
+        </div>
+        <div class="ledger-column-tools-actions">
+          <el-button size="small" type="primary" @click="applyColumnFilter">应用筛选</el-button>
+          <el-button size="small" @click="clearColumnFilter">清除筛选</el-button>
+        </div>
+      </div>
+      <div
+        v-if="ledgerContextMenu"
+        class="ledger-context-menu"
+        :style="contextMenuStyle"
+        role="menu"
+        @pointerdown.stop
+        @click.stop
+        @contextmenu.prevent
+      >
+        <button type="button" role="menuitem" @click="contextCopy">复制当前选区</button>
+        <button
+          type="button"
+          role="menuitem"
+          :disabled="ledgerContextMenu.target.kind !== 'cell'"
+          @click="contextPaste"
+        >
+          粘贴到活动单元格
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          :disabled="ledgerContextMenu.target.kind !== 'cell' || !hasGridCellSelection"
+          @click="contextClear"
+        >
+          清空当前选区
+        </button>
+        <button type="button" role="menuitem" @click="contextSetHighlight">
+          {{ ledgerContextMenu.target.kind === 'row' ? '设置记录底色' : '设置单元格底色' }}
+        </button>
+        <button type="button" role="menuitem" @click="contextClearHighlight">
+          {{ ledgerContextMenu.target.kind === 'row' ? '清除记录底色' : '清除单元格底色' }}
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          :disabled="ledgerContextMenu.target.kind !== 'cell' || selectedGridCellKeys.size !== 1 || Boolean(contextMenuRow?.locked)"
+          @click="contextEdit"
+        >
+          进入编辑
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          :disabled="!contextMenuRow"
+          @click="contextToggleLock"
+        >
+          {{ contextMenuRow?.locked ? '解锁当前记录' : '锁定当前记录' }}
+        </button>
+      </div>
       <div class="ledger-zoom-footer">
         <div class="ledger-zoom-control" aria-label="台账缩放">
           <el-button text :icon="Minus" :disabled="historyReplayLoading" @click="zoomOut" />
@@ -3369,11 +4243,17 @@ onBeforeUnmount(() => {
     </section>
   </div>
 
+  <LedgerTemplateManager
+    v-model="templateManagerVisible"
+    :selected-project-id="activeProjectId"
+  />
+
   <ProjectFieldManager
     v-model="managerVisible"
     :selected-project-id="activeProjectId"
     @changed="handleManagerChanged"
     @select-project="selectProject"
+    @open-templates="templateManagerVisible = true"
   />
 
   <el-dialog v-model="assignDialogVisible" title="复制为其他项目记录" width="480px">
@@ -3871,7 +4751,6 @@ onBeforeUnmount(() => {
   display: grid;
   gap: 8px;
 }
-
 .ledger-filter-group,
 .ledger-operation-group {
   display: flex;
@@ -3903,6 +4782,161 @@ onBeforeUnmount(() => {
 .ledger-operation-group {
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.ledger-preview-scope {
+  width: 132px;
+}
+
+.ledger-preview-engine {
+  width: 150px;
+}
+
+.ledger-header-label {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+
+.ledger-column-tools-trigger {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #98a2b3;
+  cursor: pointer;
+  padding: 0;
+}
+
+.ledger-column-tools-trigger:hover,
+.ledger-column-tools-trigger.active,
+.ledger-column-tools-trigger.sorted,
+.ledger-column-tools-trigger.filtered {
+  background: #dbeafe;
+  color: var(--app-primary);
+}
+
+.ledger-column-tools-trigger :deep(.el-icon) {
+  font-size: 13px;
+}
+
+.ledger-sort-indicator {
+  margin-left: -2px;
+  color: var(--app-primary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.ledger-filter-indicator {
+  width: 5px;
+  height: 5px;
+  margin-left: -1px;
+  border-radius: 50%;
+  background: #f59e0b;
+}
+
+.ledger-column-tools-popover,
+.ledger-context-menu {
+  position: fixed;
+  z-index: 3000;
+  box-sizing: border-box;
+  user-select: none;
+}
+
+.ledger-column-tools-popover {
+  width: 330px;
+  border: 1px solid #d0d5dd;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 12px 30px rgb(16 24 40 / 18%);
+  padding: 12px;
+}
+
+.ledger-column-tools-title {
+  margin-bottom: 10px;
+  color: #182230;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.ledger-column-tools-sort,
+.ledger-column-tools-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ledger-column-tools-sort :deep(.el-button + .el-button),
+.ledger-column-tools-actions :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.ledger-column-tools-filter-label {
+  margin: 14px 0 6px;
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.ledger-column-tools-filter-control {
+  width: 100%;
+}
+
+.ledger-column-tools-empty-filter {
+  margin-top: 8px;
+}
+
+.ledger-column-tools-date-range {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.ledger-column-tools-date-range :deep(.el-date-editor) {
+  width: 100%;
+}
+
+.ledger-column-tools-actions {
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.ledger-context-menu {
+  width: 230px;
+  overflow: hidden;
+  border: 1px solid #d0d5dd;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 12px 30px rgb(16 24 40 / 20%);
+  padding: 5px;
+}
+
+.ledger-context-menu button {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #344054;
+  cursor: pointer;
+  font: inherit;
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.ledger-context-menu button:hover:not(:disabled) {
+  background: #eff6ff;
+  color: var(--app-primary);
+}
+
+.ledger-context-menu button:disabled {
+  color: #b8c0cc;
+  cursor: not-allowed;
 }
 
 .date-filter,
@@ -4384,6 +5418,18 @@ onBeforeUnmount(() => {
   color: #182230;
   background: #f2f4f7;
   text-align: center;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+:deep(.el-table th.grid-header-selected) {
+  background: #eaf3ff !important;
+  box-shadow: inset 0 -2px 0 var(--app-primary);
+}
+
+:deep(.el-table th.grid-header-partial) {
+  background: #f2f7ff !important;
+  box-shadow: inset 0 -2px 0 #93c5fd;
 }
 
 :deep(.el-table .el-input__inner),

@@ -1,15 +1,63 @@
 import { apiRequest, jsonBody } from "@/api/client";
-import type { DataType, FieldDefinition, Project } from "@/types/api";
+import type {
+  DataType,
+  FieldDefinition,
+  LedgerTemplate,
+  Project,
+  ProjectForceDeleteResult,
+} from "@/types/api";
 
 export function listProjects(): Promise<Project[]> {
   return apiRequest<Project[]>("/projects");
 }
 
-export function createProject(name: string): Promise<Project> {
+export function createProject(name: string, templateId?: string): Promise<Project> {
   return apiRequest<Project>("/projects", {
     method: "POST",
-    body: jsonBody({ name }),
+    body: jsonBody({ name, ...(templateId ? { template_id: templateId } : {}) }),
   });
+}
+
+export function duplicateProject(projectId: string, name?: string): Promise<Project> {
+  return apiRequest<Project>(`/projects/${projectId}/duplicate`, {
+    method: "POST",
+    body: jsonBody(name ? { name } : {}),
+  });
+}
+
+export function listLedgerTemplates(): Promise<LedgerTemplate[]> {
+  return apiRequest<LedgerTemplate[]>("/ledger-templates");
+}
+
+export function createLedgerTemplate(payload: {
+  name: string;
+  description?: string;
+  source_project_id?: string;
+  fields?: LedgerTemplate["fields"];
+}): Promise<LedgerTemplate> {
+  return apiRequest<LedgerTemplate>("/ledger-templates", {
+    method: "POST",
+    body: jsonBody(payload),
+  });
+}
+
+export function updateLedgerTemplate(
+  templateId: string,
+  payload: {
+    name?: string;
+    description?: string;
+    source_project_id?: string;
+    fields?: LedgerTemplate["fields"];
+  },
+): Promise<LedgerTemplate> {
+  return apiRequest<LedgerTemplate>(`/ledger-templates/${templateId}`, {
+    method: "PATCH",
+    body: jsonBody(payload),
+  });
+}
+
+export function deleteLedgerTemplate(templateId: string): Promise<void> {
+  return apiRequest<void>(`/ledger-templates/${templateId}`, { method: "DELETE" });
 }
 
 export function updateProject(
@@ -24,6 +72,16 @@ export function updateProject(
 
 export function deleteProject(projectId: string): Promise<void> {
   return apiRequest<void>(`/projects/${projectId}`, { method: "DELETE" });
+}
+
+export function forceDeleteProject(
+  projectId: string,
+  confirmName: string,
+): Promise<ProjectForceDeleteResult> {
+  return apiRequest<ProjectForceDeleteResult>(`/projects/${projectId}/force-delete`, {
+    method: "POST",
+    body: jsonBody({ confirm_name: confirmName }),
+  });
 }
 
 export function createField(

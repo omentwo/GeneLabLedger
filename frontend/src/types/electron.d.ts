@@ -6,6 +6,7 @@ export interface GeneLedgerDesktopBridge {
     filename: string,
     data: ArrayBuffer,
   ) => Promise<{ saved: boolean; path: string }>;
+  printPreview: (url: string) => Promise<{ success: boolean; reason: string }>;
   chooseDirectory: (
     initialDirectory: string,
   ) => Promise<{ selected: boolean; directory: string }>;

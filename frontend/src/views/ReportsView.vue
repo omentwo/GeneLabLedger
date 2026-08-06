@@ -11,6 +11,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 
+import { getNativePreviewStatus, getPreviewCapabilities } from "@/api/preview";
 import { listRecords } from "@/api/records";
 import {
   addReportTemplateVersion,
@@ -19,6 +20,7 @@ import {
   listPrintEngines,
   listPrinters,
   listReportTemplates,
+  nativePreviewReport,
   printReports,
   replaceReportMappings,
   type ReportMappingInput,
@@ -33,6 +35,8 @@ import type {
   ProjectRecord,
   ReportTemplate,
   ReportTemplateVersion,
+  NativePreviewTask,
+  PreviewCapabilities,
 } from "@/types/api";
 
 interface RecordTableRef {
@@ -56,6 +60,8 @@ const printEngines = ref<PrintEngineStatus[]>([]);
 const selectedPrintEngine = ref<PrintEngine>("auto");
 const selectedPrinterName = ref("");
 const printing = ref(false);
+const previewCapabilities = ref<PreviewCapabilities | null>(null);
+const nativePreviewLoading = ref(false);
 const createDialogVisible = ref(false);
 const createProjectId = ref("");
 const createName = ref("");
@@ -191,6 +197,32 @@ async function loadAvailablePrinters(): Promise<void> {
     "";
 }
 
+async function loadPreviewCapabilities(): Promise<void> {
+  try {
+    previewCapabilities.value = await getPreviewCapabilities();
+  } catch {
+    previewCapabilities.value = null;
+  }
+}
+
+function nativeEngineAvailable(engine: PrintEngine): boolean {
+  const capabilities = previewCapabilities.value;
+  if (!capabilities) return true;
+  if (engine === "auto") return capabilities.native_preview;
+  if (engine === "word") return capabilities.microsoft_writer;
+  return capabilities.wps_writer;
+}
+
+function nativeEngineLabel(): string {
+  if (selectedPrintEngine.value === "word") return "Office";
+  if (selectedPrintEngine.value === "wps") return "WPS";
+  return "Office/WPS";
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
 async function selectTemplate(template: ReportTemplate): Promise<void> {
   activeTemplateId.value = template.id;
   const version = latestVersion(template);
@@ -233,7 +265,7 @@ async function loadPage(): Promise<void> {
       appStore.projects.some((project) => project.id === route.query.project)
         ? route.query.project
         : appStore.projects[0]?.id ?? "";
-    await Promise.all([loadTemplates(), loadAvailablePrinters()]);
+    await Promise.all([loadTemplates(), loadAvailablePrinters(), loadPreviewCapabilities()]);
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "报告模板读取失败");
   } finally {
@@ -281,6 +313,54 @@ async function directPrintSelected(): Promise<void> {
     ElMessage.error(error instanceof Error ? error.message : "直接打印失败");
   } finally {
     printing.value = false;
+  }
+}
+
+async function openNativeReport(action: "preview" | "open"): Promise<void> {
+  if (!activeVersion.value || selectedRecords.value.length !== 1) {
+    ElMessage.warning("请先选择一条记录和模板版本");
+    return;
+  }
+  if (!nativeEngineAvailable(selectedPrintEngine.value)) {
+    ElMessage.warning("当前电脑未检测到可用的 Office/WPS 文字程序");
+    return;
+  }
+  nativePreviewLoading.value = true;
+  try {
+    const task = await nativePreviewReport(
+      activeVersion.value.id,
+      selectedRecords.value[0]!.id,
+      selectedPrintEngine.value,
+      action,
+    );
+    void monitorNativeReportJob(task).catch((error) => {
+      ElMessage.error(error instanceof Error ? error.message : "Office/WPS 原生窗口状态读取失败");
+    });
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "无法打开 Office/WPS 原生窗口");
+  } finally {
+    nativePreviewLoading.value = false;
+  }
+}
+
+async function monitorNativeReportJob(task: NativePreviewTask): Promise<void> {
+  let current = task;
+  let openedNotified = false;
+  for (let attempt = 0; attempt < 28_800; attempt += 1) {
+    if (current.status === "failed") {
+      ElMessage.error(current.error || "Office/WPS 原生窗口打开失败");
+      return;
+    }
+    if (current.status === "open" && !openedNotified) {
+      openedNotified = true;
+      ElMessage.success(`${nativeEngineLabel()} 原生窗口已打开`);
+    }
+    if (current.status === "completed") {
+      ElMessage.info(`${nativeEngineLabel()} 原生窗口已关闭`);
+      return;
+    }
+    await sleep(500);
+    current = await getNativePreviewStatus(task.job_id);
   }
 }
 
@@ -569,6 +649,7 @@ onMounted(() => {
               :key="engine.key"
               :label="`${engine.label}${engine.available ? '' : '（未检测到）'}`"
               :value="engine.key"
+              :disabled="!engine.available || !nativeEngineAvailable(engine.key)"
             />
           </el-select>
           <el-select
@@ -584,6 +665,20 @@ onMounted(() => {
               :value="printer.name"
             />
           </el-select>
+          <el-button
+            :loading="nativePreviewLoading"
+            :disabled="selectedRecords.length !== 1 || !nativeEngineAvailable(selectedPrintEngine)"
+            @click="openNativeReport('preview')"
+          >
+            {{ nativeEngineLabel() }} 原生预览
+          </el-button>
+          <el-button
+            :loading="nativePreviewLoading"
+            :disabled="selectedRecords.length !== 1 || !nativeEngineAvailable(selectedPrintEngine)"
+            @click="openNativeReport('open')"
+          >
+            使用 {{ nativeEngineLabel() }} 打开
+          </el-button>
           <el-button
             type="success"
             :icon="Printer"

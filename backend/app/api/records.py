@@ -161,6 +161,13 @@ def assign_experiment_numbers(
             detail=f"部分台账记录不存在：{', '.join(missing)}",
         )
     ordered = [by_id[record_id] for record_id in record_ids]
+    project_ids = {record.project_id for record in ordered}
+    if len(project_ids) != 1:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Experiment numbers can only be assigned within one ledger.",
+        )
+    project_id = next(iter(project_ids))
     locked = [record.pathology_number for record in ordered if record.locked]
     if locked:
         raise HTTPException(
@@ -179,6 +186,7 @@ def assign_experiment_numbers(
             select(ProjectRecord)
             .where(
                 ProjectRecord.experiment_number.in_(numbers),
+                ProjectRecord.project_id == project_id,
                 ~ProjectRecord.id.in_(record_ids),
             )
         )
@@ -237,7 +245,10 @@ def create_record(payload: RecordCreate, session: Session = Depends(get_session)
     require_project(session, payload.project_id)
     if payload.experiment_number:
         existing = session.scalar(
-            select(ProjectRecord).where(ProjectRecord.experiment_number == payload.experiment_number)
+            select(ProjectRecord).where(
+                ProjectRecord.project_id == payload.project_id,
+                ProjectRecord.experiment_number == payload.experiment_number,
+            )
         )
         if existing:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="实验编号已存在")
@@ -301,6 +312,7 @@ def update_record(
     if "experiment_number" in payload.model_fields_set:
         existing = session.scalar(
             select(ProjectRecord).where(
+                ProjectRecord.project_id == record.project_id,
                 ProjectRecord.experiment_number == payload.experiment_number,
                 ProjectRecord.id != record.id,
             )

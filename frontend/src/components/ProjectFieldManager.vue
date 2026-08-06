@@ -2,7 +2,9 @@
 import {
   ArrowDown,
   ArrowUp,
+  CopyDocument,
   Delete,
+  Document,
   EditPen,
   Plus,
   Setting,
@@ -13,15 +15,19 @@ import { computed, reactive, ref, watch } from "vue";
 import {
   createField,
   createProject,
+  duplicateProject,
   deleteField,
   deleteProject,
+  forceDeleteProject,
+  listLedgerTemplates,
   reorderFields,
   replaceFieldOptions,
   updateField,
   updateProject,
 } from "@/api/projects";
+import { ApiError } from "@/api/client";
 import { useAppStore } from "@/stores/app";
-import type { DataType, FieldDefinition } from "@/types/api";
+import type { DataType, FieldDefinition, LedgerTemplate } from "@/types/api";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -32,12 +38,15 @@ const emit = defineEmits<{
   "update:modelValue": [value: boolean];
   changed: [];
   "select-project": [projectId: string];
+  "open-templates": [];
 }>();
 
 const appStore = useAppStore();
 const currentProjectId = ref("");
 const projectName = ref("");
 const newProjectName = ref("");
+const newProjectTemplateId = ref("");
+const ledgerTemplates = ref<LedgerTemplate[]>([]);
 const workingFields = ref<FieldDefinition[]>([]);
 const saving = ref(false);
 const fieldDialogVisible = ref(false);
@@ -108,6 +117,19 @@ async function reloadAndNotify(): Promise<void> {
   emit("changed");
 }
 
+async function loadLedgerTemplates(): Promise<void> {
+  try {
+    ledgerTemplates.value = await listLedgerTemplates();
+  } catch {
+    ledgerTemplates.value = [];
+  }
+}
+
+function openTemplates(): void {
+  emit("update:modelValue", false);
+  emit("open-templates");
+}
+
 async function addProject(): Promise<void> {
   const name = newProjectName.value.trim();
   if (!name) {
@@ -116,8 +138,9 @@ async function addProject(): Promise<void> {
   }
   saving.value = true;
   try {
-    const project = await createProject(name);
+    const project = await createProject(name, newProjectTemplateId.value || undefined);
     newProjectName.value = "";
+    newProjectTemplateId.value = "";
     await appStore.reloadProjects();
     currentProjectId.value = project.id;
     syncCurrentProject();
@@ -150,6 +173,32 @@ async function renameProject(): Promise<void> {
   }
 }
 
+async function duplicateCurrentProject(): Promise<void> {
+  const project = currentProject.value;
+  if (!project) return;
+  try {
+    const result = await ElMessageBox.prompt("请输入复制后的台账名称", "复制整个台账", {
+      inputValue: `${project.name} - 副本`,
+      inputValidator: (value) => (value.trim() ? true : "名称不能为空"),
+      confirmButtonText: "复制",
+      cancelButtonText: "取消",
+    });
+    saving.value = true;
+    const copied = await duplicateProject(project.id, result.value.trim());
+    await appStore.reloadProjects();
+    currentProjectId.value = copied.id;
+    syncCurrentProject();
+    emit("select-project", copied.id);
+    emit("changed");
+    ElMessage.success("台账已完整复制");
+  } catch (error) {
+    if (error === "cancel" || error === "close") return;
+    ElMessage.error(error instanceof Error ? error.message : "复制台账失败");
+  } finally {
+    saving.value = false;
+  }
+}
+
 async function moveProject(index: number, offset: -1 | 1): Promise<void> {
   const targetIndex = index + offset;
   const current = appStore.projects[index];
@@ -172,10 +221,11 @@ async function moveProject(index: number, offset: -1 | 1): Promise<void> {
 }
 
 async function removeProject(): Promise<void> {
-  if (!currentProject.value) return;
+  const project = currentProject.value;
+  if (!project) return;
   try {
     await ElMessageBox.confirm(
-      `确认删除项目“${currentProject.value.name}”？只有没有台账记录和报告模板的项目才能删除。`,
+      `确认删除项目“${project.name}”？没有台账记录和报告模板时会直接删除；如果存在数据，确认后可再输入名称进行强制删除。`,
       "删除检测项目",
       {
         confirmButtonText: "删除",
@@ -183,13 +233,45 @@ async function removeProject(): Promise<void> {
         type: "warning",
       },
     );
-    await deleteProject(currentProject.value.id);
+    await deleteProject(project.id);
     currentProjectId.value = "";
     await reloadAndNotify();
     if (currentProjectId.value) emit("select-project", currentProjectId.value);
     ElMessage.success("项目已删除");
   } catch (error) {
     if (error === "cancel" || error === "close") return;
+    if (error instanceof ApiError && error.status === 409) {
+      try {
+        const confirmation = await ElMessageBox.prompt(
+          `项目“${project.name}”包含台账记录、表头数据或报告模板。强制删除会永久删除该项目及其所属数据，且无法撤销。请输入完整项目名称确认。`,
+          "强制删除项目",
+          {
+            inputPlaceholder: project.name,
+            inputValidator: (value) =>
+              value.trim() === project.name ? true : "请输入与项目名称完全一致的内容",
+            confirmButtonText: "永久删除",
+            cancelButtonText: "取消",
+            type: "error",
+          },
+        );
+        saving.value = true;
+        const result = await forceDeleteProject(project.id, confirmation.value.trim());
+        currentProjectId.value = "";
+        await reloadAndNotify();
+        if (currentProjectId.value) emit("select-project", currentProjectId.value);
+        const warning = result.cleanup_warnings.length ? `（${result.cleanup_warnings.join("；")}）` : "";
+        ElMessage.success(
+          `项目已强制删除：${result.deleted_records} 条记录、${result.deleted_fields} 个表头${warning}`,
+        );
+      } catch (forceError) {
+        if (forceError !== "cancel" && forceError !== "close") {
+          ElMessage.error(forceError instanceof Error ? forceError.message : "强制删除失败");
+        }
+      } finally {
+        saving.value = false;
+      }
+      return;
+    }
     ElMessage.error(error instanceof Error ? error.message : "项目删除失败");
   }
 }
@@ -336,6 +418,7 @@ watch(
     if (!visible) return;
     currentProjectId.value = props.selectedProjectId;
     syncCurrentProject();
+    void loadLedgerTemplates();
   },
 );
 
@@ -396,6 +479,15 @@ watch(
             placeholder="新项目名称"
             @keyup.enter="addProject"
           />
+          <el-select v-model="newProjectTemplateId" clearable placeholder="空白台账或套用表头模板">
+            <el-option label="空白台账（默认表头）" value="" />
+            <el-option
+              v-for="template in ledgerTemplates"
+              :key="template.id"
+              :label="`模板：${template.name}`"
+              :value="template.id"
+            />
+          </el-select>
           <el-button :icon="Plus" @click="addProject">添加项目</el-button>
         </div>
       </aside>
@@ -403,7 +495,8 @@ watch(
       <section class="field-panel">
         <div v-if="currentProject" class="project-name-row">
           <el-input v-model="projectName" maxlength="120" />
-          <el-button :icon="EditPen" @click="renameProject">保存名称</el-button>
+          <el-button :icon="EditPen" @click="renameProject">重命名台账</el-button>
+          <el-button :icon="CopyDocument" @click="duplicateCurrentProject">复制台账</el-button>
           <el-button type="danger" plain :icon="Delete" @click="removeProject">
             删除项目
           </el-button>
@@ -414,9 +507,10 @@ watch(
             <strong>当前项目表头</strong>
             <p>修改后即时生效；上下移动用于调整显示和导出顺序，隐藏不会删除数据。</p>
           </div>
-          <el-button type="primary" :icon="Plus" @click="openAddField">
-            添加表头
-          </el-button>
+          <div class="field-heading-actions">
+            <el-button :icon="Document" @click="openTemplates">台账模板</el-button>
+            <el-button type="primary" :icon="Plus" @click="openAddField">添加表头</el-button>
+          </div>
         </div>
 
         <el-table :data="workingFields" row-key="id" border max-height="480">
@@ -689,6 +783,13 @@ watch(
 .field-heading {
   justify-content: space-between;
   margin-bottom: 10px;
+}
+
+.field-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .field-heading p,

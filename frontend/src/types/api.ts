@@ -36,6 +36,66 @@ export interface Project {
   fields: FieldDefinition[];
 }
 
+export interface ProjectForceDeleteResult {
+  project_id: string;
+  project_name: string;
+  deleted_records: number;
+  deleted_record_values: number;
+  deleted_fields: number;
+  deleted_field_options: number;
+  deleted_report_templates: number;
+  deleted_report_versions: number;
+  deleted_report_mappings: number;
+  updated_auto_export_tasks: number;
+  removed_template_directories: number;
+  cleanup_warnings: string[];
+}
+
+export interface LedgerTemplateField {
+  key: string;
+  label: string;
+  data_type: DataType;
+  system_key: string | null;
+  is_core: boolean;
+  hidden: boolean;
+  sort_order: number;
+  width: number;
+  options: string[];
+}
+
+export interface LedgerTemplate {
+  id: string;
+  name: string;
+  description: string;
+  fields: LedgerTemplateField[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PreviewCapabilities {
+  microsoft_office: boolean;
+  microsoft_writer: boolean;
+  microsoft_spreadsheet: boolean;
+  wps_writer: boolean;
+  wps_spreadsheet: boolean;
+  native_preview: boolean;
+  preferred_engine: "microsoft" | "wps" | null;
+}
+
+export type NativePreviewAction = "preview" | "open";
+export type NativePreviewStatus = "starting" | "open" | "completed" | "failed";
+
+export interface NativePreviewTask {
+  job_id: string;
+  status: NativePreviewStatus;
+  action: NativePreviewAction;
+  print_engine: Exclude<PrintEngine, "auto">;
+  document_type: "xlsx" | "docx";
+  filename: string;
+  error: string | null;
+  scope?: "selection" | "filtered" | "all" | null;
+}
+
 export interface ProjectRecord {
   id: string;
   project_id: string;

@@ -53,6 +53,23 @@ class Project(Base, TimestampMixin):
     report_templates: Mapped[list[ReportTemplate]] = relationship(back_populates="project")
 
 
+class LedgerTemplate(Base, TimestampMixin):
+    """A local, user-maintained snapshot of a ledger header definition.
+
+    The field payload intentionally lives as JSON.  Templates are copied into a
+    project when it is created, so changing a template never mutates existing
+    projects or requires a user/permission model.
+    """
+
+    __tablename__ = "ledger_templates"
+    __table_args__ = (UniqueConstraint("name", name="uq_ledger_template_name"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    fields: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+
+
 class FieldDefinition(Base, TimestampMixin):
     __tablename__ = "field_definitions"
     __table_args__ = (
@@ -109,7 +126,7 @@ class FieldOption(Base):
 class ProjectRecord(Base, TimestampMixin):
     __tablename__ = "project_records"
     __table_args__ = (
-        UniqueConstraint("experiment_number", name="uq_record_experiment_number"),
+        UniqueConstraint("project_id", "experiment_number", name="uq_record_project_experiment_number"),
         Index("ix_record_project_status", "project_id", "status"),
     )
 

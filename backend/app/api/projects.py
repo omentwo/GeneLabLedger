@@ -1,20 +1,28 @@
 from __future__ import annotations
 
+import shutil
 import uuid
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
-from sqlalchemy import func, select
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
+from app.api.ledger_templates import apply_template_fields
 from app.audit import audit
 from app.database import get_session
 from app.models import (
+    AutoExportTask,
     FieldDefinition,
     FieldOption,
+    LedgerTemplate,
     Project,
     ProjectRecord,
+    RecordValue,
+    ReportMapping,
     ReportTemplate,
+    ReportTemplateVersion,
 )
 from app.schemas import (
     FieldCreate,
@@ -23,6 +31,9 @@ from app.schemas import (
     FieldReorder,
     FieldUpdate,
     ProjectCreate,
+    ProjectDuplicateCreate,
+    ProjectForceDeleteRequest,
+    ProjectForceDeleteResponse,
     ProjectRead,
     ProjectUpdate,
 )
@@ -64,7 +75,16 @@ def create_project(payload: ProjectCreate, session: Session = Depends(get_sessio
     try:
         session.add(project)
         session.flush()
-        add_core_fields(session, project)
+        if payload.template_id:
+            template = session.get(LedgerTemplate, payload.template_id)
+            if not template:
+                session.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND, detail="Ledger template not found."
+                )
+            apply_template_fields(session, project, template)
+        else:
+            add_core_fields(session, project)
         audit(session, "project.create", "project", project.id, {"name": project.name})
         session.commit()
     except IntegrityError as error:
@@ -74,6 +94,143 @@ def create_project(payload: ProjectCreate, session: Session = Depends(get_sessio
             detail="项目名称已被其他请求占用，请刷新后重试",
         ) from error
     return load_project(session, project.id)
+
+
+@router.post("/{project_id}/duplicate", response_model=ProjectRead, status_code=status.HTTP_201_CREATED)
+def duplicate_project(
+    project_id: str,
+    payload: ProjectDuplicateCreate,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> Project:
+    source = session.scalar(
+        select(Project)
+        .where(Project.id == project_id)
+        .options(
+            selectinload(Project.fields).selectinload(FieldDefinition.options),
+            selectinload(Project.records).selectinload(ProjectRecord.values),
+            selectinload(Project.report_templates)
+            .selectinload(ReportTemplate.versions)
+            .selectinload(ReportTemplateVersion.mappings),
+        )
+    )
+    if not source:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ledger not found.")
+    name = payload.name or f"{source.name} - Copy"
+    if session.scalar(select(Project).where(Project.name == name)):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ledger name already exists.")
+    settings = request.app.state.settings
+    copied_paths: list[Path] = []
+    new_project = Project(
+        name=name,
+        sort_order=(session.scalar(select(func.max(Project.sort_order))) or -1) + 1,
+        experiment_enabled=source.experiment_enabled,
+    )
+    field_map: dict[str, FieldDefinition] = {}
+    try:
+        session.add(new_project)
+        session.flush()
+        for source_field in sorted(source.fields, key=lambda item: (item.sort_order, item.created_at)):
+            cloned_field = FieldDefinition(
+                project_id=new_project.id,
+                key=source_field.key,
+                label=source_field.label,
+                data_type=source_field.data_type,
+                system_key=source_field.system_key,
+                is_core=source_field.is_core,
+                hidden=source_field.hidden,
+                sort_order=source_field.sort_order,
+                width=source_field.width,
+            )
+            session.add(cloned_field)
+            session.flush()
+            field_map[source_field.id] = cloned_field
+            for option in source_field.options:
+                session.add(
+                    FieldOption(field_id=cloned_field.id, value=option.value, sort_order=option.sort_order)
+                )
+
+        for source_record in source.records:
+            cloned_record = ProjectRecord(
+                project_id=new_project.id,
+                status=source_record.status,
+                experiment_date=source_record.experiment_date,
+                pathology_number=source_record.pathology_number,
+                experiment_number=source_record.experiment_number,
+                report_generated=source_record.report_generated,
+                locked=source_record.locked,
+                highlight_color=source_record.highlight_color,
+                cell_highlight_colors={
+                    field_map[field_id].id: color
+                    for field_id, color in (source_record.cell_highlight_colors or {}).items()
+                    if field_id in field_map
+                },
+            )
+            session.add(cloned_record)
+            session.flush()
+            for source_value in source_record.values:
+                cloned_field = field_map.get(source_value.field_id)
+                if cloned_field:
+                    session.add(
+                        RecordValue(
+                            record_id=cloned_record.id,
+                            field_id=cloned_field.id,
+                            value_text=source_value.value_text,
+                        )
+                    )
+
+        for source_template in source.report_templates:
+            cloned_template = ReportTemplate(project_id=new_project.id, name=source_template.name)
+            session.add(cloned_template)
+            session.flush()
+            for source_version in source_template.versions:
+                source_path = Path(source_version.storage_path)
+                target_dir = settings.template_dir / cloned_template.id
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target_path = target_dir / f"v{source_version.version_number}{source_path.suffix or '.docx'}"
+                if source_path.exists():
+                    shutil.copy2(source_path, target_path)
+                    copied_paths.append(target_path)
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT, detail="A report template file is missing."
+                    )
+                cloned_version = ReportTemplateVersion(
+                    template_id=cloned_template.id,
+                    version_number=source_version.version_number,
+                    original_filename=source_version.original_filename,
+                    storage_path=str(target_path),
+                    placeholders=list(source_version.placeholders or []),
+                )
+                session.add(cloned_version)
+                session.flush()
+                for source_mapping in source_version.mappings:
+                    session.add(
+                        ReportMapping(
+                            template_version_id=cloned_version.id,
+                            placeholder=source_mapping.placeholder,
+                            source_type=source_mapping.source_type,
+                            field_id=field_map.get(source_mapping.field_id).id
+                            if source_mapping.field_id in field_map
+                            else None,
+                            fixed_value=source_mapping.fixed_value,
+                        )
+                    )
+        audit(session, "project.duplicate", "project", new_project.id, {"source_project_id": source.id})
+        session.commit()
+    except HTTPException:
+        session.rollback()
+        for path in copied_paths:
+            path.unlink(missing_ok=True)
+        raise
+    except Exception as error:
+        session.rollback()
+        for path in copied_paths:
+            path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Ledger copy failed; no changes were saved."
+        ) from error
+    return load_project(session, new_project.id)
 
 
 @router.patch("/{project_id}", response_model=ProjectRead)
@@ -145,6 +302,206 @@ def delete_project(
     session.delete(project)
     session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/{project_id}/force-delete",
+    response_model=ProjectForceDeleteResponse,
+)
+def force_delete_project(
+    project_id: str,
+    payload: ProjectForceDeleteRequest,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> ProjectForceDeleteResponse:
+    """Permanently delete one ledger and its owned data after exact-name confirmation.
+
+    The normal DELETE endpoint intentionally remains conservative.  This endpoint
+    performs all dependent-row deletes in one transaction, scoped only to the
+    selected project, and refuses unexpected cross-ledger references before making
+    any change.
+    """
+
+    project = require_project(session, project_id)
+    if payload.confirm_name != project.name:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="必须输入完全匹配的台账名称才能强制删除",
+        )
+
+    field_ids = list(
+        session.scalars(select(FieldDefinition.id).where(FieldDefinition.project_id == project.id))
+    )
+    record_ids = list(
+        session.scalars(select(ProjectRecord.id).where(ProjectRecord.project_id == project.id))
+    )
+    template_ids = list(
+        session.scalars(select(ReportTemplate.id).where(ReportTemplate.project_id == project.id))
+    )
+    version_ids = (
+        list(
+            session.scalars(
+                select(ReportTemplateVersion.id).where(
+                    ReportTemplateVersion.template_id.in_(template_ids)
+                )
+            )
+        )
+        if template_ids
+        else []
+    )
+
+    # A corrupt/manual database must not let deleting one ledger mutate another
+    # ledger through a field reference.  The normal APIs prevent these relations,
+    # but force-delete treats their presence as a hard safety error.
+    if field_ids:
+        cross_ledger_values = session.scalar(
+            select(func.count())
+            .select_from(RecordValue)
+            .join(ProjectRecord, RecordValue.record_id == ProjectRecord.id)
+            .where(
+                RecordValue.field_id.in_(field_ids),
+                ProjectRecord.project_id != project.id,
+            )
+        ) or 0
+        cross_ledger_mappings = session.scalar(
+            select(func.count())
+            .select_from(ReportMapping)
+            .join(ReportTemplateVersion, ReportMapping.template_version_id == ReportTemplateVersion.id)
+            .join(ReportTemplate, ReportTemplateVersion.template_id == ReportTemplate.id)
+            .where(
+                ReportMapping.field_id.in_(field_ids),
+                ReportTemplate.project_id != project.id,
+            )
+        ) or 0
+        if cross_ledger_values or cross_ledger_mappings:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="发现跨台账关联，已拒绝强制删除；未修改任何数据",
+            )
+
+    template_directories: list[Path] = []
+    cleanup_warnings: list[str] = []
+    template_root = request.app.state.settings.template_dir.resolve()
+    for template_id in template_ids:
+        try:
+            candidate = (template_root / template_id).resolve()
+            candidate.relative_to(template_root)
+        except ValueError:
+            cleanup_warnings.append("部分报告模板文件路径不在受控目录内，已保留文件")
+        except OSError:
+            cleanup_warnings.append("部分报告模板文件路径无法校验，已保留文件")
+        else:
+            if candidate == template_root:
+                cleanup_warnings.append("报告模板目录路径无效，已保留文件")
+            else:
+                template_directories.append(candidate)
+
+    updated_auto_export_tasks = 0
+    for task in session.scalars(select(AutoExportTask)):
+        project_ids = list(task.project_ids or [])
+        filtered_project_ids = [item for item in project_ids if item != project.id]
+        if filtered_project_ids != project_ids:
+            task.project_ids = filtered_project_ids
+            updated_auto_export_tasks += 1
+
+    deleted_record_values = 0
+    deleted_records = 0
+    deleted_field_options = 0
+    deleted_fields = 0
+    deleted_report_mappings = 0
+    deleted_report_versions = 0
+    deleted_report_templates = 0
+    try:
+        audit(
+            session,
+            "project.force_delete",
+            "project",
+            project.id,
+            {
+                "name": project.name,
+                "record_count": len(record_ids),
+                "field_count": len(field_ids),
+                "report_template_count": len(template_ids),
+            },
+        )
+        if record_ids:
+            deleted_record_values = (
+                session.execute(delete(RecordValue).where(RecordValue.record_id.in_(record_ids))).rowcount
+                or 0
+            )
+            deleted_records = (
+                session.execute(delete(ProjectRecord).where(ProjectRecord.id.in_(record_ids))).rowcount
+                or 0
+            )
+        if version_ids:
+            deleted_report_mappings = (
+                session.execute(
+                    delete(ReportMapping).where(ReportMapping.template_version_id.in_(version_ids))
+                ).rowcount
+                or 0
+            )
+            deleted_report_versions = (
+                session.execute(
+                    delete(ReportTemplateVersion).where(ReportTemplateVersion.id.in_(version_ids))
+                ).rowcount
+                or 0
+            )
+        if template_ids:
+            deleted_report_templates = (
+                session.execute(delete(ReportTemplate).where(ReportTemplate.id.in_(template_ids))).rowcount
+                or 0
+            )
+        if field_ids:
+            deleted_field_options = (
+                session.execute(delete(FieldOption).where(FieldOption.field_id.in_(field_ids))).rowcount
+                or 0
+            )
+            deleted_fields = (
+                session.execute(delete(FieldDefinition).where(FieldDefinition.id.in_(field_ids))).rowcount
+                or 0
+            )
+        session.delete(project)
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="强制删除失败，数据库未发生改变；请检查台账关联后重试",
+        ) from error
+    except Exception as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="强制删除失败，数据库未发生改变",
+        ) from error
+
+    removed_template_directories = 0
+    for directory in template_directories:
+        if not directory.exists():
+            continue
+        if not directory.is_dir():
+            cleanup_warnings.append("部分报告模板文件不是受控目录，已保留文件")
+            continue
+        try:
+            shutil.rmtree(directory)
+            removed_template_directories += 1
+        except OSError:
+            cleanup_warnings.append("部分报告模板文件未能清理，请稍后手动检查")
+
+    return ProjectForceDeleteResponse(
+        project_id=project.id,
+        project_name=project.name,
+        deleted_records=deleted_records,
+        deleted_record_values=deleted_record_values,
+        deleted_fields=deleted_fields,
+        deleted_field_options=deleted_field_options,
+        deleted_report_templates=deleted_report_templates,
+        deleted_report_versions=deleted_report_versions,
+        deleted_report_mappings=deleted_report_mappings,
+        updated_auto_export_tasks=updated_auto_export_tasks,
+        removed_template_directories=removed_template_directories,
+        cleanup_warnings=cleanup_warnings,
+    )
 
 
 @router.get("/{project_id}/fields", response_model=list[FieldRead])

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { printReports, replaceReportMappings } from "@/api/reports";
+import { nativePreviewReport, printReports, replaceReportMappings } from "@/api/reports";
 
 describe("report placeholder mappings", () => {
   afterEach(() => {
@@ -83,6 +83,35 @@ describe("report placeholder mappings", () => {
       ],
       printer_name: "实验室打印机",
       print_engine: "word",
+    });
+  });
+
+  it("sends the native report action and selected engine", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          job_id: "native-job",
+          status: "open",
+          action: "open",
+          print_engine: "word",
+          document_type: "docx",
+          filename: "report.docx",
+          error: null,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await nativePreviewReport("version-1", "record-1", "word", "open");
+
+    const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/report-template-versions/version-1/native-preview");
+    expect(JSON.parse(String(options.body))).toEqual({
+      template_version_id: "version-1",
+      record_ids: ["record-1"],
+      print_engine: "word",
+      action: "open",
     });
   });
 });

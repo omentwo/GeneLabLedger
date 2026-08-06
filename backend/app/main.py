@@ -12,29 +12,45 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import auto_exports, exports, imports, projects, records, reports, system
+from app.api import (
+    auto_exports,
+    exports,
+    imports,
+    ledger_templates,
+    preview,
+    projects,
+    records,
+    reports,
+    system,
+)
 from app.audit import prune_audit_logs
 from app.config import Settings
 from app.database import Database
 from app.seed import seed_initial_data
 from app.services.auto_exports import AutoExportScheduler
+from app.services.office_preview import OfficePreviewService
 from app.services.office_printing import OfficePrintService
 
 
 def create_app(
     settings: Settings | None = None,
     printer_service: OfficePrintService | None = None,
+    preview_service: OfficePreviewService | None = None,
 ) -> FastAPI:
     app_settings = settings or Settings()
     app_settings.ensure_directories()
     database = Database(app_settings.database_url or "")
     office_printer = printer_service or OfficePrintService()
+    office_preview = preview_service or OfficePreviewService()
     auto_export_scheduler = AutoExportScheduler(database)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if app_settings.auto_create_schema:
             database.create_all()
+        cleanup_native_previews = getattr(office_preview, "cleanup_native_previews", None)
+        if cleanup_native_previews is not None:
+            cleanup_native_previews(app_settings.report_work_dir / "native-previews")
         with database.session_factory() as session:
             seed_initial_data(session)
             prune_audit_logs(
@@ -49,11 +65,14 @@ def create_app(
         finally:
             await auto_export_scheduler.stop()
             await asyncio.to_thread(office_printer.shutdown)
+            preview_shutdown = getattr(office_preview, "shutdown", None)
+            if preview_shutdown is not None:
+                await asyncio.to_thread(preview_shutdown)
             await asyncio.to_thread(database.dispose)
 
     app = FastAPI(
         title=app_settings.app_name,
-        version="0.9.3",
+        version="0.9.4",
         lifespan=lifespan,
     )
     app.add_middleware(
@@ -66,10 +85,13 @@ def create_app(
     app.state.settings = app_settings
     app.state.database = database
     app.state.printer_service = office_printer
+    app.state.preview_service = office_preview
     app.state.auto_export_scheduler = auto_export_scheduler
 
     app.include_router(system.router, prefix="/api")
     app.include_router(projects.router, prefix="/api")
+    app.include_router(ledger_templates.router, prefix="/api")
+    app.include_router(preview.router, prefix="/api")
     app.include_router(records.router, prefix="/api")
     app.include_router(reports.router, prefix="/api")
     app.include_router(auto_exports.router, prefix="/api")

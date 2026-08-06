@@ -132,6 +132,7 @@ class FieldReorder(BaseModel):
 
 class ProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
+    template_id: str | None = Field(default=None, max_length=36)
 
     @field_validator("name")
     @classmethod
@@ -158,6 +159,114 @@ class ProjectRead(BaseModel):
     sort_order: int
     experiment_enabled: bool
     fields: list[FieldRead] = Field(default_factory=list)
+
+
+class ProjectDuplicateCreate(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+
+    @field_validator("name")
+    @classmethod
+    def clean_optional_name(cls, value: str | None) -> str | None:
+        cleaned = value.strip() if value is not None else None
+        return cleaned or None
+
+
+class ProjectForceDeleteRequest(BaseModel):
+    """Explicit confirmation for the irreversible project deletion endpoint."""
+
+    confirm_name: str = Field(min_length=1, max_length=120)
+
+    @field_validator("confirm_name")
+    @classmethod
+    def clean_confirm_name(cls, value: str) -> str:
+        return value.strip()
+
+
+class ProjectForceDeleteResponse(BaseModel):
+    project_id: str
+    project_name: str
+    deleted_records: int
+    deleted_record_values: int
+    deleted_fields: int
+    deleted_field_options: int
+    deleted_report_templates: int
+    deleted_report_versions: int
+    deleted_report_mappings: int
+    updated_auto_export_tasks: int
+    removed_template_directories: int
+    cleanup_warnings: list[str] = Field(default_factory=list)
+
+
+class LedgerTemplateField(BaseModel):
+    key: str = Field(min_length=1, max_length=120)
+    label: str = Field(min_length=1, max_length=120)
+    data_type: DataType = "text"
+    system_key: str | None = Field(default=None, max_length=64)
+    is_core: bool = False
+    hidden: bool = False
+    sort_order: int = Field(default=0, ge=0)
+    width: int = Field(default=120, ge=58, le=600)
+    options: list[str] = Field(default_factory=list)
+
+    @field_validator("key", "label")
+    @classmethod
+    def clean_text(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("options")
+    @classmethod
+    def clean_options(cls, values: list[str]) -> list[str]:
+        result: list[str] = []
+        for value in values:
+            cleaned = value.strip()
+            if cleaned and cleaned not in result:
+                result.append(cleaned)
+        return result
+
+
+class LedgerTemplateCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=500)
+    fields: list[LedgerTemplateField] = Field(default_factory=list, max_length=200)
+    source_project_id: str | None = Field(default=None, max_length=36)
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("description")
+    @classmethod
+    def clean_description(cls, value: str) -> str:
+        return value.strip()
+
+
+class LedgerTemplateUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    fields: list[LedgerTemplateField] | None = Field(default=None, max_length=200)
+    source_project_id: str | None = Field(default=None, max_length=36)
+
+    @field_validator("name")
+    @classmethod
+    def clean_optional_name(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
+
+    @field_validator("description")
+    @classmethod
+    def clean_optional_description(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
+
+
+class LedgerTemplateRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    description: str
+    fields: list[LedgerTemplateField]
+    created_at: datetime
+    updated_at: datetime
 
 
 class RecordCreate(BaseModel):
@@ -412,6 +521,81 @@ class PrintEngineRead(BaseModel):
     label: str
     available: bool
     resolved_engine: Literal["wps", "word"] | None
+
+
+PreviewScope = Literal["selection", "filtered", "all"]
+NativePreviewAction = Literal["preview", "open"]
+NativePreviewStatus = Literal["starting", "open", "completed", "failed"]
+
+
+class PreviewCellTarget(BaseModel):
+    record_id: str = Field(min_length=1, max_length=36)
+    field_id: str = Field(min_length=1, max_length=36)
+
+
+class LedgerPrintPreviewCreate(BaseModel):
+    scope: PreviewScope = "filtered"
+    cells: list[PreviewCellTarget] = Field(default_factory=list, max_length=10000)
+    search: str | None = Field(default=None, max_length=240)
+    status: str | None = Field(default=None, max_length=40)
+    experiment_date: date | None = None
+    report_generated: bool | None = None
+    print_engine: Literal["auto", "wps", "word"] = "auto"
+
+
+class PreviewCapabilitiesRead(BaseModel):
+    microsoft_office: bool
+    microsoft_writer: bool = False
+    microsoft_spreadsheet: bool = False
+    wps_writer: bool = False
+    wps_spreadsheet: bool = False
+    native_preview: bool = False
+    preferred_engine: Literal["microsoft", "wps"] | None
+
+
+class LedgerPrintPreviewRead(BaseModel):
+    preview_id: str
+    url: str
+    filename: str
+    print_engine: Literal["wps", "word"]
+    scope: PreviewScope
+    selected_cell_count: int
+
+
+class LedgerNativePreviewCreate(LedgerPrintPreviewCreate):
+    action: NativePreviewAction = "preview"
+
+
+class ReportPrintPreviewCreate(BaseModel):
+    template_version_id: str = Field(min_length=1, max_length=36)
+    record_ids: list[str] = Field(min_length=1, max_length=100)
+    print_engine: Literal["auto", "wps", "word"] = "auto"
+
+
+class ReportPrintPreviewRead(BaseModel):
+    preview_id: str
+    url: str
+    filename: str
+    print_engine: Literal["wps", "word"]
+    record_count: int
+
+
+class ReportNativePreviewCreate(BaseModel):
+    template_version_id: str = Field(min_length=1, max_length=36)
+    record_ids: list[str] = Field(min_length=1, max_length=1)
+    print_engine: Literal["auto", "wps", "word"] = "auto"
+    action: NativePreviewAction = "preview"
+
+
+class NativePreviewRead(BaseModel):
+    job_id: str
+    status: NativePreviewStatus
+    action: NativePreviewAction
+    print_engine: Literal["wps", "word"]
+    document_type: Literal["xlsx", "docx"]
+    filename: str
+    error: str | None = None
+    scope: PreviewScope | None = None
 
 
 class ReportPrintCreate(BaseModel):

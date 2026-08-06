@@ -1,6 +1,8 @@
 import { apiRequest, jsonBody } from "@/api/client";
 import type {
   MappingSourceType,
+  NativePreviewAction,
+  NativePreviewTask,
   PrintEngine,
   PrintEngineStatus,
   Printer,
@@ -89,6 +91,26 @@ export function printReports(
       print_engine: printEngine,
     }),
   });
+}
+
+export function nativePreviewReport(
+  templateVersionId: string,
+  recordId: string,
+  printEngine: PrintEngine,
+  action: NativePreviewAction,
+): Promise<NativePreviewTask> {
+  return apiRequest<NativePreviewTask>(
+    `/report-template-versions/${templateVersionId}/native-preview`,
+    {
+      method: "POST",
+      body: jsonBody({
+        template_version_id: templateVersionId,
+        record_ids: [recordId],
+        print_engine: printEngine,
+        action,
+      }),
+    },
+  );
 }
 
 export function deleteReportTemplate(templateId: string): Promise<void> {

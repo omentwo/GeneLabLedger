@@ -300,6 +300,30 @@ function registerDesktopHandlers() {
     return { saved: true, path: result.filePath };
   });
 
+  ipcMain.handle("gene-ledger:print-preview", async (event, requestedUrl) => {
+    assertTrustedIpcSender(event);
+    const target = new URL(String(requestedUrl || ""), backendUrl);
+    const backendOrigin = new URL(backendUrl).origin;
+    if (target.origin !== backendOrigin || !target.pathname.startsWith("/api/print-preview/")) {
+      throw new Error("拒绝打印非本地预览文档");
+    }
+    const previewWindow = new BrowserWindow({
+      show: false,
+      webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+    });
+    try {
+      await previewWindow.loadURL(target.toString());
+      return await new Promise((resolve) => {
+        previewWindow.webContents.print(
+          { silent: false, printBackground: true },
+          (success, reason) => resolve({ success, reason: reason || "" }),
+        );
+      });
+    } finally {
+      if (!previewWindow.isDestroyed()) previewWindow.close();
+    }
+  });
+
   ipcMain.handle("gene-ledger:choose-directory", async (event, initialDirectory) => {
     assertTrustedIpcSender(event);
     const selected = await showDirectoryPicker(
