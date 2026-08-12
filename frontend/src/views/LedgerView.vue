@@ -176,6 +176,9 @@ let suppressGridClick = false;
 let gridFillDragState: GridFillDragState | null = null;
 const gridFillPreviewRange = ref<NormalizedGridRange | null>(null);
 const gridFillPreviewSource = ref<NormalizedGridRange | null>(null);
+const gridFillPreviewValues = ref(new Map<string, string>());
+const gridFillPreviewSummary = ref("");
+const gridFillPreviewPointer = reactive({ left: 0, top: 0 });
 let suppressGridFocusReset = false;
 type SelectionRowInfo = {
   row: LedgerRow;
@@ -968,6 +971,20 @@ function isGridFillHandleCell(rowIndex: number, columnIndex: number): boolean {
   return normalized.rowEnd === rowIndex && normalized.columnEnd === columnIndex;
 }
 
+const gridFillPreviewLocation = computed(() => {
+  const range = gridFillPreviewRange.value;
+  if (!range) return "";
+  const field = fields.value[range.columnEnd];
+  return `填充至第 ${range.rowEnd + 1} 行 · ${field?.label ?? `第 ${range.columnEnd + 1} 列`}`;
+});
+
+function gridFillPreviewValue(rowIndex: number, columnIndex: number): string | null {
+  const key = `${rowIndex}:${columnIndex}`;
+  return gridFillPreviewValues.value.has(key)
+    ? gridFillPreviewValues.value.get(key) ?? ""
+    : null;
+}
+
 function gridEditorRoot(position: GridCellPosition): HTMLElement | null {
   const root = ledgerTableCardRef.value;
   if (!root) return null;
@@ -1079,7 +1096,7 @@ async function finishGridCellEdit(commit = true, focusAfter = true): Promise<boo
   }
 }
 
-function enterGridCellEdit(position: GridCellPosition): void {
+function enterGridCellEdit(position: GridCellPosition, replaceValue?: string): void {
   const nextPosition = clampGridCell(position);
   const data = gridCellData(nextPosition);
   if (!data || data.record.locked) return;
@@ -1089,7 +1106,7 @@ function enterGridCellEdit(position: GridCellPosition): void {
   }
   if (editingGridCell.value) {
     void finishGridCellEdit(true, false).then((saved) => {
-      if (saved && !editingGridCell.value) enterGridCellEdit(nextPosition);
+      if (saved && !editingGridCell.value) enterGridCellEdit(nextPosition, replaceValue);
     });
     return;
   }
@@ -1101,6 +1118,7 @@ function enterGridCellEdit(position: GridCellPosition): void {
     fieldId: data.field.id,
     value: valueFor(data.record, data.field),
   };
+  if (replaceValue !== undefined) setValue(data.record, data.field, replaceValue);
   void focusGridCell(nextPosition);
 }
 
@@ -1397,14 +1415,40 @@ function gridFillTargetForCell(
   };
 }
 
-function updateGridFillPreview(target: NormalizedGridRange, source: NormalizedGridRange): void {
+function updateGridFillPreview(
+  target: NormalizedGridRange,
+  source: NormalizedGridRange,
+  pointer?: { x: number; y: number },
+): void {
   gridFillPreviewSource.value = { ...source };
   gridFillPreviewRange.value = { ...target };
+  const entries = buildGridFillEntries(source, target);
+  const values = new Map<string, string>();
+  entries.forEach((entry) => {
+    values.set(
+      `${source.rowStart + entry.rowOffset}:${source.columnStart + entry.columnOffset}`,
+      entry.value,
+    );
+  });
+  gridFillPreviewValues.value = values;
+  const previewItems = entries.slice(0, 4).map((entry) => {
+    const field = fields.value[source.columnStart + entry.columnOffset];
+    return `${field?.label ?? "单元格"}=${entry.value || "（空）"}`;
+  });
+  gridFillPreviewSummary.value = previewItems.length
+    ? `${previewItems.join("；")}${entries.length > previewItems.length ? "；…" : ""}`
+    : "";
+  if (pointer) {
+    gridFillPreviewPointer.left = Math.max(8, Math.min(window.innerWidth - 360, pointer.x + 14));
+    gridFillPreviewPointer.top = Math.max(8, Math.min(window.innerHeight - 96, pointer.y + 14));
+  }
 }
 
 function clearGridFillPreview(): void {
   gridFillPreviewRange.value = null;
   gridFillPreviewSource.value = null;
+  gridFillPreviewValues.value = new Map();
+  gridFillPreviewSummary.value = "";
 }
 
 function stopGridFillDrag(): void {
@@ -1487,7 +1531,10 @@ function handleGridFillPointerMove(event: PointerEvent): void {
   const cell = gridCellAtPoint(event.clientX, event.clientY);
   if (cell) {
     state.target = gridFillTargetForCell(state.source, cell);
-    updateGridFillPreview(state.target, state.source);
+    updateGridFillPreview(state.target, state.source, {
+      x: event.clientX,
+      y: event.clientY,
+    });
   }
   event.preventDefault();
 }
@@ -1673,6 +1720,20 @@ function handleGridKeydown(event: KeyboardEvent): void {
     }
     // Once editing has started, arrow keys and other editing keys belong to
     // the native input/select control rather than grid navigation.
+    return;
+  }
+
+  if (
+    event.key.length === 1 &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.altKey
+  ) {
+    const data = gridCellData(cell);
+    if (!data || data.record.locked) return;
+    event.preventDefault();
+    event.stopPropagation();
+    enterGridCellEdit(cell, event.key);
     return;
   }
 
@@ -4235,6 +4296,18 @@ onBeforeUnmount(() => {
       @paste.capture="handleGridPaste"
       @contextmenu.capture="handleLedgerContextMenu"
     >
+      <div
+        v-if="gridFillPreviewRange && gridFillPreviewSummary"
+        class="grid-fill-preview-popover"
+        :style="{
+          left: `${gridFillPreviewPointer.left}px`,
+          top: `${gridFillPreviewPointer.top}px`,
+        }"
+      >
+        <strong>自动填充预览</strong>
+        <span>{{ gridFillPreviewLocation }}</span>
+        <span>{{ gridFillPreviewSummary }}</span>
+      </div>
       <div class="ledger-table-surface" :style="ledgerTableStyle">
       <el-table
         ref="tableRef"
@@ -4361,6 +4434,12 @@ onBeforeUnmount(() => {
                 @update:model-value="setValue(row, field, String($event))"
                 @change="saveField(row, field)"
               />
+              <span
+                v-if="gridFillPreviewValue($index, columnIndex) !== null"
+                class="grid-fill-preview-value"
+              >
+                {{ gridFillPreviewValue($index, columnIndex) || "（空）" }}
+              </span>
               <span
                 v-if="isGridFillHandleCell($index, columnIndex)"
                 class="grid-fill-handle"
@@ -5171,11 +5250,32 @@ onBeforeUnmount(() => {
 }
 
 .ledger-column-tools-popover,
-.ledger-context-menu {
+.ledger-context-menu,
+.grid-fill-preview-popover {
   position: fixed;
   z-index: 3000;
   box-sizing: border-box;
   user-select: none;
+}
+
+.grid-fill-preview-popover {
+  display: grid;
+  max-width: 340px;
+  gap: 3px;
+  border: 1px solid #93c5fd;
+  border-radius: 8px;
+  background: rgb(239 246 255 / 96%);
+  box-shadow: 0 8px 24px rgb(15 23 42 / 18%);
+  color: #1e3a8a;
+  font-size: 12px;
+  line-height: 1.35;
+  padding: 8px 10px;
+  pointer-events: none;
+}
+
+.grid-fill-preview-popover strong {
+  color: #1d4ed8;
+  font-size: 13px;
 }
 
 .ledger-column-tools-popover {
@@ -5540,6 +5640,26 @@ onBeforeUnmount(() => {
   right: -5px;
   bottom: -5px;
   box-shadow: 0 0 0 1px var(--app-primary, #1677ff);
+}
+
+.grid-fill-preview-value {
+  position: absolute;
+  z-index: 3;
+  inset: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px dashed #60a5fa;
+  border-radius: 4px;
+  background: rgb(239 246 255 / 92%);
+  color: #1d4ed8;
+  font-size: 12px;
+  line-height: 1.2;
+  padding: 0 4px;
+  pointer-events: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .cell-field:not(.cell-field-editing) {
