@@ -124,6 +124,12 @@ const tableRef = ref<{
 } | null>(null);
 type GridCellPosition = { rowIndex: number; columnIndex: number };
 type GridCellRange = { anchor: GridCellPosition; focus: GridCellPosition };
+type NormalizedGridRange = {
+  rowStart: number;
+  rowEnd: number;
+  columnStart: number;
+  columnEnd: number;
+};
 type GridCellEditSnapshot = { rowId: string; fieldId: string; value: string };
 type GridCellDragMode = "replace" | "shift" | "add";
 type GridClipboardCell = { rowOffset: number; columnOffset: number; value: string };
@@ -143,6 +149,17 @@ type GridCellDragState = {
   tableElement: HTMLElement;
   scrollDirection: -1 | 0 | 1;
 };
+type GridFillDragState = {
+  pointerId: number;
+  source: NormalizedGridRange;
+  target: NormalizedGridRange;
+  startX: number;
+  startY: number;
+  lastX: number;
+  lastY: number;
+  dragging: boolean;
+  tableElement: HTMLElement;
+};
 const activeGridCell = ref<GridCellPosition | null>(null);
 const gridCellRange = ref<GridCellRange | null>(null);
 const selectedGridCellKeys = ref<Set<string>>(new Set());
@@ -156,6 +173,9 @@ let gridCellWheelUpdateTimer: number | null = null;
 let gridCellEditFinishPromise: Promise<boolean> | null = null;
 let lastGridClipboard: { plainText: string; payload: GridClipboardPayload } | null = null;
 let suppressGridClick = false;
+let gridFillDragState: GridFillDragState | null = null;
+const gridFillPreviewRange = ref<NormalizedGridRange | null>(null);
+const gridFillPreviewSource = ref<NormalizedGridRange | null>(null);
 let suppressGridFocusReset = false;
 type SelectionRowInfo = {
   row: LedgerRow;
@@ -677,12 +697,7 @@ function moveGridCell(position: GridCellPosition, rowDelta: number, columnDelta:
   });
 }
 
-function normalizedGridRange(range: GridCellRange): {
-  rowStart: number;
-  rowEnd: number;
-  columnStart: number;
-  columnEnd: number;
-} {
+function normalizedGridRange(range: GridCellRange): NormalizedGridRange {
   return {
     rowStart: Math.min(range.anchor.rowIndex, range.focus.rowIndex),
     rowEnd: Math.max(range.anchor.rowIndex, range.focus.rowIndex),
@@ -910,6 +925,8 @@ const gridCellClassName = computed(() => {
   const currentFields = fields.value;
   const active = activeGridCell.value;
   const selectedKeys = selectedGridCellKeys.value;
+  const fillPreview = gridFillPreviewRange.value;
+  const fillSource = gridFillPreviewSource.value;
   return ({ row, columnIndex }: { row: LedgerRow; columnIndex: number }): string => {
     const fieldIndex = columnIndex - 2;
     if (fieldIndex < 0 || fieldIndex >= currentFields.length) return "";
@@ -926,9 +943,30 @@ const gridCellClassName = computed(() => {
     if (active?.rowIndex === rowIndex && active.columnIndex === fieldIndex) {
       classes.push("grid-cell-active");
     }
+    if (
+      fillPreview &&
+      rowIndex >= fillPreview.rowStart &&
+      rowIndex <= fillPreview.rowEnd &&
+      fieldIndex >= fillPreview.columnStart &&
+      fieldIndex <= fillPreview.columnEnd &&
+      (!fillSource ||
+        rowIndex < fillSource.rowStart ||
+        rowIndex > fillSource.rowEnd ||
+        fieldIndex < fillSource.columnStart ||
+        fieldIndex > fillSource.columnEnd)
+    ) {
+      classes.push("grid-cell-fill-preview");
+    }
     return classes.join(" ");
   };
 });
+
+function isGridFillHandleCell(rowIndex: number, columnIndex: number): boolean {
+  const range = gridCellRange.value;
+  if (!range || editingGridCell.value || gridSelectionDragging.value) return false;
+  const normalized = normalizedGridRange(range);
+  return normalized.rowEnd === rowIndex && normalized.columnEnd === columnIndex;
+}
 
 function gridEditorRoot(position: GridCellPosition): HTMLElement | null {
   const root = ledgerTableCardRef.value;
@@ -1261,7 +1299,248 @@ function handleGridPointerCancel(event: PointerEvent): void {
   stopGridCellDrag();
 }
 
+function formatFilledDate(value: string, dayOffset: number): string {
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return value;
+  date.setDate(date.getDate() + dayOffset);
+  return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, "0"), String(date.getDate()).padStart(2, "0")].join(
+    "-",
+  );
+}
+
+function filledSeriesValue(
+  sourceValues: string[],
+  offset: number,
+  field: FieldDefinition,
+): string {
+  if (!sourceValues.length) return "";
+  const values = sourceValues.map((value) => value.trim());
+  const dateField = field.data_type === "date" || field.system_key === "experiment_date";
+  if (dateField && values.every((value) => Boolean(value))) {
+    try {
+      const dates = values.map(normalizeDate);
+      const step = dates.length > 1
+        ? Math.round(
+            (new Date(`${dates.at(-1)}T00:00:00`).getTime() -
+              new Date(`${dates.at(-2)}T00:00:00`).getTime()) /
+              86_400_000,
+          )
+        : 1;
+      return formatFilledDate(dates.at(-1) ?? dates[0] ?? "", step * (offset + 1));
+    } catch {
+      // Fall back to text cycling when the selected values are not valid dates.
+    }
+  }
+
+  const numericPattern = /^[-+]?(?:\d+\.?\d*|\.\d+)$/;
+  if (values.every((value) => numericPattern.test(value))) {
+    const numbers = values.map(Number);
+    const step = numbers.length > 1 ? numbers.at(-1)! - numbers.at(-2)! : 1;
+    const next = numbers.at(-1)! + step * (offset + 1);
+    return Number.isInteger(next) ? String(next) : String(Number(next.toFixed(10)));
+  }
+
+  return values[offset % values.length] ?? "";
+}
+
+function buildGridFillEntries(
+  source: NormalizedGridRange,
+  target: NormalizedGridRange,
+): GridPasteEntry[] {
+  const extendsDown = target.rowEnd > source.rowEnd;
+  const extendsRight = target.columnEnd > source.columnEnd;
+  if (!extendsDown && !extendsRight) return [];
+
+  const sourceHeight = source.rowEnd - source.rowStart + 1;
+  const sourceWidth = source.columnEnd - source.columnStart + 1;
+  const entries: GridPasteEntry[] = [];
+  for (let rowIndex = source.rowStart; rowIndex <= target.rowEnd; rowIndex += 1) {
+    for (let columnIndex = source.columnStart; columnIndex <= target.columnEnd; columnIndex += 1) {
+      const isSourceCell = rowIndex <= source.rowEnd && columnIndex <= source.columnEnd;
+      if (isSourceCell) continue;
+      const field = fields.value[columnIndex];
+      const record = tableRows.value[rowIndex];
+      if (!field || !record) continue;
+
+      const sourceColumnIndex =
+        source.columnStart + ((columnIndex - source.columnStart) % sourceWidth);
+      const sourceRowIndex = source.rowStart + ((rowIndex - source.rowStart) % sourceHeight);
+      const sourceValues = extendsDown
+        ? Array.from({ length: sourceHeight }, (_, index) =>
+            valueFor(tableRows.value[source.rowStart + index]!, fields.value[sourceColumnIndex]!),
+          )
+        : Array.from({ length: sourceWidth }, (_, index) =>
+            valueFor(tableRows.value[sourceRowIndex]!, fields.value[source.columnStart + index]!),
+          );
+      const offset = extendsDown
+        ? rowIndex - source.rowEnd - 1
+        : columnIndex - source.columnEnd - 1;
+      entries.push({
+        rowOffset: rowIndex - source.rowStart,
+        columnOffset: columnIndex - source.columnStart,
+        value: filledSeriesValue(sourceValues, offset, field),
+      });
+    }
+  }
+  return entries;
+}
+
+function gridFillTargetForCell(
+  source: NormalizedGridRange,
+  cell: GridCellPosition,
+): NormalizedGridRange {
+  return {
+    rowStart: source.rowStart,
+    rowEnd: Math.max(source.rowEnd, cell.rowIndex),
+    columnStart: source.columnStart,
+    columnEnd: Math.max(source.columnEnd, cell.columnIndex),
+  };
+}
+
+function updateGridFillPreview(target: NormalizedGridRange, source: NormalizedGridRange): void {
+  gridFillPreviewSource.value = { ...source };
+  gridFillPreviewRange.value = { ...target };
+}
+
+function clearGridFillPreview(): void {
+  gridFillPreviewRange.value = null;
+  gridFillPreviewSource.value = null;
+}
+
+function stopGridFillDrag(): void {
+  document.removeEventListener("pointermove", handleGridFillPointerMove);
+  document.removeEventListener("pointerup", handleGridFillPointerUp, true);
+  document.removeEventListener("pointercancel", handleGridFillPointerCancel, true);
+  gridFillDragState = null;
+  clearGridFillPreview();
+}
+
+async function applyGridFill(
+  source: NormalizedGridRange,
+  target: NormalizedGridRange,
+): Promise<void> {
+  const entries = buildGridFillEntries(source, target);
+  if (!entries.length) return;
+  const changed = await pasteGrid(
+    null,
+    source.rowStart,
+    source.columnStart,
+    entries,
+    undefined,
+    "自动填充",
+  );
+  if (changed.length) {
+    const selection = {
+      anchor: { rowIndex: source.rowStart, columnIndex: source.columnStart },
+      focus: { rowIndex: target.rowEnd, columnIndex: target.columnEnd },
+    };
+    replaceGridCellSelection(
+      gridCellPositionsForRange(selection),
+      selection.focus,
+      selection.anchor,
+      selection,
+    );
+  }
+}
+
+function handleGridFillPointerDown(event: PointerEvent): void {
+  if (event.button !== 0 || event.isPrimary === false) return;
+  const range = gridCellRange.value;
+  if (!range || editingGridCell.value) return;
+  const source = normalizedGridRange(range);
+  const cell = gridCellFromElement(event.target);
+  if (!cell || cell.rowIndex !== source.rowEnd || cell.columnIndex !== source.columnEnd) return;
+  const tableElement =
+    event.target instanceof Element ? event.target.closest<HTMLElement>(".el-table") : null;
+  if (!tableElement) return;
+  stopGridFillDrag();
+  gridFillDragState = {
+    pointerId: event.pointerId,
+    source,
+    target: { ...source },
+    startX: event.clientX,
+    startY: event.clientY,
+    lastX: event.clientX,
+    lastY: event.clientY,
+    dragging: false,
+    tableElement,
+  };
+  document.addEventListener("pointermove", handleGridFillPointerMove, { passive: false });
+  document.addEventListener("pointerup", handleGridFillPointerUp, true);
+  document.addEventListener("pointercancel", handleGridFillPointerCancel, true);
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function handleGridFillPointerMove(event: PointerEvent): void {
+  const state = gridFillDragState;
+  if (!state || state.pointerId !== event.pointerId) return;
+  state.lastX = event.clientX;
+  state.lastY = event.clientY;
+  if (!state.dragging) {
+    if (Math.hypot(event.clientX - state.startX, event.clientY - state.startY) < selectionDragThreshold) {
+      return;
+    }
+    state.dragging = true;
+    suppressGridClick = true;
+  }
+  const cell = gridCellAtPoint(event.clientX, event.clientY);
+  if (cell) {
+    state.target = gridFillTargetForCell(state.source, cell);
+    updateGridFillPreview(state.target, state.source);
+  }
+  event.preventDefault();
+}
+
+function handleGridFillPointerUp(event: PointerEvent): void {
+  const state = gridFillDragState;
+  if (!state || state.pointerId !== event.pointerId) return;
+  const shouldFill = state.dragging;
+  const source = state.source;
+  const target = state.target;
+  if (shouldFill) {
+    event.preventDefault();
+    suppressGridClick = true;
+  }
+  stopGridFillDrag();
+  if (shouldFill) void applyGridFill(source, target);
+}
+
+function handleGridFillPointerCancel(event: PointerEvent): void {
+  if (!gridFillDragState || gridFillDragState.pointerId !== event.pointerId) return;
+  stopGridFillDrag();
+}
+
+function rowHasDataOutsideRange(rowIndex: number, range: NormalizedGridRange): boolean {
+  const row = tableRows.value[rowIndex];
+  if (!row) return false;
+  return fields.value.some((field, columnIndex) => {
+    if (columnIndex >= range.columnStart && columnIndex <= range.columnEnd) return false;
+    return valueFor(row, field).trim() !== "";
+  });
+}
+
+function fillDownFromGridHandle(): void {
+  const range = gridCellRange.value;
+  if (!range || editingGridCell.value) return;
+  const source = normalizedGridRange(range);
+  let lastRow = source.rowEnd;
+  for (let rowIndex = source.rowEnd + 1; rowIndex < tableRows.value.length; rowIndex += 1) {
+    if (!rowHasDataOutsideRange(rowIndex, source)) break;
+    lastRow = rowIndex;
+  }
+  if (lastRow === source.rowEnd) {
+    ElMessage.info("下方没有连续数据，无法自动填充");
+    return;
+  }
+  void applyGridFill(source, {
+    ...source,
+    rowEnd: lastRow,
+  });
+}
+
 function handleGridPointerDown(event: PointerEvent): void {
+  if (event.target instanceof Element && event.target.closest(".grid-fill-handle")) return;
   if (event.button !== 0 || event.isPrimary === false) return;
   const cell = gridCellFromElement(event.target);
   if (!cell) return;
@@ -1303,6 +1582,10 @@ function handleGridPointerDown(event: PointerEvent): void {
 }
 
 function handleGridClick(event: MouseEvent): void {
+  if (event.target instanceof Element && event.target.closest(".grid-fill-handle")) {
+    suppressGridClick = false;
+    return;
+  }
   const cell = gridCellFromElement(event.target);
   if (!cell) return;
   if (suppressGridClick) {
@@ -1334,6 +1617,12 @@ function handleGridClick(event: MouseEvent): void {
 }
 
 function handleGridDoubleClick(event: MouseEvent): void {
+  if (event.target instanceof Element && event.target.closest(".grid-fill-handle")) {
+    event.preventDefault();
+    event.stopPropagation();
+    fillDownFromGridHandle();
+    return;
+  }
   const cell = gridCellFromElement(event.target);
   if (!cell) return;
   if (isGridCellEditing(cell)) return;
@@ -2998,6 +3287,7 @@ async function pasteGrid(
   startColumnIndex: number,
   exactCells?: GridPasteEntry[],
   textOverride?: string,
+  operationLabel = "粘贴",
 ): Promise<GridCellPosition[]> {
   const text = exactCells
     ? ""
@@ -3079,15 +3369,15 @@ async function pasteGrid(
         await loadRecords(projectId, { showLoading: false });
       } else {
         pushHistory(
-          "粘贴台账数据",
+          `${operationLabel}台账数据`,
           [...beforeById.values()],
           committedRecords.map(snapshotRecord),
           projectId,
         );
       }
-      ElMessage.success(`已粘贴 ${changedCells} 个单元格${result.created ? `，新建 ${result.created} 条记录` : ""}`);
+       ElMessage.success(`已${operationLabel} ${changedCells} 个单元格${result.created ? `，新建 ${result.created} 条记录` : ""}`);
     } else if (changedCells) {
-      ElMessage.success(`已粘贴 ${changedCells} 个单元格，填写病理号后将自动保存`);
+      ElMessage.success(`已${operationLabel} ${changedCells} 个单元格，填写病理号后将自动保存`);
     }
     if (skippedLocked) {
       ElMessage.info(`已跳过 ${skippedLocked} 个锁定单元格`);
@@ -3638,6 +3928,7 @@ onBeforeUnmount(() => {
   document.removeEventListener("scroll", handleLedgerDocumentScroll, true);
   window.removeEventListener("resize", handleLedgerDocumentScroll);
   stopGridCellDrag(false);
+  stopGridFillDrag();
   stopSelectionDrag();
   editingGridCell.value = null;
   editingGridSnapshot.value = null;
@@ -4069,6 +4360,15 @@ onBeforeUnmount(() => {
                 :inputmode="field.data_type === 'number' ? 'decimal' : undefined"
                 @update:model-value="setValue(row, field, String($event))"
                 @change="saveField(row, field)"
+              />
+              <span
+                v-if="isGridFillHandleCell($index, columnIndex)"
+                class="grid-fill-handle"
+                role="button"
+                tabindex="-1"
+                aria-label="拖动或双击自动填充"
+                title="拖动填充；双击向下自动填充"
+                @pointerdown.stop.prevent="handleGridFillPointerDown"
               />
               <span v-if="fieldErrorFor(row, field)" class="cell-field-error">
                 {{ fieldErrorFor(row, field) }}
@@ -5210,10 +5510,36 @@ onBeforeUnmount(() => {
 }
 
 .cell-field {
+  position: relative;
   display: flex;
   min-width: 0;
   flex-direction: column;
   gap: 2px;
+}
+
+.grid-fill-handle {
+  position: absolute;
+  z-index: 4;
+  right: -4px;
+  bottom: -4px;
+  width: 8px;
+  height: 8px;
+  box-sizing: border-box;
+  border: 1px solid #fff;
+  border-radius: 2px;
+  background: var(--app-primary, #1677ff);
+  cursor: crosshair;
+  pointer-events: auto;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.grid-fill-handle:hover {
+  width: 10px;
+  height: 10px;
+  right: -5px;
+  bottom: -5px;
+  box-shadow: 0 0 0 1px var(--app-primary, #1677ff);
 }
 
 .cell-field:not(.cell-field-editing) {
@@ -5242,6 +5568,10 @@ onBeforeUnmount(() => {
 .cell-field:not(.cell-field-editing) :deep(.el-select__wrapper) {
   background: transparent;
   box-shadow: none;
+}
+
+.cell-field:not(.cell-field-editing) > .grid-fill-handle {
+  pointer-events: auto;
 }
 
 .cell-field-error {
@@ -5322,6 +5652,11 @@ onBeforeUnmount(() => {
 
 :deep(.el-table td.grid-cell-active) {
   box-shadow: inset 0 0 0 2px var(--app-primary);
+}
+
+:deep(.el-table td.grid-cell-fill-preview) {
+  background: #dbeafe !important;
+  box-shadow: inset 0 0 0 1px #60a5fa;
 }
 
 :deep(.el-table .el-textarea__inner) {
