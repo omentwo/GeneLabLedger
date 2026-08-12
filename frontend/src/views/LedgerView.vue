@@ -971,13 +971,6 @@ function isGridFillHandleCell(rowIndex: number, columnIndex: number): boolean {
   return normalized.rowEnd === rowIndex && normalized.columnEnd === columnIndex;
 }
 
-const gridFillPreviewLocation = computed(() => {
-  const range = gridFillPreviewRange.value;
-  if (!range) return "";
-  const field = fields.value[range.columnEnd];
-  return `填充至第 ${range.rowEnd + 1} 行 · ${field?.label ?? `第 ${range.columnEnd + 1} 列`}`;
-});
-
 function gridFillPreviewValue(rowIndex: number, columnIndex: number): string | null {
   const key = `${rowIndex}:${columnIndex}`;
   return gridFillPreviewValues.value.has(key)
@@ -1419,6 +1412,7 @@ function updateGridFillPreview(
   target: NormalizedGridRange,
   source: NormalizedGridRange,
   pointer?: { x: number; y: number },
+  currentCell?: GridCellPosition,
 ): void {
   gridFillPreviewSource.value = { ...source };
   gridFillPreviewRange.value = { ...target };
@@ -1431,13 +1425,9 @@ function updateGridFillPreview(
     );
   });
   gridFillPreviewValues.value = values;
-  const previewItems = entries.slice(0, 4).map((entry) => {
-    const field = fields.value[source.columnStart + entry.columnOffset];
-    return `${field?.label ?? "单元格"}=${entry.value || "（空）"}`;
-  });
-  gridFillPreviewSummary.value = previewItems.length
-    ? `${previewItems.join("；")}${entries.length > previewItems.length ? "；…" : ""}`
-    : "";
+  const currentKey = currentCell ? `${currentCell.rowIndex}:${currentCell.columnIndex}` : "";
+  const currentValue = currentKey ? values.get(currentKey) : undefined;
+  gridFillPreviewSummary.value = currentValue === undefined ? "" : currentValue || "（空）";
   if (pointer) {
     gridFillPreviewPointer.left = Math.max(8, Math.min(window.innerWidth - 360, pointer.x + 14));
     gridFillPreviewPointer.top = Math.max(8, Math.min(window.innerHeight - 96, pointer.y + 14));
@@ -1531,10 +1521,12 @@ function handleGridFillPointerMove(event: PointerEvent): void {
   const cell = gridCellAtPoint(event.clientX, event.clientY);
   if (cell) {
     state.target = gridFillTargetForCell(state.source, cell);
-    updateGridFillPreview(state.target, state.source, {
-      x: event.clientX,
-      y: event.clientY,
-    });
+    updateGridFillPreview(
+      state.target,
+      state.source,
+      { x: event.clientX, y: event.clientY },
+      cell,
+    );
   }
   event.preventDefault();
 }
@@ -4304,8 +4296,6 @@ onBeforeUnmount(() => {
           top: `${gridFillPreviewPointer.top}px`,
         }"
       >
-        <strong>自动填充预览</strong>
-        <span>{{ gridFillPreviewLocation }}</span>
         <span>{{ gridFillPreviewSummary }}</span>
       </div>
       <div class="ledger-table-surface" :style="ledgerTableStyle">
@@ -5271,11 +5261,6 @@ onBeforeUnmount(() => {
   line-height: 1.35;
   padding: 8px 10px;
   pointer-events: none;
-}
-
-.grid-fill-preview-popover strong {
-  color: #1d4ed8;
-  font-size: 13px;
 }
 
 .ledger-column-tools-popover {
