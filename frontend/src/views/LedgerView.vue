@@ -159,6 +159,7 @@ type GridFillDragState = {
   lastY: number;
   dragging: boolean;
   tableElement: HTMLElement;
+  finishPromise: Promise<boolean>;
 };
 const activeGridCell = ref<GridCellPosition | null>(null);
 const gridCellRange = ref<GridCellRange | null>(null);
@@ -966,7 +967,7 @@ const gridCellClassName = computed(() => {
 
 function isGridFillHandleCell(rowIndex: number, columnIndex: number): boolean {
   const range = gridCellRange.value;
-  if (!range || editingGridCell.value || gridSelectionDragging.value) return false;
+  if (!range || gridSelectionDragging.value) return false;
   const normalized = normalizedGridRange(range);
   return normalized.rowEnd === rowIndex && normalized.columnEnd === columnIndex;
 }
@@ -1104,7 +1105,9 @@ function enterGridCellEdit(position: GridCellPosition, replaceValue?: string): v
     return;
   }
   activeGridCell.value = nextPosition;
-  clearGridCellSelection();
+  // Keep the single-cell selection visible so its fill handle remains available
+  // while the input is being edited, matching spreadsheet-style workflows.
+  selectGridCell(nextPosition);
   editingGridCell.value = nextPosition;
   editingGridSnapshot.value = {
     rowId: data.record.id,
@@ -1480,13 +1483,16 @@ async function applyGridFill(
 function handleGridFillPointerDown(event: PointerEvent): void {
   if (event.button !== 0 || event.isPrimary === false) return;
   const range = gridCellRange.value;
-  if (!range || editingGridCell.value) return;
+  if (!range) return;
   const source = normalizedGridRange(range);
   const cell = gridCellFromElement(event.target);
   if (!cell || cell.rowIndex !== source.rowEnd || cell.columnIndex !== source.columnEnd) return;
   const tableElement =
     event.target instanceof Element ? event.target.closest<HTMLElement>(".el-table") : null;
   if (!tableElement) return;
+  const finishPromise = editingGridCell.value
+    ? finishGridCellEdit(true, false)
+    : Promise.resolve(true);
   stopGridFillDrag();
   gridFillDragState = {
     pointerId: event.pointerId,
@@ -1498,6 +1504,7 @@ function handleGridFillPointerDown(event: PointerEvent): void {
     lastY: event.clientY,
     dragging: false,
     tableElement,
+    finishPromise,
   };
   document.addEventListener("pointermove", handleGridFillPointerMove, { passive: false });
   document.addEventListener("pointerup", handleGridFillPointerUp, true);
@@ -1531,18 +1538,19 @@ function handleGridFillPointerMove(event: PointerEvent): void {
   event.preventDefault();
 }
 
-function handleGridFillPointerUp(event: PointerEvent): void {
+async function handleGridFillPointerUp(event: PointerEvent): Promise<void> {
   const state = gridFillDragState;
   if (!state || state.pointerId !== event.pointerId) return;
   const shouldFill = state.dragging;
   const source = state.source;
   const target = state.target;
+  const finishPromise = state.finishPromise;
   if (shouldFill) {
     event.preventDefault();
     suppressGridClick = true;
   }
   stopGridFillDrag();
-  if (shouldFill) void applyGridFill(source, target);
+  if (shouldFill && (await finishPromise)) await applyGridFill(source, target);
 }
 
 function handleGridFillPointerCancel(event: PointerEvent): void {
@@ -1561,7 +1569,7 @@ function rowHasDataOutsideRange(rowIndex: number, range: NormalizedGridRange): b
 
 function fillDownFromGridHandle(): void {
   const range = gridCellRange.value;
-  if (!range || editingGridCell.value) return;
+  if (!range) return;
   const source = normalizedGridRange(range);
   let lastRow = source.rowEnd;
   for (let rowIndex = source.rowEnd + 1; rowIndex < tableRows.value.length; rowIndex += 1) {
@@ -1572,9 +1580,17 @@ function fillDownFromGridHandle(): void {
     ElMessage.info("下方没有连续数据，无法自动填充");
     return;
   }
-  void applyGridFill(source, {
-    ...source,
-    rowEnd: lastRow,
+  const finishPromise = editingGridCell.value
+    ? finishGridCellEdit(true, false)
+    : Promise.resolve(true);
+  void finishPromise.then((saved) => {
+    if (saved) {
+      return applyGridFill(source, {
+        ...source,
+        rowEnd: lastRow,
+      });
+    }
+    return undefined;
   });
 }
 
@@ -5605,25 +5621,37 @@ onBeforeUnmount(() => {
 .grid-fill-handle {
   position: absolute;
   z-index: 4;
-  right: -4px;
-  bottom: -4px;
-  width: 8px;
-  height: 8px;
+  right: -8px;
+  bottom: -8px;
+  width: 16px;
+  height: 16px;
   box-sizing: border-box;
-  border: 1px solid #fff;
-  border-radius: 2px;
-  background: var(--app-primary, #1677ff);
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
   cursor: crosshair;
   pointer-events: auto;
   user-select: none;
   -webkit-user-select: none;
 }
 
-.grid-fill-handle:hover {
+.grid-fill-handle::after {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 8px;
+  height: 8px;
+  border: 1px solid #fff;
+  border-radius: 2px;
+  background: var(--app-primary, #1677ff);
+  content: "";
+}
+
+.grid-fill-handle:hover::after {
   width: 10px;
   height: 10px;
-  right: -5px;
-  bottom: -5px;
+  right: 3px;
+  bottom: 3px;
   box-shadow: 0 0 0 1px var(--app-primary, #1677ff);
 }
 
