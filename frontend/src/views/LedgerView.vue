@@ -417,6 +417,7 @@ const tableRows = computed<LedgerRow[]>(() =>
 );
 const gridCellSelectionCount = computed(() => selectedGridCellKeys.value.size);
 const hasGridCellSelection = computed(() => gridCellSelectionCount.value > 0);
+const gridCellInternalEditing = computed(() => Boolean(editingGridCell.value));
 const columnToolsField = computed(
   () => fields.value.find((field) => field.id === columnToolsOpenFieldId.value) ?? null,
 );
@@ -701,6 +702,19 @@ function moveGridCell(position: GridCellPosition, rowDelta: number, columnDelta:
   });
 }
 
+function moveGridCellByTab(position: GridCellPosition, backwards: boolean): GridCellPosition {
+  const columnCount = fields.value.length;
+  const rowCount = tableRows.value.length;
+  if (!columnCount || !rowCount) return clampGridCell(position);
+  const lastIndex = rowCount * columnCount - 1;
+  const currentIndex = position.rowIndex * columnCount + position.columnIndex;
+  const nextIndex = Math.max(0, Math.min(lastIndex, currentIndex + (backwards ? -1 : 1)));
+  return {
+    rowIndex: Math.floor(nextIndex / columnCount),
+    columnIndex: nextIndex % columnCount,
+  };
+}
+
 function normalizedGridRange(range: GridCellRange): NormalizedGridRange {
   return {
     rowStart: Math.min(range.anchor.rowIndex, range.focus.rowIndex),
@@ -928,6 +942,7 @@ const gridCellClassName = computed(() => {
   const currentRows = tableRows.value;
   const currentFields = fields.value;
   const active = activeGridCell.value;
+  const editing = editingGridCell.value;
   const selectedKeys = selectedGridCellKeys.value;
   const fillPreview = gridFillPreviewRange.value;
   const fillSource = gridFillPreviewSource.value;
@@ -946,6 +961,9 @@ const gridCellClassName = computed(() => {
     }
     if (active?.rowIndex === rowIndex && active.columnIndex === fieldIndex) {
       classes.push("grid-cell-active");
+    }
+    if (editing?.rowIndex === rowIndex && editing.columnIndex === fieldIndex) {
+      classes.push("grid-cell-editing");
     }
     if (
       fillPreview &&
@@ -1650,7 +1668,10 @@ function handleGridClick(event: MouseEvent): void {
     return;
   }
   if (isGridCellEditing(cell)) {
-    clearGridCellSelection();
+    // Internal editing and cell selection are separate states. Keep the
+    // single-cell selection (and its fill handle) while clicks move the text
+    // caret inside the active editor.
+    if (!isGridCellSelected(cell)) selectGridCell(cell);
     return;
   }
   if (event.ctrlKey || event.metaKey) {
@@ -1726,8 +1747,28 @@ function handleGridKeydown(event: KeyboardEvent): void {
       void finishGridCellEdit(true);
       return;
     }
+    if (event.key === "Tab" && !selectOwnsArrowKey(event)) {
+      event.preventDefault();
+      event.stopPropagation();
+      const nextCell = moveGridCellByTab(cell, event.shiftKey);
+      void finishGridCellEdit(true, false).then((saved) => {
+        if (!saved) return;
+        selectGridCell(nextCell);
+        void focusGridCell(nextCell);
+      });
+      return;
+    }
     // Once editing has started, arrow keys and other editing keys belong to
     // the native input/select control rather than grid navigation.
+    return;
+  }
+
+  if (event.key === "F2") {
+    const data = gridCellData(cell);
+    if (!data || data.record.locked) return;
+    event.preventDefault();
+    event.stopPropagation();
+    enterGridCellEdit(cell);
     return;
   }
 
@@ -4251,7 +4292,7 @@ onBeforeUnmount(() => {
       </el-button>
       <el-button
         :icon="Brush"
-        :disabled="!selectedCount && !hasGridCellSelection"
+        :disabled="gridCellInternalEditing || (!selectedCount && !hasGridCellSelection)"
         @click="openCurrentHighlightDialog"
       >
         {{ hasGridCellSelection ? "设置单元格底色" : "设置底色" }}
@@ -4260,7 +4301,7 @@ onBeforeUnmount(() => {
         :icon="Delete"
         plain
         :loading="highlightLoading"
-        :disabled="!selectedCount && !hasGridCellSelection"
+        :disabled="gridCellInternalEditing || (!selectedCount && !hasGridCellSelection)"
         @click="clearSelectedHighlight"
       >
         {{ hasGridCellSelection ? "清除单元格底色" : "清除底色" }}
@@ -5785,6 +5826,18 @@ onBeforeUnmount(() => {
 
 :deep(.el-table td.grid-cell-active) {
   box-shadow: inset 0 0 0 2px var(--app-primary);
+}
+
+:deep(.el-table td.grid-cell-editing),
+:deep(.el-table td.grid-cell-editing:hover) {
+  background: #fff !important;
+  box-shadow: inset 0 0 0 2px var(--app-primary);
+}
+
+:deep(.el-table td.grid-cell-editing .el-input__wrapper),
+:deep(.el-table td.grid-cell-editing .el-select__wrapper),
+:deep(.el-table td.grid-cell-editing .el-textarea__inner) {
+  background-color: #fff !important;
 }
 
 :deep(.el-table td.grid-cell-fill-preview) {
