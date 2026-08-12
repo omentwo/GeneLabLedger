@@ -1,4 +1,4 @@
-name: Windows Electron validation (PyInstaller backend)
+name: Windows Electron release
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 jobs:
-  build-windows-pyinstaller:
+  build-windows:
     runs-on: windows-latest
 
     steps:
@@ -67,13 +67,13 @@ jobs:
         run: |
           $installer = Get-ChildItem -LiteralPath release/electron -Filter *-Setup.exe | Select-Object -First 1
           if (-not $installer) { throw "Electron installer was not produced" }
-          Copy-Item -LiteralPath $installer.FullName -Destination release/GeneLabLedger-pyinstaller-windows-x64-Setup.exe
+          Copy-Item -LiteralPath $installer.FullName -Destination release/GeneLabLedger-windows-x64-Setup.exe
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: GeneLabLedger-pyinstaller-windows-x64
-          path: release/GeneLabLedger-pyinstaller-windows-x64-Setup.exe
+          name: GeneLabLedger-windows-x64
+          path: release/GeneLabLedger-windows-x64-Setup.exe
           if-no-files-found: error
 
       - name: Publish GitHub Release asset for version tags
@@ -86,4 +86,4 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             gh release create "${{ github.ref_name }}" --title "GeneLabLedger ${{ github.ref_name }}" --generate-notes
           }
-          gh release upload "${{ github.ref_name }}" release/GeneLabLedger-pyinstaller-windows-x64-Setup.exe --clobber
+          gh release upload "${{ github.ref_name }}" release/GeneLabLedger-windows-x64-Setup.exe --clobber

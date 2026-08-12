@@ -17,4 +17,4 @@
 | 自动任务 | Python asyncio 调度器 |
 | 安全边界 | Electron contextIsolation、沙箱 preload、白名单 IPC |
 | 测试与质量 | pytest、HTTPX、Vitest、Playwright、Ruff、vue-tsc |
-| Windows 发布 | GitHub Actions、Nuitka、PyInstaller |
+| Windows 发布 | GitHub Actions、PyInstaller、Electron Builder、NSIS |

@@ -16,4 +16,4 @@
 | 后台任务 | Python asyncio |
 | 审计与日志 | Python logging、SQLite |
 | 测试与质量 | pytest、HTTPX、Ruff |
-| 打包 | Nuitka、PyInstaller（由 GitHub Actions 验证） |
+| 打包 | PyInstaller（由 GitHub Actions 构建） |

@@ -35,7 +35,7 @@ Electron 负责桌面边界和文件对话框，Vue 前端只通过 HTTP API 和
 | 文档与打印 | DOCX Open XML、pywin32 COM、Word/WPS |
 | 任务 | Python `asyncio` 自动导出调度器 |
 | 测试与质量 | pytest、HTTPX、Vitest/jsdom、vue-tsc、Ruff |
-| Windows 发布 | GitHub Actions、Nuitka 或 PyInstaller sidecar、Electron 安装包 |
+| Windows 发布 | GitHub Actions、PyInstaller sidecar、Electron 安装包 |
 
 ## 3. 启动模式与目录布局
 
@@ -161,7 +161,7 @@ npm run build
 
 后端测试覆盖 API、自动导出、桌面 launcher、DOCX 模板和现代前端集成；前端测试覆盖客户端、报告 API、病理号排序、实验 API 和数据操作 API。Electron JavaScript 可用 `node --check` 做语法检查。
 
-`.github/workflows/windows-release.yml` 使用 Nuitka 构建 Python sidecar，`.github/workflows/windows-pyinstaller.yml` 使用 PyInstaller；两条流水线都将 sidecar 放入 Electron `extraResources/backend`，再由 electron-builder 生成 NSIS 安装包。除 CI 外，不在本机执行 Nuitka、PyInstaller 或安装包构建。
+`.github/workflows/windows-pyinstaller.yml` 使用 PyInstaller 构建 Python sidecar，将其放入 Electron `extraResources/backend`，再由 electron-builder 生成 NSIS 安装包。除 CI 外，不在本机执行 PyInstaller 或安装包构建。
 
 ## 10. 代码位置索引
 
