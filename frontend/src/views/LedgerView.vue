@@ -5678,22 +5678,18 @@ onBeforeUnmount(() => {
 
 .grid-fill-handle::after {
   position: absolute;
-  right: 4px;
-  bottom: 4px;
-  width: 8px;
-  height: 8px;
+  right: 5px;
+  bottom: 5px;
+  width: 6px;
+  height: 6px;
   border: 1px solid #fff;
-  border-radius: 2px;
+  border-radius: 1px;
   background: var(--app-primary, #1677ff);
   content: "";
 }
 
 .grid-fill-handle:hover::after {
-  width: 10px;
-  height: 10px;
-  right: 3px;
-  bottom: 3px;
-  box-shadow: 0 0 0 1px var(--app-primary, #1677ff);
+  box-shadow: 0 0 0 1px rgb(22 119 255 / 35%);
 }
 
 .grid-fill-preview-value {
