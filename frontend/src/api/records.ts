@@ -4,10 +4,17 @@ import type {
   BulkDeletePreview,
   BulkDeleteResult,
   ProjectRecord,
+  RecordBatchNewRecord,
+  RecordCellBatchCommitResult,
+  RecordCellBatchPreview,
+  RecordCellChange,
+  RecordComplexQuery,
   RecordCreateInput,
   RecordList,
+  RecordIdList,
   RecordOperationApplyInput,
   RecordOperationApplyResult,
+  RecordReplacePreview,
   RecordUpdateInput,
 } from "@/types/api";
 
@@ -40,8 +47,88 @@ function queryString(query: RecordQuery): string {
   return encoded ? `?${encoded}` : "";
 }
 
-export function listRecords(query: RecordQuery = {}): Promise<RecordList> {
-  return apiRequest<RecordList>(`/records${queryString(query)}`);
+export function listRecords(query: RecordQuery = {}, signal?: AbortSignal): Promise<RecordList> {
+  return apiRequest<RecordList>(`/records${queryString(query)}`, { signal });
+}
+
+export function queryRecords(
+  query: RecordComplexQuery,
+  signal?: AbortSignal,
+): Promise<RecordList> {
+  return apiRequest<RecordList>("/records/query", {
+    method: "POST",
+    body: jsonBody(query),
+    signal,
+  });
+}
+
+export function queryRecordIds(
+  query: RecordComplexQuery,
+  signal?: AbortSignal,
+): Promise<RecordIdList> {
+  return apiRequest<RecordIdList>("/records/query/ids", {
+    method: "POST",
+    body: jsonBody(query),
+    signal,
+  });
+}
+
+export function getRecordsByIds(recordIds: string[]): Promise<ProjectRecord[]> {
+  return apiRequest<ProjectRecord[]>("/records/by-ids", {
+    method: "POST",
+    body: jsonBody({ record_ids: recordIds }),
+  });
+}
+
+export function previewCellBatch(
+  projectId: string,
+  changes: RecordCellChange[],
+  newRecords: RecordBatchNewRecord[] = [],
+): Promise<RecordCellBatchPreview> {
+  return apiRequest<RecordCellBatchPreview>("/records/cell-batches/preview", {
+    method: "POST",
+    body: jsonBody({ project_id: projectId, changes, new_records: newRecords }),
+  });
+}
+
+export function commitCellBatch(
+  token: string,
+  acceptWarnings = false,
+  includeSnapshots = false,
+): Promise<RecordCellBatchCommitResult> {
+  return apiRequest<RecordCellBatchCommitResult>("/records/cell-batches/commit", {
+    method: "POST",
+    body: jsonBody({
+      token,
+      accept_warnings: acceptWarnings,
+      include_snapshots: includeSnapshots,
+    }),
+  });
+}
+
+export function previewReplace(payload: {
+  project_id: string;
+  field_id: string;
+  record_ids: string[];
+  find: string;
+  replacement: string;
+  match_mode: "substring" | "whole";
+  case_sensitive: boolean;
+}): Promise<RecordReplacePreview> {
+  return apiRequest<RecordReplacePreview>("/records/replace/preview", {
+    method: "POST",
+    body: jsonBody(payload),
+  });
+}
+
+export function commitReplace(
+  token: string,
+  acceptWarnings = false,
+): Promise<RecordCellBatchCommitResult> {
+  return apiRequest<RecordCellBatchCommitResult>("/records/replace/commit", {
+    method: "POST",
+    body: jsonBody({ token, accept_warnings: acceptWarnings, include_snapshots: false }),
+  });
 }
 
 export function getRecord(recordId: string): Promise<ProjectRecord> {
@@ -63,6 +150,18 @@ export function updateRecord(
     method: "PATCH",
     body: jsonBody(payload),
   });
+}
+
+export function validateNewRecord(
+  payload: RecordCreateInput,
+): Promise<{ issues: import("@/types/api").RecordValidationIssue[] }> {
+  return apiRequest<{ issues: import("@/types/api").RecordValidationIssue[] }>(
+    "/records/validate-new",
+    {
+      method: "POST",
+      body: jsonBody(payload),
+    },
+  );
 }
 
 export function applyRecordOperation(

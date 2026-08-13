@@ -17,6 +17,7 @@ from app.models import (
     FieldDefinition,
     FieldOption,
     LedgerTemplate,
+    LedgerViewPreset,
     Project,
     ProjectRecord,
     RecordValue,
@@ -30,6 +31,9 @@ from app.schemas import (
     FieldRead,
     FieldReorder,
     FieldUpdate,
+    LedgerViewPresetCreate,
+    LedgerViewPresetRead,
+    LedgerViewPresetUpdate,
     ProjectCreate,
     ProjectDuplicateCreate,
     ProjectForceDeleteRequest,
@@ -63,6 +67,193 @@ def list_projects(session: Session = Depends(get_session)) -> list[Project]:
             .order_by(Project.sort_order, Project.created_at)
         )
     )
+
+
+def _normalize_view_state(
+    session: Session,
+    project_id: str,
+    state_payload: dict,
+) -> dict:
+    fields = list(
+        session.scalars(
+            select(FieldDefinition)
+            .where(FieldDefinition.project_id == project_id)
+            .order_by(FieldDefinition.sort_order, FieldDefinition.created_at)
+        )
+    )
+    by_id = {field.id: field for field in fields}
+    columns: list[dict] = []
+    seen: set[str] = set()
+    for item in state_payload.get("columns") or []:
+        field_id = str(item.get("field_id") or "")
+        field = by_id.get(field_id)
+        if not field or field_id in seen:
+            continue
+        seen.add(field_id)
+        columns.append(
+            {
+                "field_id": field_id,
+                "width": max(58, min(600, int(item.get("width") or field.width))),
+                "hidden": bool(item.get("hidden", field.hidden)),
+                "pinned": (
+                    False
+                    if field.system_key == "pathology_number"
+                    else bool(item.get("pinned", field.system_key in {"experiment_date", "status"}))
+                ),
+            }
+        )
+    for field in fields:
+        if field.id in seen:
+            continue
+        columns.append(
+            {
+                "field_id": field.id,
+                "width": field.width,
+                "hidden": field.hidden,
+                "pinned": field.system_key in {"experiment_date", "status"},
+            }
+        )
+    frozen = state_payload.get("frozen_until_field_id")
+    sort_state = state_payload.get("sort")
+    filters = state_payload.get("filters") or {}
+    return {
+        "columns": columns,
+        "frozen_until_field_id": frozen if frozen in by_id else None,
+        "sort": sort_state if sort_state and sort_state.get("field_id") in by_id else None,
+        "filters": {
+            field_id: value
+            for field_id, value in filters.items()
+            if field_id in by_id and isinstance(value, dict)
+        },
+    }
+
+
+def _set_default_view(session: Session, project_id: str, preset_id: str | None) -> None:
+    presets = list(
+        session.scalars(
+            select(LedgerViewPreset).where(LedgerViewPreset.project_id == project_id)
+        )
+    )
+    for preset in presets:
+        preset.is_default = False
+    session.flush()
+    if preset_id is not None:
+        target = next((preset for preset in presets if preset.id == preset_id), None)
+        if target is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="视图不存在")
+        target.is_default = True
+
+
+@router.get("/{project_id}/view-presets", response_model=list[LedgerViewPresetRead])
+def list_view_presets(
+    project_id: str,
+    session: Session = Depends(get_session),
+) -> list[LedgerViewPreset]:
+    require_project(session, project_id)
+    return list(
+        session.scalars(
+            select(LedgerViewPreset)
+            .where(LedgerViewPreset.project_id == project_id)
+            .order_by(LedgerViewPreset.name, LedgerViewPreset.created_at)
+        )
+    )
+
+
+@router.post(
+    "/{project_id}/view-presets",
+    response_model=LedgerViewPresetRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_view_preset(
+    project_id: str,
+    payload: LedgerViewPresetCreate,
+    session: Session = Depends(get_session),
+) -> LedgerViewPreset:
+    require_project(session, project_id)
+    if session.scalar(
+        select(LedgerViewPreset).where(
+            LedgerViewPreset.project_id == project_id,
+            LedgerViewPreset.name == payload.name,
+        )
+    ):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="视图名称已存在")
+    preset = LedgerViewPreset(
+        project_id=project_id,
+        name=payload.name,
+        state=_normalize_view_state(session, project_id, payload.state.model_dump(mode="json")),
+        is_default=False,
+    )
+    session.add(preset)
+    session.flush()
+    if payload.is_default:
+        _set_default_view(session, project_id, preset.id)
+    audit(session, "ledger_view.create", "ledger_view_preset", preset.id, {"name": preset.name})
+    session.commit()
+    session.refresh(preset)
+    return preset
+
+
+@router.patch("/view-presets/{preset_id}", response_model=LedgerViewPresetRead)
+def update_view_preset(
+    preset_id: str,
+    payload: LedgerViewPresetUpdate,
+    session: Session = Depends(get_session),
+) -> LedgerViewPreset:
+    preset = session.get(LedgerViewPreset, preset_id)
+    if not preset:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="视图不存在")
+    if payload.name is not None and payload.name != preset.name:
+        if session.scalar(
+            select(LedgerViewPreset).where(
+                LedgerViewPreset.project_id == preset.project_id,
+                LedgerViewPreset.name == payload.name,
+                LedgerViewPreset.id != preset.id,
+            )
+        ):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="视图名称已存在")
+        preset.name = payload.name
+    if payload.state is not None:
+        preset.state = _normalize_view_state(
+            session, preset.project_id, payload.state.model_dump(mode="json")
+        )
+    if payload.is_default is not None:
+        if payload.is_default:
+            _set_default_view(session, preset.project_id, preset.id)
+        else:
+            preset.is_default = False
+    audit(session, "ledger_view.update", "ledger_view_preset", preset.id, {"name": preset.name})
+    session.commit()
+    session.refresh(preset)
+    return preset
+
+
+@router.post("/view-presets/{preset_id}/default", response_model=LedgerViewPresetRead)
+def set_default_view_preset(
+    preset_id: str,
+    session: Session = Depends(get_session),
+) -> LedgerViewPreset:
+    preset = session.get(LedgerViewPreset, preset_id)
+    if not preset:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="视图不存在")
+    _set_default_view(session, preset.project_id, preset.id)
+    audit(session, "ledger_view.default", "ledger_view_preset", preset.id, {"name": preset.name})
+    session.commit()
+    session.refresh(preset)
+    return preset
+
+
+@router.delete("/view-presets/{preset_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_view_preset(
+    preset_id: str,
+    session: Session = Depends(get_session),
+) -> Response:
+    preset = session.get(LedgerViewPreset, preset_id)
+    if not preset:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="视图不存在")
+    audit(session, "ledger_view.delete", "ledger_view_preset", preset.id, {"name": preset.name})
+    session.delete(preset)
+    session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("", response_model=ProjectRead, status_code=status.HTTP_201_CREATED)
@@ -141,6 +332,8 @@ def duplicate_project(
                 hidden=source_field.hidden,
                 sort_order=source_field.sort_order,
                 width=source_field.width,
+                validation_mode=source_field.validation_mode,
+                validation_rules=dict(source_field.validation_rules or {}),
             )
             session.add(cloned_field)
             session.flush()
@@ -538,6 +731,8 @@ def create_field(
         sort_order=max_order + 1,
         width=payload.width,
         is_core=False,
+        validation_mode=payload.validation_mode,
+        validation_rules=payload.validation_rules.model_dump(mode="json", exclude_none=True),
     )
     try:
         session.add(field)
@@ -580,6 +775,8 @@ def update_field(
         "sort_order": field.sort_order,
         "width": field.width,
         "hidden": field.hidden,
+        "validation_mode": field.validation_mode,
+        "validation_rules": dict(field.validation_rules or {}),
     }
     if payload.label is not None:
         field.label = payload.label
@@ -596,6 +793,20 @@ def update_field(
         field.width = payload.width
     if payload.hidden is not None:
         field.hidden = payload.hidden
+    if payload.validation_mode is not None:
+        if field.is_core:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="核心字段的验证模式不能修改",
+            )
+        field.validation_mode = payload.validation_mode
+    if payload.validation_rules is not None:
+        if field.is_core:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="核心字段的验证规则不能修改",
+            )
+        field.validation_rules = payload.validation_rules.model_dump(mode="json", exclude_none=True)
     audit(
         session,
         "field.update",
@@ -609,6 +820,8 @@ def update_field(
                 "sort_order": field.sort_order,
                 "width": field.width,
                 "hidden": field.hidden,
+                "validation_mode": field.validation_mode,
+                "validation_rules": dict(field.validation_rules or {}),
             },
         },
     )

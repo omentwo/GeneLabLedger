@@ -10,6 +10,7 @@ from app.models import (
     ProjectRecord,
     RecordValue,
 )
+from app.services.field_validation import validate_field_value
 
 
 def require_project(session: Session, project_id: str) -> Project:
@@ -39,17 +40,21 @@ def validate_record_values(
     session: Session,
     project_id: str,
     values: dict[str, str],
+    *,
+    include_required_missing: bool = False,
 ) -> dict[str, str]:
-    if not values:
+    if not values and not include_required_missing:
         return {}
-    fields = list(
-        session.scalars(
-            select(FieldDefinition).where(
-                FieldDefinition.id.in_(values.keys()),
-                FieldDefinition.project_id == project_id,
-            )
-        )
+    statement = (
+        select(FieldDefinition)
+        .where(FieldDefinition.project_id == project_id)
+        .options(selectinload(FieldDefinition.options))
     )
+    if include_required_missing:
+        statement = statement.where(FieldDefinition.is_core.is_(False))
+    else:
+        statement = statement.where(FieldDefinition.id.in_(values.keys()))
+    fields = list(session.scalars(statement))
     by_id = {field.id: field for field in fields}
     missing = set(values) - set(by_id)
     if missing:
@@ -63,15 +68,74 @@ def validate_record_values(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"核心字段必须通过专用属性修改：{', '.join(core_fields)}",
         )
-    return {field_id: str(value).strip() for field_id, value in values.items()}
+    normalized: dict[str, str] = {}
+    errors: list[str] = []
+    field_ids = list(by_id) if include_required_missing else list(values)
+    for field_id in field_ids:
+        value, issues = validate_field_value(by_id[field_id], values.get(field_id, ""))
+        normalized[field_id] = value
+        errors.extend(issue.message for issue in issues if issue.severity == "error")
+    if errors:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="；".join(dict.fromkeys(errors)),
+        )
+    return normalized
+
+
+def validate_core_record_values(
+    session: Session,
+    project_id: str,
+    values: dict[str, object],
+) -> dict[str, str]:
+    """Validate changed core values through the same rules as cell batches."""
+    if not values:
+        return {}
+    fields = list(
+        session.scalars(
+            select(FieldDefinition)
+            .where(
+                FieldDefinition.project_id == project_id,
+                FieldDefinition.is_core.is_(True),
+                FieldDefinition.system_key.in_(values.keys()),
+            )
+            .options(selectinload(FieldDefinition.options))
+        )
+    )
+    by_system_key = {field.system_key: field for field in fields if field.system_key}
+    missing = set(values) - set(by_system_key)
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"核心表头不存在：{', '.join(sorted(missing))}",
+        )
+    normalized: dict[str, str] = {}
+    errors: list[str] = []
+    for system_key, raw_value in values.items():
+        value, issues = validate_field_value(by_system_key[system_key], raw_value)
+        normalized[system_key] = value
+        errors.extend(issue.message for issue in issues if issue.severity == "error")
+    if errors:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="；".join(dict.fromkeys(errors)),
+        )
+    return normalized
 
 
 def replace_record_values(
     session: Session,
     record: ProjectRecord,
     values: dict[str, str],
+    *,
+    include_required_missing: bool = False,
 ) -> None:
-    validated = validate_record_values(session, record.project_id, values)
+    validated = validate_record_values(
+        session,
+        record.project_id,
+        values,
+        include_required_missing=include_required_missing,
+    )
     existing = {
         value.field_id: value
         for value in session.scalars(

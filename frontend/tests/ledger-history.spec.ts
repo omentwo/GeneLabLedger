@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  createLedgerCellHistoryEntry,
   createLedgerHistoryEntry,
   LEDGER_HISTORY_LIMIT,
   useLedgerHistory,
@@ -26,6 +27,20 @@ function record(id: string): ProjectRecord {
 }
 
 describe("ledger history", () => {
+  it("stores large cell operations as sparse cell changes", () => {
+    const entry = createLedgerCellHistoryEntry("project-1", "批量填充", [
+      { recordId: "r1", fieldId: "f1", before: "1", after: "2" },
+      { recordId: "r2", fieldId: "f1", before: "3", after: "4" },
+    ]);
+
+    expect(entry.kind).toBe("cells");
+    expect(entry.changes).toEqual([
+      { recordId: "r1", fieldId: "f1", before: "1", after: "2" },
+      { recordId: "r2", fieldId: "f1", before: "3", after: "4" },
+    ]);
+    expect("before" in entry).toBe(false);
+  });
+
   it("keeps only the most recent 20 operations", () => {
     const history = useLedgerHistory();
     for (let index = 0; index < 25; index += 1) {

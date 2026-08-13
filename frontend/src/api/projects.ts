@@ -2,9 +2,13 @@ import { apiRequest, jsonBody } from "@/api/client";
 import type {
   DataType,
   FieldDefinition,
+  FieldValidationRules,
   LedgerTemplate,
+  LedgerViewPreset,
+  LedgerViewState,
   Project,
   ProjectForceDeleteResult,
+  ValidationMode,
 } from "@/types/api";
 
 export function listProjects(): Promise<Project[]> {
@@ -86,7 +90,14 @@ export function forceDeleteProject(
 
 export function createField(
   projectId: string,
-  payload: { label: string; data_type: DataType; width: number; options: string[] },
+  payload: {
+    label: string;
+    data_type: DataType;
+    width: number;
+    options: string[];
+    validation_mode?: ValidationMode;
+    validation_rules?: FieldValidationRules;
+  },
 ): Promise<FieldDefinition> {
   return apiRequest<FieldDefinition>(`/projects/${projectId}/fields`, {
     method: "POST",
@@ -102,6 +113,8 @@ export function updateField(
     sort_order?: number;
     width?: number;
     hidden?: boolean;
+    validation_mode?: ValidationMode;
+    validation_rules?: FieldValidationRules;
   },
 ): Promise<FieldDefinition> {
   return apiRequest<FieldDefinition>(`/projects/fields/${fieldId}`, {
@@ -132,4 +145,38 @@ export function reorderFields(
 
 export function deleteField(fieldId: string): Promise<void> {
   return apiRequest<void>(`/projects/fields/${fieldId}`, { method: "DELETE" });
+}
+
+export function listLedgerViewPresets(projectId: string): Promise<LedgerViewPreset[]> {
+  return apiRequest<LedgerViewPreset[]>(`/projects/${projectId}/view-presets`);
+}
+
+export function createLedgerViewPreset(
+  projectId: string,
+  payload: { name: string; state: LedgerViewState; is_default?: boolean },
+): Promise<LedgerViewPreset> {
+  return apiRequest<LedgerViewPreset>(`/projects/${projectId}/view-presets`, {
+    method: "POST",
+    body: jsonBody(payload),
+  });
+}
+
+export function updateLedgerViewPreset(
+  presetId: string,
+  payload: { name?: string; state?: LedgerViewState; is_default?: boolean },
+): Promise<LedgerViewPreset> {
+  return apiRequest<LedgerViewPreset>(`/projects/view-presets/${presetId}`, {
+    method: "PATCH",
+    body: jsonBody(payload),
+  });
+}
+
+export function setDefaultLedgerViewPreset(presetId: string): Promise<LedgerViewPreset> {
+  return apiRequest<LedgerViewPreset>(`/projects/view-presets/${presetId}/default`, {
+    method: "POST",
+  });
+}
+
+export function deleteLedgerViewPreset(presetId: string): Promise<void> {
+  return apiRequest<void>(`/projects/view-presets/${presetId}`, { method: "DELETE" });
 }

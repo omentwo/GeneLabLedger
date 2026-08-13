@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import Float, String, and_, cast, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -17,24 +18,43 @@ from app.schemas import (
     BulkDeletePreviewRead,
     BulkDeleteResult,
     RecordAssignProject,
+    RecordCellBatchCommit,
+    RecordCellBatchCommitRead,
+    RecordCellBatchPreview,
+    RecordCellBatchPreviewRead,
+    RecordCellChange,
     RecordCellHighlightUpdate,
     RecordCreate,
+    RecordCreateValidationRead,
     RecordExperimentNumberBatch,
     RecordHighlightUpdate,
+    RecordIdList,
+    RecordIdsRequest,
     RecordList,
     RecordLockUpdate,
     RecordOperationApply,
     RecordOperationApplyResult,
+    RecordQueryRequest,
     RecordRead,
+    RecordReplacePreview,
+    RecordReplacePreviewRead,
     RecordReportStatusUpdate,
     RecordUpdate,
 )
+from app.services.cell_batches import (
+    commit_cell_batch,
+    current_cell_value,
+    preview_cell_changes,
+    preview_dict,
+)
+from app.services.field_validation import validate_field_value
 from app.services.record_operations import apply_record_operation, snapshot_record
 from app.services.records import (
     assign_record_to_project,
     replace_record_values,
     require_project,
     require_record,
+    validate_core_record_values,
 )
 from app.services.serializers import record_dict
 from app.timezones import ASIA_SHANGHAI
@@ -140,6 +160,302 @@ def list_records(
     }
 
 
+def _query_field_expression(field: FieldDefinition):
+    if field.system_key == "pathology_number":
+        return ProjectRecord.pathology_number
+    if field.system_key == "status":
+        return ProjectRecord.status
+    if field.system_key == "experiment_date":
+        return ProjectRecord.experiment_date
+    if field.system_key == "experiment_number":
+        return ProjectRecord.experiment_number
+    return (
+        select(RecordValue.value_text)
+        .where(
+            RecordValue.record_id == ProjectRecord.id,
+            RecordValue.field_id == field.id,
+        )
+        .correlate(ProjectRecord)
+        .scalar_subquery()
+    )
+
+
+def _complex_record_statement(
+    session: Session,
+    payload: RecordQueryRequest,
+):
+    require_project(session, payload.project_id)
+    requested_field_ids = {item.field_id for item in payload.field_filters}
+    if payload.sort:
+        requested_field_ids.add(payload.sort.field_id)
+    fields = {
+        field.id: field
+        for field in session.scalars(
+            select(FieldDefinition).where(
+                FieldDefinition.project_id == payload.project_id,
+                FieldDefinition.id.in_(requested_field_ids),
+            )
+        )
+    }
+    if requested_field_ids - set(fields):
+        raise HTTPException(status_code=422, detail="筛选或排序表头不属于当前项目")
+    filters = record_filters(
+        project_id=payload.project_id,
+        scope="current",
+        record_status=payload.status,
+        search=payload.search,
+        report_generated=payload.report_generated,
+    )
+    if payload.experiment_date_from is not None:
+        filters.append(ProjectRecord.experiment_date >= payload.experiment_date_from)
+    if payload.experiment_date_to is not None:
+        filters.append(ProjectRecord.experiment_date <= payload.experiment_date_to)
+    for item in payload.field_filters:
+        field = fields[item.field_id]
+        expression = _query_field_expression(field)
+        if item.operator == "contains":
+            text = item.value or ""
+            filters.append(func.lower(cast(expression, String)).like(f"%{text.lower()}%"))
+        elif item.operator == "equals":
+            filters.append(cast(expression, String) == (item.value or ""))
+        elif item.operator == "in":
+            selected_values = list(dict.fromkeys(item.values))
+            includes_empty = "" in selected_values
+            non_empty_values = [value for value in selected_values if value != ""]
+            alternatives = []
+            if non_empty_values:
+                alternatives.append(cast(expression, String).in_(non_empty_values))
+            if includes_empty:
+                alternatives.append(or_(expression.is_(None), cast(expression, String) == ""))
+            if alternatives:
+                filters.append(or_(*alternatives))
+            else:
+                filters.append(cast(expression, String).in_([]))
+        elif item.operator == "is_empty":
+            filters.append(or_(expression.is_(None), cast(expression, String) == ""))
+        elif item.operator == "not_empty":
+            filters.append(and_(expression.is_not(None), cast(expression, String) != ""))
+        elif item.operator == "date_between":
+            try:
+                start_value = date.fromisoformat(item.start) if item.start else None
+                end_value = date.fromisoformat(item.end) if item.end else None
+            except ValueError as error:
+                raise HTTPException(status_code=422, detail="日期筛选格式无效") from error
+            date_expression = expression if field.is_core else cast(expression, String)
+            if start_value is not None:
+                filters.append(
+                    date_expression >= (start_value if field.is_core else start_value.isoformat())
+                )
+            if end_value is not None:
+                filters.append(
+                    date_expression <= (end_value if field.is_core else end_value.isoformat())
+                )
+        elif item.operator == "number_between":
+            number_expression = cast(expression, Float)
+            try:
+                if item.start not in {None, ""}:
+                    filters.append(number_expression >= float(item.start))
+                if item.end not in {None, ""}:
+                    filters.append(number_expression <= float(item.end))
+            except ValueError as error:
+                raise HTTPException(status_code=422, detail="数字筛选范围无效") from error
+    statement = select(ProjectRecord).where(*filters)
+    if payload.sort:
+        sort_field = fields[payload.sort.field_id]
+        sort_expression = _query_field_expression(sort_field)
+        if sort_field.data_type == "number":
+            sort_expression = cast(sort_expression, Float)
+        order = sort_expression.desc() if payload.sort.direction == "desc" else sort_expression.asc()
+        statement = statement.order_by(order, ProjectRecord.created_at.asc(), ProjectRecord.id.asc())
+    else:
+        statement = statement.order_by(ProjectRecord.created_at.asc(), ProjectRecord.id.asc())
+    return statement
+
+
+@router.post("/query", response_model=RecordList)
+def query_records(
+    payload: RecordQueryRequest,
+    session: Session = Depends(get_session),
+) -> dict:
+    statement = _complex_record_statement(session, payload)
+    count_statement = statement.order_by(None)
+    total = session.scalar(select(func.count()).select_from(count_statement.subquery())) or 0
+    records = list(
+        session.scalars(
+            statement.options(*record_load_options())
+            .offset(payload.offset)
+            .limit(payload.limit)
+        )
+    )
+    return {
+        "items": [record_dict(record) for record in records],
+        "total": total,
+        "limit": payload.limit,
+        "offset": payload.offset,
+    }
+
+
+@router.post("/query/ids", response_model=RecordIdList)
+def query_record_ids(
+    payload: RecordQueryRequest,
+    session: Session = Depends(get_session),
+) -> dict:
+    statement = _complex_record_statement(session, payload).order_by(None)
+    ids = list(session.scalars(statement.with_only_columns(ProjectRecord.id)))
+    return {"record_ids": ids, "total": len(ids)}
+
+
+@router.post("/by-ids", response_model=list[RecordRead])
+def get_records_by_ids(
+    payload: RecordIdsRequest,
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    record_ids = list(dict.fromkeys(payload.record_ids))
+    records = list(
+        session.scalars(
+            select(ProjectRecord)
+            .where(ProjectRecord.id.in_(record_ids))
+            .options(*record_load_options())
+        )
+    )
+    by_id = {record.id: record for record in records}
+    missing = set(record_ids) - set(by_id)
+    if missing:
+        raise HTTPException(status_code=409, detail="部分所选记录已不存在，请刷新后重试")
+    return [record_dict(by_id[record_id]) for record_id in record_ids]
+
+
+@router.post("/cell-batches/preview", response_model=RecordCellBatchPreviewRead)
+def preview_record_cell_batch(
+    payload: RecordCellBatchPreview,
+    session: Session = Depends(get_session),
+) -> dict:
+    require_project(session, payload.project_id)
+    preview = preview_cell_changes(
+        session,
+        project_id=payload.project_id,
+        changes=payload.changes,
+        new_records=payload.new_records,
+    )
+    return preview_dict(preview)
+
+
+@router.post("/cell-batches/commit", response_model=RecordCellBatchCommitRead)
+def commit_record_cell_batch(
+    payload: RecordCellBatchCommit,
+    session: Session = Depends(get_session),
+) -> dict:
+    return commit_cell_batch(
+        session,
+        token=payload.token,
+        accept_warnings=payload.accept_warnings,
+        include_snapshots=payload.include_snapshots,
+    )
+
+
+def _replace_text(
+    value: str,
+    *,
+    find: str,
+    replacement: str,
+    match_mode: str,
+    case_sensitive: bool,
+) -> str | None:
+    if match_mode == "whole":
+        matches = value == find if case_sensitive else value.casefold() == find.casefold()
+        return replacement if matches else None
+    if not find:
+        raise HTTPException(status_code=422, detail="子串查找内容不能为空")
+    if case_sensitive:
+        return value.replace(find, replacement) if find in value else None
+    pattern = re.compile(re.escape(find), flags=re.IGNORECASE)
+    return pattern.sub(lambda _: replacement, value) if pattern.search(value) else None
+
+
+@router.post("/replace/preview", response_model=RecordReplacePreviewRead)
+def preview_record_replace(
+    payload: RecordReplacePreview,
+    session: Session = Depends(get_session),
+) -> dict:
+    field = session.scalar(
+        select(FieldDefinition)
+        .where(
+            FieldDefinition.id == payload.field_id,
+            FieldDefinition.project_id == payload.project_id,
+        )
+        .options(selectinload(FieldDefinition.options))
+    )
+    if not field:
+        raise HTTPException(status_code=404, detail="表头不存在")
+    record_ids = list(dict.fromkeys(payload.record_ids))
+    records = list(
+        session.scalars(
+            select(ProjectRecord)
+            .where(
+                ProjectRecord.id.in_(record_ids),
+                ProjectRecord.project_id == payload.project_id,
+            )
+            .options(
+                selectinload(ProjectRecord.project),
+                selectinload(ProjectRecord.values),
+            )
+        )
+    )
+    by_id = {record.id: record for record in records}
+    missing = set(record_ids) - set(by_id)
+    if missing:
+        raise HTTPException(status_code=409, detail="筛选结果已变化，请刷新后重试")
+    changes = []
+    for record_id in record_ids:
+        record = by_id[record_id]
+        current = current_cell_value(record, field)
+        replaced = _replace_text(
+            current,
+            find=payload.find,
+            replacement=payload.replacement,
+            match_mode=payload.match_mode,
+            case_sensitive=payload.case_sensitive,
+        )
+        if replaced is not None and replaced != current:
+            changes.append(
+                {
+                    "record_id": record.id,
+                    "field_id": field.id,
+                    "value": replaced,
+                    "expected_value": current,
+                }
+            )
+    typed_changes = [RecordCellChange(**change) for change in changes]
+    preview = preview_cell_changes(
+        session,
+        project_id=payload.project_id,
+        changes=typed_changes,
+        source="replace",
+    )
+    result = preview_dict(preview)
+    return {
+        "token": result["token"],
+        "matched_count": result["affected_count"],
+        "skipped_locked": result["skipped_locked"],
+        "issues": result["issues"],
+        "samples": typed_changes[:50],
+        "expires_at": result["expires_at"],
+    }
+
+
+@router.post("/replace/commit", response_model=RecordCellBatchCommitRead)
+def commit_record_replace(
+    payload: RecordCellBatchCommit,
+    session: Session = Depends(get_session),
+) -> dict:
+    return commit_cell_batch(
+        session,
+        token=payload.token,
+        accept_warnings=payload.accept_warnings,
+        include_snapshots=payload.include_snapshots,
+    )
+
+
 @router.post("/experiment-numbers", response_model=list[RecordRead])
 def assign_experiment_numbers(
     payload: RecordExperimentNumberBatch,
@@ -235,6 +551,76 @@ def apply_operation(
     }
 
 
+@router.post("/validate-new", response_model=RecordCreateValidationRead)
+def validate_new_record(
+    payload: RecordCreate,
+    session: Session = Depends(get_session),
+) -> dict:
+    require_project(session, payload.project_id)
+    fields = list(
+        session.scalars(
+            select(FieldDefinition)
+            .where(FieldDefinition.project_id == payload.project_id)
+            .options(selectinload(FieldDefinition.options))
+        )
+    )
+    fields_by_id = {field.id: field for field in fields}
+    invalid_value_fields = {
+        field_id
+        for field_id in payload.values
+        if field_id not in fields_by_id or fields_by_id[field_id].is_core
+    }
+    if invalid_value_fields:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="新增记录包含无效的自定义表头",
+        )
+    issues = []
+    core_values = {
+        "pathology_number": payload.pathology_number,
+        "status": payload.status,
+        "experiment_date": payload.experiment_date.isoformat() if payload.experiment_date else "",
+        "experiment_number": payload.experiment_number or "",
+    }
+    for field in fields:
+        raw_value = (
+            core_values.get(field.system_key or "", "")
+            if field.is_core
+            else payload.values.get(field.id, "")
+        )
+        _, field_issues = validate_field_value(field, raw_value)
+        issues.extend(
+            {
+                "record_id": "new",
+                "field_id": field.id,
+                "severity": issue.severity,
+                "message": issue.message,
+            }
+            for issue in field_issues
+        )
+    if payload.experiment_number:
+        existing_number = session.scalar(
+            select(ProjectRecord.id).where(
+                ProjectRecord.project_id == payload.project_id,
+                ProjectRecord.experiment_number == payload.experiment_number,
+            )
+        )
+        number_field = next(
+            (field for field in fields if field.system_key == "experiment_number"),
+            None,
+        )
+        if existing_number and number_field:
+            issues.append(
+                {
+                    "record_id": "new",
+                    "field_id": number_field.id,
+                    "severity": "error",
+                    "message": "实验编号已存在",
+                }
+            )
+    return {"issues": issues}
+
+
 @router.get("/{record_id}", response_model=RecordRead)
 def get_record(record_id: str, session: Session = Depends(get_session)) -> dict:
     return record_dict(require_record(session, record_id, include_values=True))
@@ -243,6 +629,16 @@ def get_record(record_id: str, session: Session = Depends(get_session)) -> dict:
 @router.post("", response_model=RecordRead, status_code=status.HTTP_201_CREATED)
 def create_record(payload: RecordCreate, session: Session = Depends(get_session)) -> dict:
     require_project(session, payload.project_id)
+    normalized_core = validate_core_record_values(
+        session,
+        payload.project_id,
+        {
+            "pathology_number": payload.pathology_number,
+            "status": payload.status,
+            "experiment_date": payload.experiment_date.isoformat() if payload.experiment_date else "",
+            "experiment_number": payload.experiment_number or "",
+        },
+    )
     if payload.experiment_number:
         existing = session.scalar(
             select(ProjectRecord).where(
@@ -254,16 +650,25 @@ def create_record(payload: RecordCreate, session: Session = Depends(get_session)
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="实验编号已存在")
     record = ProjectRecord(
         project_id=payload.project_id,
-        pathology_number=payload.pathology_number,
-        status=payload.status,
-        experiment_date=payload.experiment_date,
-        experiment_number=payload.experiment_number,
+        pathology_number=normalized_core["pathology_number"],
+        status=normalized_core["status"],
+        experiment_date=(
+            date.fromisoformat(normalized_core["experiment_date"])
+            if normalized_core["experiment_date"]
+            else None
+        ),
+        experiment_number=normalized_core["experiment_number"] or None,
         highlight_color=payload.highlight_color,
     )
     try:
         session.add(record)
         session.flush()
-        replace_record_values(session, record, payload.values)
+        replace_record_values(
+            session,
+            record,
+            payload.values,
+            include_required_missing=True,
+        )
         audit(
             session,
             "record.create",
@@ -303,12 +708,15 @@ def update_record(
         "experiment_number": record.experiment_number,
         "highlight_color": record.highlight_color,
     }
+    core_changes: dict[str, object] = {}
     if payload.pathology_number is not None:
-        record.pathology_number = payload.pathology_number
+        core_changes["pathology_number"] = payload.pathology_number
     if payload.status is not None:
-        record.status = payload.status
+        core_changes["status"] = payload.status
     if "experiment_date" in payload.model_fields_set:
-        record.experiment_date = payload.experiment_date
+        core_changes["experiment_date"] = (
+            payload.experiment_date.isoformat() if payload.experiment_date else ""
+        )
     if "experiment_number" in payload.model_fields_set:
         existing = session.scalar(
             select(ProjectRecord).where(
@@ -319,7 +727,20 @@ def update_record(
         ) if payload.experiment_number else None
         if existing:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="实验编号已存在")
-        record.experiment_number = payload.experiment_number or None
+        core_changes["experiment_number"] = payload.experiment_number or ""
+    normalized_core = validate_core_record_values(session, record.project_id, core_changes)
+    if "pathology_number" in normalized_core:
+        record.pathology_number = normalized_core["pathology_number"]
+    if "status" in normalized_core:
+        record.status = normalized_core["status"]
+    if "experiment_date" in normalized_core:
+        record.experiment_date = (
+            date.fromisoformat(normalized_core["experiment_date"])
+            if normalized_core["experiment_date"]
+            else None
+        )
+    if "experiment_number" in normalized_core:
+        record.experiment_number = normalized_core["experiment_number"] or None
     if "highlight_color" in payload.model_fields_set:
         record.highlight_color = payload.highlight_color
     if payload.values is not None:

@@ -3,6 +3,7 @@ backend/.venv/
 backend/.uv-cache/
 backend/**/__pycache__/
 backend/.pytest_cache/
+backend/.test-runtime/
 backend/.ruff_cache/
 backend/*.egg-info/
 *.py[cod]

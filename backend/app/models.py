@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -51,6 +52,12 @@ class Project(Base, TimestampMixin):
     )
     records: Mapped[list[ProjectRecord]] = relationship(back_populates="project")
     report_templates: Mapped[list[ReportTemplate]] = relationship(back_populates="project")
+    view_presets: Mapped[list[LedgerViewPreset]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="LedgerViewPreset.name",
+    )
 
 
 class LedgerTemplate(Base, TimestampMixin):
@@ -68,6 +75,33 @@ class LedgerTemplate(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     description: Mapped[str] = mapped_column(String(500), default="", nullable=False)
     fields: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+
+
+class LedgerViewPreset(Base, TimestampMixin):
+    """A project-scoped, named presentation of the ledger table."""
+
+    __tablename__ = "ledger_view_presets"
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_ledger_view_preset_project_name"),
+        Index(
+            "uq_ledger_view_preset_project_default",
+            "project_id",
+            unique=True,
+            sqlite_where=text("is_default = 1"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    state: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    project: Mapped[Project] = relationship(back_populates="view_presets")
 
 
 class FieldDefinition(Base, TimestampMixin):
@@ -91,6 +125,10 @@ class FieldDefinition(Base, TimestampMixin):
     hidden: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     width: Mapped[int] = mapped_column(Integer, default=120, nullable=False)
+    validation_mode: Mapped[str] = mapped_column(
+        String(24), default="suggestion", nullable=False
+    )
+    validation_rules: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
     project: Mapped[Project] = relationship(back_populates="fields")
     options: Mapped[list[FieldOption]] = relationship(

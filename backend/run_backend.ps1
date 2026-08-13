@@ -23,6 +23,7 @@ $env:UV_CACHE_DIR = Join-Path $BackendRoot ".uv-cache"
 $VirtualEnv = Join-Path $BackendRoot ".venv"
 $Alembic = Join-Path $VirtualEnv "Scripts\alembic.exe"
 $Uvicorn = Join-Path $VirtualEnv "Scripts\uvicorn.exe"
+$Python = Join-Path $VirtualEnv "Scripts\python.exe"
 
 if (-not (Test-Path -LiteralPath $Uvicorn)) {
     uv sync --dev
@@ -57,5 +58,6 @@ if ($NeedsFrontendBuild) {
     Set-Location -LiteralPath $BackendRoot
 }
 
+& $Python -c "from app.config import Settings; from app.database import Database; db=Database(Settings().database_url or ''); db.backup_sqlite_before_schema_upgrade(); db.dispose()"
 & $Alembic upgrade head
 & $Uvicorn app.main:app --host 127.0.0.1 --port 8000

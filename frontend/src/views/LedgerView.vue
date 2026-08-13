@@ -52,23 +52,39 @@ import {
   deleteRecord,
   executeBulkDelete,
   getRecord,
+  getRecordsByIds,
   previewBulkDelete,
+  commitCellBatch,
+  commitReplace,
   listRecords,
+  previewCellBatch,
+  previewReplace,
+  queryRecordIds,
+  queryRecords,
   setRecordLock,
   setCellsHighlight,
   setRecordsHighlight,
   setRecordsReportGenerated,
   updateRecord,
+  validateNewRecord,
 } from "@/api/records";
 import type { RecordSearchScope } from "@/api/records";
 import EditableChoiceInput from "@/components/EditableChoiceInput.vue";
 import EditableDateInput from "@/components/EditableDateInput.vue";
 import LedgerTemplateManager from "@/components/LedgerTemplateManager.vue";
 import ProjectFieldManager from "@/components/ProjectFieldManager.vue";
-import { updateField } from "@/api/projects";
+import {
+  createLedgerViewPreset,
+  deleteLedgerViewPreset,
+  listLedgerViewPresets,
+  setDefaultLedgerViewPreset,
+  updateField,
+  updateLedgerViewPreset,
+} from "@/api/projects";
 import { useAppStore } from "@/stores/app";
 import {
   cloneLedgerRecord,
+  createLedgerCellHistoryEntry,
   createLedgerHistoryEntry,
   useLedgerHistory,
   type LedgerHistoryEntry,
@@ -81,11 +97,19 @@ import type {
   ProjectRecord,
   RecordStatus,
   RecordUpdateInput,
-  WorkbookImportRow,
   NativePreviewAction,
   NativePreviewTask,
   PreviewCapabilities,
   PrintEngine,
+  LedgerViewPreset,
+  LedgerViewState,
+  RecordCellBatchCommitResult,
+  RecordBatchNewRecord,
+  RecordCellChange,
+  RecordComplexQuery,
+  RecordFieldFilter,
+  RecordReplacePreview,
+  RecordValidationIssue,
 } from "@/types/api";
 import { formatShanghaiDateTime } from "@/utils/datetime";
 import {
@@ -95,6 +119,7 @@ import {
   type LedgerFilterMap,
   type LedgerSortState,
 } from "@/utils/ledgerTableView";
+import { summarizeLedgerSelection } from "@/utils/ledgerSelectionStats";
 import { exportWorkbook } from "@/utils/workbook";
 
 const route = useRoute();
@@ -211,9 +236,54 @@ let bottomScrollTimers: number[] = [];
 const loading = ref(false);
 const historyReplayLoading = ref(false);
 const savingIds = ref(new Set<string>());
+type CellSaveStatus = "dirty" | "saving" | "saved" | "error";
+type CellSaveState = { status: CellSaveStatus; message?: string };
+const cellSaveStatusLabels: Record<CellSaveStatus | "idle", string> = {
+  dirty: "未保存",
+  saving: "保存中",
+  saved: "已保存",
+  error: "失败",
+  idle: "无改动",
+};
+const cellSaveStates = ref(new Map<string, CellSaveState>());
+const cellSaveVersions = new Map<string, number>();
+const recordSaveQueues = new Map<string, Promise<unknown>>();
 const fieldErrors = ref<Record<string, string>>({});
 const managerVisible = ref(false);
 const templateManagerVisible = ref(false);
+const quickEntryVisible = ref(false);
+const quickEntrySaving = ref(false);
+const quickEntryValues = reactive<Record<string, string>>({});
+const quickEntryPathologyRef = ref<{ focus?: () => void } | null>(null);
+const viewPresets = ref<LedgerViewPreset[]>([]);
+const activeViewPresetId = ref("");
+const activeViewState = ref<LedgerViewState | null>(null);
+const viewBusy = ref(false);
+const viewColumnsVisible = ref(false);
+const findReplaceVisible = ref(false);
+const findReplaceLoading = ref(false);
+const findReplacePreview = ref<RecordReplacePreview | null>(null);
+const findReplaceForm = reactive({
+  fieldId: "",
+  find: "",
+  replacement: "",
+  matchMode: "substring" as "substring" | "whole",
+  caseSensitive: false,
+});
+type ValidationPanelState = {
+  token: string;
+  projectId: string;
+  label: string;
+  issues: RecordValidationIssue[];
+  affectedCount: number;
+  skippedLocked: number;
+  cellKeys: string[];
+  cellVersions: Record<string, number>;
+  canContinue: boolean;
+};
+const validationPanel = ref<ValidationPanelState | null>(null);
+const validationCommitLoading = ref(false);
+let pendingValidationAction: (() => Promise<void>) | null = null;
 const previewScope = ref<"selection" | "all">("all");
 const previewEngine = ref<PrintEngine>("auto");
 const previewCapabilities = ref<PreviewCapabilities | null>(null);
@@ -394,6 +464,13 @@ const highlightPalette = [
 const persistedValues = new Map<string, string>();
 let draftSequence = 0;
 let loadSequence = 0;
+let viewLoadSequence = 0;
+let recordsAbortController: AbortController | null = null;
+const currentPage = ref(1);
+const pageSize = 200;
+const recordTotal = ref(0);
+const selectedRecordIds = ref(new Set<string>());
+const selectedRecordCache = new Map<string, ProjectRecord>();
 let ledgerInitialized = false;
 let projectLoadPromise: Promise<void> | null = null;
 
@@ -404,13 +481,37 @@ const currentProject = computed(() => appStore.projectById(activeProjectId.value
 // response arrives.
 const tableProjectId = ref("");
 const tableProject = computed(() => appStore.projectById(tableProjectId.value));
-const fields = computed(() =>
-  (tableProject.value?.fields ?? [])
-    .filter((field) => !field.hidden)
-    .slice()
-    .sort((a, b) => a.sort_order - b.sort_order),
-);
-const selectedCount = computed(() => selectedRecords.value.length);
+const fields = computed(() => {
+  const projectFields = (tableProject.value?.fields ?? []).slice();
+  const state = activeViewState.value;
+  if (!state) {
+    return projectFields
+      .filter((field) => !field.hidden)
+      .sort((a, b) => a.sort_order - b.sort_order);
+  }
+  const byId = new Map(projectFields.map((field) => [field.id, field]));
+  const result: FieldDefinition[] = [];
+  const seen = new Set<string>();
+  state.columns.forEach((column) => {
+    const field = byId.get(column.field_id);
+    if (!field || seen.has(field.id)) return;
+    seen.add(field.id);
+    if (column.hidden) return;
+    result.push({ ...field, width: column.width });
+  });
+  projectFields
+    .filter((field) => !seen.has(field.id) && !field.hidden)
+    .sort((a, b) => a.sort_order - b.sort_order)
+    .forEach((field) => result.push(field));
+  return result;
+});
+const frozenFieldIds = computed(() => {
+  const fieldId = activeViewState.value?.frozen_until_field_id;
+  if (!fieldId) return new Set<string>();
+  const end = fields.value.findIndex((field) => field.id === fieldId);
+  return new Set(fields.value.slice(0, end + 1).map((field) => field.id));
+});
+const selectedCount = computed(() => selectedRecordIds.value.size);
 const baseTableRows = computed<LedgerRow[]>(() => [...records.value, ...draftRows.value]);
 const tableRows = computed<LedgerRow[]>(() =>
   applyLedgerTableView(baseTableRows.value, fields.value, ledgerSort.value, ledgerFilters.value),
@@ -531,6 +632,8 @@ function clearSelectionsAfterLedgerViewChange(): void {
   activeGridCell.value = null;
   clearGridCellSelection();
   selectedRecords.value = [];
+  selectedRecordIds.value = new Set();
+  selectedRecordCache.clear();
   tableRef.value?.clearSelection();
 }
 
@@ -624,6 +727,11 @@ function setLedgerSort(field: FieldDefinition, order: "ascending" | "descending"
   const scrollPosition = captureLedgerTableScroll();
   ledgerSort.value = order ? { fieldId: field.id, order } : null;
   closeColumnTools();
+  currentPage.value = 1;
+  if (!draftRows.value.length) {
+    void loadRecords(activeProjectId.value, { preserveHistory: true });
+    return;
+  }
   void (async () => {
     await restoreGridFocusAfterLedgerViewChange(activeIdentity, anchorIdentity);
     await nextTick();
@@ -662,6 +770,8 @@ function applyColumnFilter(): void {
   ledgerFilters.value = nextFilters;
   clearSelectionsAfterLedgerViewChange();
   closeColumnTools();
+  currentPage.value = 1;
+  void loadRecords(activeProjectId.value, { preserveHistory: true });
 }
 
 function clearColumnFilter(): void {
@@ -673,6 +783,8 @@ function clearColumnFilter(): void {
   ledgerFilters.value = nextFilters;
   clearSelectionsAfterLedgerViewChange();
   closeColumnTools();
+  currentPage.value = 1;
+  void loadRecords(activeProjectId.value, { preserveHistory: true });
 }
 
 function gridCellFromElement(element: EventTarget | null): GridCellPosition | null {
@@ -1084,11 +1196,22 @@ async function finishGridCellEdit(commit = true, focusAfter = true): Promise<boo
     }
 
     if (!commit) {
-      setValue(data.record, data.field, snapshot.value);
+      setValue(data.record, data.field, snapshot.value, { markDirty: false });
+      cellSaveStates.value.delete(persistedKey(data.record.id, data.field.id));
+      cellSaveStates.value = new Map(cellSaveStates.value);
       clearFieldError(data.record, data.field);
     } else {
-      await saveField(data.record, data.field);
-      if (fieldErrorFor(data.record, data.field)) return false;
+      const changedBeforeSave =
+        !isDraft(data.record) &&
+        valueFor(data.record, data.field) !==
+          (persistedValues.get(persistedKey(data.record.id, data.field.id)) ?? "");
+      const draftPathologySave =
+        isDraft(data.record) && data.field.system_key === "pathology_number";
+      const saved = await saveField(data.record, data.field);
+      if (
+        fieldErrorFor(data.record, data.field) ||
+        ((changedBeforeSave || draftPathologySave) && !saved)
+      ) return false;
     }
 
     editingGridCell.value = null;
@@ -1707,6 +1830,66 @@ function handleGridDoubleClick(event: MouseEvent): void {
   enterGridCellEdit(cell);
 }
 
+function selectedRangeOrActive(cell: GridCellPosition): NormalizedGridRange {
+  if (gridCellRange.value) return normalizedGridRange(gridCellRange.value);
+  const positions = selectedGridCellPositions();
+  if (!positions.length) {
+    return {
+      rowStart: cell.rowIndex,
+      rowEnd: cell.rowIndex,
+      columnStart: cell.columnIndex,
+      columnEnd: cell.columnIndex,
+    };
+  }
+  return {
+    rowStart: Math.min(...positions.map((position) => position.rowIndex)),
+    rowEnd: Math.max(...positions.map((position) => position.rowIndex)),
+    columnStart: Math.min(...positions.map((position) => position.columnIndex)),
+    columnEnd: Math.max(...positions.map((position) => position.columnIndex)),
+  };
+}
+
+function runGridShortcutFill(
+  cell: GridCellPosition,
+  mode: "same" | "down" | "right" | "today",
+): void {
+  const range = selectedRangeOrActive(cell);
+  const entries: GridPasteEntry[] = [];
+  for (let rowIndex = range.rowStart; rowIndex <= range.rowEnd; rowIndex += 1) {
+    for (let columnIndex = range.columnStart; columnIndex <= range.columnEnd; columnIndex += 1) {
+      let value = "";
+      if (mode === "today") {
+        const field = fields.value[columnIndex];
+        if (!field || (field.data_type !== "date" && field.system_key !== "experiment_date")) continue;
+        const now = new Date();
+        value = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+      } else if (mode === "down") {
+        const source = gridCellData({ rowIndex: range.rowStart, columnIndex });
+        if (!source || rowIndex === range.rowStart) continue;
+        value = valueFor(source.record, source.field);
+      } else if (mode === "right") {
+        const source = gridCellData({ rowIndex, columnIndex: range.columnStart });
+        if (!source || columnIndex === range.columnStart) continue;
+        value = valueFor(source.record, source.field);
+      } else {
+        const source = gridCellData(cell);
+        if (!source) continue;
+        value = valueFor(source.record, source.field);
+      }
+      entries.push({
+        rowOffset: rowIndex - range.rowStart,
+        columnOffset: columnIndex - range.columnStart,
+        value,
+      });
+    }
+  }
+  if (!entries.length) {
+    ElMessage.info(mode === "today" ? "当前选区没有日期表头" : "当前选区没有可填充单元格");
+    return;
+  }
+  void pasteGrid(null, range.rowStart, range.columnStart, entries, undefined, "快捷填充");
+}
+
 function handleGridKeydown(event: KeyboardEvent): void {
   if (event.isComposing) return;
   const undoModifier = event.ctrlKey || event.metaKey;
@@ -1733,6 +1916,33 @@ function handleGridKeydown(event: KeyboardEvent): void {
   const cell = gridCellFromElement(event.target);
   if (!cell) return;
   activeGridCell.value = cell;
+
+  if ((event.ctrlKey || event.metaKey) && !event.altKey) {
+    const key = event.key.toLowerCase();
+    const shortcutMode =
+      event.key === "Enter"
+        ? "same"
+        : key === "d"
+          ? "down"
+          : key === "r"
+            ? "right"
+            : event.key === ";"
+              ? "today"
+              : null;
+    if (shortcutMode) {
+      event.preventDefault();
+      event.stopPropagation();
+      const run = () => runGridShortcutFill(cell, shortcutMode);
+      if (isGridCellEditing(cell)) {
+        void finishGridCellEdit(true, false).then((saved) => {
+          if (saved) run();
+        });
+      } else {
+        run();
+      }
+      return;
+    }
+  }
 
   if (isGridCellEditing(cell)) {
     if (event.key === "Escape") {
@@ -2124,11 +2334,9 @@ async function contextToggleLock(): Promise<void> {
 async function clearGridCellRange(): Promise<void> {
   const positions = selectedGridCellPositions();
   if (!positions.length) return;
-  let cleared = 0;
   let skippedLocked = 0;
   let skippedRequired = 0;
-  const beforeById = new Map<string, ProjectRecord>();
-  const changedIds = new Set<string>();
+  const eligible: GridCellPosition[] = [];
   for (const { rowIndex, columnIndex } of positions) {
     const record = tableRows.value[rowIndex];
     const field = fields.value[columnIndex];
@@ -2142,24 +2350,22 @@ async function clearGridCellRange(): Promise<void> {
       continue;
     }
     if (!valueFor(record, field)) continue;
-    if (!isDraft(record) && !beforeById.has(record.id)) {
-      beforeById.set(record.id, snapshotRecord(record));
-    }
-    setValue(record, field, "");
-    const saved = await saveField(record, field, { recordHistory: false });
-    if (saved) {
-      changedIds.add(record.id);
-      cleared += 1;
-    }
+    eligible.push({ rowIndex, columnIndex });
   }
-  if (changedIds.size) {
-    pushHistory(
-      "清空单元格",
-      [...changedIds].map((id) => beforeById.get(id)).filter((record): record is ProjectRecord => Boolean(record)),
-      records.value
-        .filter((record) => changedIds.has(record.id))
-        .map(snapshotRecord),
-      activeProjectId.value,
+  if (eligible.length) {
+    const rowStart = Math.min(...eligible.map((position) => position.rowIndex));
+    const columnStart = Math.min(...eligible.map((position) => position.columnIndex));
+    await pasteGrid(
+      null,
+      rowStart,
+      columnStart,
+      eligible.map((position) => ({
+        rowOffset: position.rowIndex - rowStart,
+        columnOffset: position.columnIndex - columnStart,
+        value: "",
+      })),
+      undefined,
+      "清空",
     );
   }
   const currentActive = activeGridCell.value;
@@ -2174,7 +2380,6 @@ async function clearGridCellRange(): Promise<void> {
     ? { anchor: { ...active }, focus: { ...active } }
     : null;
   void focusGridCell(active);
-  if (cleared) ElMessage.success(`已清空 ${cleared} 个单元格`);
   if (skippedLocked) ElMessage.info(`已跳过 ${skippedLocked} 个锁定单元格`);
   if (skippedRequired) ElMessage.info(`已跳过 ${skippedRequired} 个必填状态单元格`);
 }
@@ -2490,7 +2695,12 @@ function scrollToFocusedRecord(): void {
   });
 }
 
-function setValue(record: ProjectRecord, field: FieldDefinition, value: string): void {
+function setValue(
+  record: ProjectRecord,
+  field: FieldDefinition,
+  value: string,
+  options: { markDirty?: boolean } = {},
+): void {
   if (field.system_key === "pathology_number") {
     record.pathology_number = value;
   } else if (field.system_key === "experiment_date") {
@@ -2503,10 +2713,41 @@ function setValue(record: ProjectRecord, field: FieldDefinition, value: string):
     record.values[field.id] = value;
   }
   clearFieldError(record, field);
+  if (options.markDirty ?? true) {
+    const key = persistedKey(record.id, field.id);
+    cellSaveVersions.set(key, (cellSaveVersions.get(key) ?? 0) + 1);
+    if (validationPanel.value?.cellKeys.includes(key)) dismissValidationPanel();
+    if (isDraft(record) && pendingValidationAction && validationPanel.value?.label === "新增台账记录") {
+      dismissValidationPanel();
+    }
+  }
+  if ((options.markDirty ?? true) && !isDraft(record)) {
+    setCellSaveState(record.id, field.id, { status: "dirty" });
+  }
 }
 
 function persistedKey(recordId: string, fieldId: string): string {
   return `${recordId}:${fieldId}`;
+}
+
+function setCellSaveState(recordId: string, fieldId: string, state: CellSaveState): void {
+  const next = new Map(cellSaveStates.value);
+  next.set(persistedKey(recordId, fieldId), state);
+  cellSaveStates.value = next;
+}
+
+function cellSaveStateFor(record: LedgerRow, field: FieldDefinition): CellSaveState | null {
+  return cellSaveStates.value.get(persistedKey(record.id, field.id)) ?? null;
+}
+
+function enqueueRecordSave<T>(recordId: string, task: () => Promise<T>): Promise<T> {
+  const previous = recordSaveQueues.get(recordId) ?? Promise.resolve();
+  const current = previous.catch(() => undefined).then(task);
+  recordSaveQueues.set(recordId, current);
+  void current.finally(() => {
+    if (recordSaveQueues.get(recordId) === current) recordSaveQueues.delete(recordId);
+  });
+  return current;
 }
 
 function fieldErrorFor(record: LedgerRow, field: FieldDefinition): string {
@@ -2600,10 +2841,50 @@ function replaceRecord(updated: ProjectRecord): void {
   const selectedIndex = selectedRecords.value.findIndex((record) => record.id === updated.id);
   if (selectedIndex >= 0) selectedRecords.value.splice(selectedIndex, 1, updated);
   rememberRecord(updated);
+  if (selectedRecordIds.value.has(updated.id)) selectedRecordCache.set(updated.id, updated);
+}
+
+function replaceRecordPreservingPending(
+  updated: ProjectRecord,
+  completedKeys: string | Set<string>,
+): void {
+  const completed =
+    typeof completedKeys === "string" ? new Set([completedKeys]) : completedKeys;
+  const current = records.value.find((record) => record.id === updated.id);
+  rememberRecord(updated);
+  if (!current) {
+    replaceRecord(updated);
+    return;
+  }
+  const merged = cloneLedgerRecord(updated);
+  fields.value.forEach((field) => {
+    const key = persistedKey(updated.id, field.id);
+    if (completed.has(key)) return;
+    const status = cellSaveStates.value.get(key)?.status;
+    if (status === "dirty" || status === "saving" || status === "error") {
+      setValue(merged, field, valueFor(current, field), { markDirty: false });
+    }
+  });
+  const index = records.value.findIndex((record) => record.id === updated.id);
+  if (index >= 0) records.value.splice(index, 1, merged);
+  const selectedIndex = selectedRecords.value.findIndex((record) => record.id === updated.id);
+  if (selectedIndex >= 0) selectedRecords.value.splice(selectedIndex, 1, merged);
+  if (selectedRecordIds.value.has(updated.id)) selectedRecordCache.set(updated.id, merged);
 }
 
 function handleTableSelectionChange(rows: ProjectRecord[]): void {
   selectedRecords.value = rows;
+  const visibleIds = new Set(records.value.map((record) => record.id));
+  const next = new Set(selectedRecordIds.value);
+  visibleIds.forEach((recordId) => next.delete(recordId));
+  visibleIds.forEach((recordId) => {
+    if (!rows.some((record) => record.id === recordId)) selectedRecordCache.delete(recordId);
+  });
+  rows.forEach((record) => {
+    next.add(record.id);
+    selectedRecordCache.set(record.id, record);
+  });
+  selectedRecordIds.value = next;
   if (rows.length) {
     activeGridCell.value = null;
     clearGridCellSelection();
@@ -2624,6 +2905,26 @@ function pushHistory(
   ledgerHistory.push(createLedgerHistoryEntry(projectId, label, before, after));
 }
 
+function pushCellHistory(
+  label: string,
+  changes: RecordCellBatchCommitResult["changes"],
+  projectId = activeProjectId.value,
+): void {
+  if (!projectId || !changes.length) return;
+  ledgerHistory.push(
+    createLedgerCellHistoryEntry(
+      projectId,
+      label,
+      changes.map((change) => ({
+        recordId: change.record_id,
+        fieldId: change.field_id,
+        before: change.before,
+        after: change.after,
+      })),
+    ),
+  );
+}
+
 function reconcileOperationResult(result: {
   records: ProjectRecord[];
   deleted_ids: string[];
@@ -2640,6 +2941,8 @@ function reconcileOperationResult(result: {
     return created || left.id.localeCompare(right.id);
   });
   selectedRecords.value = [];
+  selectedRecordIds.value = new Set();
+  selectedRecordCache.clear();
   activeGridCell.value = null;
   clearGridCellSelection();
   rememberAll();
@@ -2652,6 +2955,24 @@ async function replayHistoryEntry(
   historyReplayLoading.value = true;
   try {
     await ensureProjectLoaded(entry.projectId);
+    if (entry.kind === "cells") {
+      const preview = await previewCellBatch(
+        entry.projectId,
+        entry.changes.map((change) => ({
+          record_id: change.recordId,
+          field_id: change.fieldId,
+          value: direction === "undo" ? change.before : change.after,
+          expected_value: direction === "undo" ? change.after : change.before,
+        })),
+      );
+      const error = preview.issues.find((issue) => issue.severity === "error");
+      if (error) throw new Error(error.message);
+      if (preview.skipped_locked) throw new Error("撤销或恢复范围中包含锁定记录，请先解锁");
+      const result = await commitCellBatch(preview.token, true);
+      result.records.forEach(replaceRecord);
+      await loadRecords(entry.projectId, { showLoading: false, preserveHistory: true });
+      return;
+    }
     const result = await applyRecordOperation({
       operation_id: entry.operationId,
       project_id: entry.projectId,
@@ -2673,6 +2994,7 @@ async function replayHistoryEntry(
 function reconcileCommittedPaste(
   entries: Array<{ record: LedgerRow; rowNumber: number }>,
   committedIds: string[],
+  serverRecords: ProjectRecord[] = [],
 ): ProjectRecord[] | null {
   if (entries.length !== committedIds.length) return null;
   const committedDraftIds = new Set<string>();
@@ -2681,8 +3003,9 @@ function reconcileCommittedPaste(
     const committedId = committedIds[index];
     if (!committedId) return;
     if (isDraft(record)) {
-      const persistedRecord = { ...record, id: committedId } as LedgerRow;
-      delete persistedRecord._draft;
+      const serverRecord = serverRecords.find((item) => item.id === committedId);
+      const persistedRecord = serverRecord ?? ({ ...record, id: committedId } as LedgerRow);
+      if ("_draft" in persistedRecord) delete persistedRecord._draft;
       records.value.push(persistedRecord as ProjectRecord);
       committedRecords.push(persistedRecord as ProjectRecord);
       committedDraftIds.add(record.id);
@@ -2693,6 +3016,7 @@ function reconcileCommittedPaste(
   });
   if (committedDraftIds.size) {
     draftRows.value = draftRows.value.filter((row) => !committedDraftIds.has(row.id));
+    recordTotal.value += committedDraftIds.size;
   }
   rememberAll();
   return committedRecords;
@@ -2726,23 +3050,39 @@ async function persistDraft(record: LedgerRow, notify = true): Promise<boolean> 
     fields.value.forEach((field) => {
       if (!field.is_core) values[field.id] = (record.values[field.id] ?? "").trim();
     });
-    const created = await createRecord({
+    const payload = {
       project_id: projectId,
       pathology_number: pathologyNumber,
       status: record.status,
       experiment_date: experimentDate || null,
       experiment_number: record.experiment_number?.trim() || null,
       values,
-    });
-    const draftIndex = draftRows.value.findIndex((item) => item.id === record.id);
-    if (draftIndex >= 0) draftRows.value.splice(draftIndex, 1);
-    if (activeProjectId.value === projectId) {
-      records.value.push(created);
-      rememberRecord(created);
-      scrollTableToBottom();
+    };
+    const validation = await validateNewRecord(payload);
+    const errors = validation.issues.filter((issue) => issue.severity === "error");
+    const warnings = validation.issues.filter((issue) => issue.severity === "warning");
+    if (errors.length || warnings.length) {
+      pendingValidationAction = errors.length
+        ? null
+        : async () => {
+            const created = await createRecord(payload);
+            finishPersistedDraft(record, created, projectId, notify);
+          };
+      validationPanel.value = {
+        token: "",
+        projectId,
+        label: "新增台账记录",
+        issues: validation.issues,
+        affectedCount: 1,
+        skippedLocked: 0,
+        cellKeys: [],
+        cellVersions: {},
+        canContinue: !errors.length,
+      };
+      return false;
     }
-    pushHistory("新增台账记录", [], [created], projectId);
-    if (notify) ElMessage.success("病理号已自动保存，记录已加入表格底部");
+    const created = await createRecord(payload);
+    finishPersistedDraft(record, created, projectId, notify);
     return true;
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "记录自动保存失败");
@@ -2750,6 +3090,24 @@ async function persistDraft(record: LedgerRow, notify = true): Promise<boolean> 
   } finally {
     setSaving(record.id, false);
   }
+}
+
+function finishPersistedDraft(
+  record: LedgerRow,
+  created: ProjectRecord,
+  projectId: string,
+  notify: boolean,
+): void {
+    const draftIndex = draftRows.value.findIndex((item) => item.id === record.id);
+    if (draftIndex >= 0) draftRows.value.splice(draftIndex, 1);
+    if (activeProjectId.value === projectId) {
+      records.value.push(created);
+      recordTotal.value += 1;
+      rememberRecord(created);
+      scrollTableToBottom();
+    }
+    pushHistory("新增台账记录", [], [created], projectId);
+    if (notify) ElMessage.success("病理号已自动保存，记录已加入表格底部");
 }
 
 async function saveField(
@@ -2780,18 +3138,18 @@ async function saveField(
   }
   if (record.locked) return false;
   const key = persistedKey(record.id, field.id);
-  const before = persistedValues.get(key) ?? "";
+  if (validationPanel.value?.cellKeys.includes(key)) {
+    validationPanel.value = null;
+    pendingValidationAction = null;
+  }
+  const initialBefore = persistedValues.get(key) ?? "";
   const current = valueFor(record, field);
-  if (current === before) {
+  if (current === initialBefore) {
     clearFieldError(record, field);
     return false;
   }
-  const beforeRecord = snapshotRecord(record);
-  setValue(beforeRecord, field, before);
-
-  let payload: RecordUpdateInput;
   try {
-    payload = payloadForField(record, field, current);
+    payloadForField(record, field, current);
     clearFieldError(record, field);
   } catch (error) {
     if (field.system_key === "experiment_date") {
@@ -2801,23 +3159,84 @@ async function saveField(
         error instanceof Error ? error.message : "日期格式无效",
       );
     } else {
-      setValue(record, field, before);
+        setValue(record, field, initialBefore, { markDirty: false });
+      setCellSaveState(record.id, field.id, {
+        status: "error",
+        message: error instanceof Error ? error.message : "单元格保存失败",
+      });
       ElMessage.error(error instanceof Error ? error.message : "单元格保存失败");
     }
     return false;
   }
 
+  const version = (cellSaveVersions.get(key) ?? 0) + 1;
+  cellSaveVersions.set(key, version);
+  setCellSaveState(record.id, field.id, { status: "saving" });
   setSaving(record.id, true);
   try {
-    const updated = await updateRecord(record.id, payload);
-    replaceRecord(updated);
-    if (recordHistory) {
-      pushHistory(`编辑 ${field.label}`, [beforeRecord], [updated], updated.project_id);
+    const result = await enqueueRecordSave(record.id, async () => {
+      const expectedValue = persistedValues.get(key) ?? initialBefore;
+      const preview = await previewCellBatch(record.project_id, [
+        {
+          record_id: record.id,
+          field_id: field.id,
+          value: current,
+          expected_value: expectedValue,
+        },
+      ]);
+      const errors = preview.issues.filter((issue) => issue.severity === "error");
+      const warnings = preview.issues.filter((issue) => issue.severity === "warning");
+      if (errors.length || warnings.length) {
+        validationPanel.value = {
+          token: preview.token,
+          projectId: record.project_id,
+          label: `编辑 ${field.label}`,
+          issues: preview.issues,
+          affectedCount: preview.affected_count,
+          skippedLocked: preview.skipped_locked,
+          cellKeys: [key],
+          cellVersions: { [key]: version },
+          canContinue: !errors.length,
+        };
+        throw new Error(errors[0]?.message ?? "存在警告，请在验证面板中确认后继续");
+      }
+      if (preview.issues.length) {
+        validationPanel.value = {
+          token: "",
+          projectId: record.project_id,
+          label: `编辑 ${field.label}`,
+          issues: preview.issues,
+          affectedCount: preview.affected_count,
+          skippedLocked: preview.skipped_locked,
+          cellKeys: [key],
+          cellVersions: { [key]: version },
+          canContinue: false,
+        };
+      }
+      const committed = await commitCellBatch(preview.token);
+      const currentVersion = cellSaveVersions.get(key) === version;
+      committed.records.forEach((updated) =>
+        replaceRecordPreservingPending(updated, currentVersion ? key : new Set<string>()),
+      );
+      return committed;
+    });
+    if (cellSaveVersions.get(key) === version) {
+      setCellSaveState(record.id, field.id, { status: "saved" });
+      if (recordHistory) {
+        pushCellHistory(`编辑 ${field.label}`, result.changes, record.project_id);
+      }
     }
     return true;
   } catch (error) {
-    setValue(record, field, before);
-    ElMessage.error(error instanceof Error ? error.message : "单元格保存失败");
+    if (cellSaveVersions.get(key) === version) {
+      setCellSaveState(record.id, field.id, {
+        status: "error",
+        message: error instanceof Error ? error.message : "单元格保存失败",
+      });
+    }
+    if (!validationPanel.value?.token) {
+      ElMessage.error(error instanceof Error ? error.message : "单元格保存失败");
+    }
     return false;
   } finally {
     setSaving(record.id, false);
@@ -2832,6 +3251,54 @@ async function loadLedgerDisplaySettings(): Promise<void> {
   } catch (error) {
     ElMessage.warning(error instanceof Error ? error.message : "台账显示设置读取失败");
   }
+}
+
+async function continueValidationCommit(): Promise<void> {
+  const panel = validationPanel.value;
+  if (!panel?.canContinue) return;
+  if (panel.projectId !== activeProjectId.value) {
+    dismissValidationPanel();
+    ElMessage.warning("项目已切换，请重新执行该操作");
+    return;
+  }
+  const staleCell = Object.entries(panel.cellVersions).some(
+    ([key, version]) => (cellSaveVersions.get(key) ?? 0) !== version,
+  );
+  if (staleCell) {
+    dismissValidationPanel();
+    ElMessage.warning("单元格内容已变化，请重新执行并预检查");
+    return;
+  }
+  validationCommitLoading.value = true;
+  try {
+    if (pendingValidationAction) {
+      const action = pendingValidationAction;
+      pendingValidationAction = null;
+      await action();
+      validationPanel.value = null;
+      return;
+    }
+    if (!panel.token) return;
+    const result = await commitCellBatch(panel.token, true);
+    const completedKeys = new Set(panel.cellKeys);
+    result.records.forEach((record) => replaceRecordPreservingPending(record, completedKeys));
+    panel.cellKeys.forEach((key) => {
+      const [recordId = "", fieldId = ""] = key.split(":");
+      if (recordId && fieldId) setCellSaveState(recordId, fieldId, { status: "saved" });
+    });
+    pushCellHistory(panel.label, result.changes, panel.projectId);
+    validationPanel.value = null;
+    ElMessage.success(`已保存 ${new Set(result.changes.map((change) => change.record_id)).size} 条记录`);
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "批量保存失败");
+  } finally {
+    validationCommitLoading.value = false;
+  }
+}
+
+function dismissValidationPanel(): void {
+  pendingValidationAction = null;
+  validationPanel.value = null;
 }
 
 async function loadPreviewEngineSetting(): Promise<void> {
@@ -2985,7 +3452,7 @@ async function redoLedger(): Promise<void> {
 
 async function loadRecords(
   projectId = activeProjectId.value,
-  options: { showLoading?: boolean; preserveHistory?: boolean } = {},
+  options: { showLoading?: boolean; preserveHistory?: boolean; preserveSelection?: boolean } = {},
 ): Promise<void> {
   if (!options.preserveHistory) ledgerHistory.clear();
   const isGlobalScope = appliedSearch.scope !== "current";
@@ -2997,27 +3464,36 @@ async function loadRecords(
   }
   const showLoading = options.showLoading ?? true;
   const requestSequence = ++loadSequence;
+  recordsAbortController?.abort();
+  const controller = new AbortController();
+  recordsAbortController = controller;
   if (showLoading) loading.value = true;
   try {
-    const loaded: ProjectRecord[] = [];
-    let offset = 0;
+    let loaded: ProjectRecord[] = [];
     let total = 0;
-    while (true) {
-      const page = await listRecords({
-        scope: appliedSearch.scope,
-        project_id: isGlobalScope ? undefined : projectId,
-        project_ids:
-          appliedSearch.scope === "selected" ? [...appliedSearch.projectIds] : undefined,
-        status: appliedSearch.status || undefined,
-        search: appliedSearch.text || undefined,
-        experiment_date: appliedSearch.date || undefined,
-        limit: 1000,
-        offset,
-      });
+    if (isGlobalScope) {
+      let offset = 0;
+      while (true) {
+        const page = await listRecords({
+          scope: appliedSearch.scope,
+          project_id: undefined,
+          project_ids:
+            appliedSearch.scope === "selected" ? [...appliedSearch.projectIds] : undefined,
+          status: appliedSearch.status || undefined,
+          search: appliedSearch.text || undefined,
+          experiment_date: appliedSearch.date || undefined,
+          limit: 1000,
+          offset,
+        }, controller.signal);
+        total = page.total;
+        loaded.push(...page.items);
+        offset += page.items.length;
+        if (!page.items.length || offset >= page.total) break;
+      }
+    } else {
+      const page = await queryRecords(buildRecordQuery(projectId), controller.signal);
       total = page.total;
-      loaded.push(...page.items);
-      offset += page.items.length;
-      if (offset >= page.total || page.items.length === 0) break;
+      loaded = page.items;
     }
     if (requestSequence !== loadSequence || projectId !== activeProjectId.value) return;
     if (isGlobalScope) {
@@ -3028,6 +3504,7 @@ async function loadRecords(
       persistedValues.clear();
     } else {
       records.value = loaded;
+      recordTotal.value = total;
       globalSearchResults.value = [];
       globalSearchTotal.value = 0;
       tableProjectId.value = projectId;
@@ -3035,16 +3512,111 @@ async function loadRecords(
     activeGridCell.value = null;
     clearGridCellSelection();
     fieldErrors.value = {};
+    cellSaveStates.value = new Map();
     selectedRecords.value = [];
+    if (!options.preserveSelection) {
+      selectedRecordIds.value = new Set();
+      selectedRecordCache.clear();
+    }
     if (!isGlobalScope) rememberAll();
     await nextTick();
     tableRef.value?.doLayout();
+    if (!isGlobalScope && options.preserveSelection && selectedRecordIds.value.size) {
+      records.value.forEach((record) => {
+        if (selectedRecordIds.value.has(record.id)) {
+          selectedRecordCache.set(record.id, record);
+          tableRef.value?.toggleRowSelection(record, true);
+        }
+      });
+    }
     if (!isGlobalScope) scrollToFocusedRecord();
   } catch (error) {
-    if (requestSequence !== loadSequence) return;
+    if (requestSequence !== loadSequence || controller.signal.aborted) return;
     ElMessage.error(error instanceof Error ? error.message : "台账读取失败");
   } finally {
-    if (requestSequence === loadSequence) loading.value = false;
+    if (requestSequence === loadSequence) {
+      loading.value = false;
+      if (recordsAbortController === controller) recordsAbortController = null;
+    }
+  }
+}
+
+function buildRecordQuery(projectId = activeProjectId.value): RecordComplexQuery {
+  const fieldFilters: RecordFieldFilter[] = [];
+  Object.entries(ledgerFilters.value).forEach(([fieldId, filter]) => {
+    if (!filter) return;
+    if (filter.kind === "text") {
+      fieldFilters.push({ field_id: fieldId, operator: "contains", value: filter.value });
+      return;
+    }
+    if (filter.kind === "options") {
+      if (filter.values.length === 1 && filter.values[0] === "") {
+        fieldFilters.push({ field_id: fieldId, operator: "is_empty" });
+        return;
+      }
+      fieldFilters.push({ field_id: fieldId, operator: "in", values: filter.values });
+      return;
+    }
+    fieldFilters.push({
+      field_id: fieldId,
+      operator: "date_between",
+      start: filter.start || null,
+      end: filter.end || null,
+    });
+  });
+  return {
+    project_id: projectId,
+    status: appliedSearch.status || null,
+    search: appliedSearch.text || null,
+    experiment_date_from: appliedSearch.date || null,
+    experiment_date_to: appliedSearch.date || null,
+    field_filters: fieldFilters,
+    sort: ledgerSort.value
+      ? {
+          field_id: ledgerSort.value.fieldId,
+          direction: ledgerSort.value.order === "descending" ? "desc" : "asc",
+        }
+      : null,
+    limit: pageSize,
+    offset: (currentPage.value - 1) * pageSize,
+  };
+}
+
+function changeLedgerPage(page: number): void {
+  currentPage.value = page;
+  activeGridCell.value = null;
+  clearGridCellSelection();
+  editingGridCell.value = null;
+  editingGridSnapshot.value = null;
+  void loadRecords(activeProjectId.value, { preserveHistory: true, preserveSelection: true });
+}
+
+async function selectAllFilteredRecords(): Promise<void> {
+  if (!activeProjectId.value) return;
+  loading.value = true;
+  try {
+    const result = await queryRecordIds({
+      ...buildRecordQuery(),
+      limit: 1000,
+      offset: 0,
+    });
+    selectedRecordCache.clear();
+    selectedRecordIds.value = new Set(result.record_ids);
+    tableRef.value?.clearSelection();
+    const visibleSelected: ProjectRecord[] = [];
+    records.value.forEach((record) => {
+      if (selectedRecordIds.value.has(record.id)) {
+        selectedRecordCache.set(record.id, record);
+        tableRef.value?.toggleRowSelection(record, true);
+        visibleSelected.push(record);
+      }
+    });
+    selectedRecords.value = visibleSelected;
+    ElMessage.success(`已选择全部 ${result.total} 条筛选结果`);
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "选择筛选结果失败");
+  } finally {
+    loading.value = false;
   }
 }
 
@@ -3078,6 +3650,7 @@ function applySearch(): void {
     appliedSearch.date = nextDate;
     appliedSearch.scope = searchScope.value;
     appliedSearch.projectIds = [...searchProjectIds.value];
+    currentPage.value = 1;
     void loadRecords();
   } catch (error) {
     ElMessage.warning(error instanceof Error ? error.message : "筛选日期无效");
@@ -3095,11 +3668,12 @@ function resetSearch(): void {
     scope: "current",
     projectIds: [],
   });
+  currentPage.value = 1;
   void loadRecords(activeProjectId.value);
 }
 
 function refreshRecords(): void {
-  void loadRecords(activeProjectId.value, { preserveHistory: true });
+  void loadRecords(activeProjectId.value, { preserveHistory: true, preserveSelection: true });
 }
 
 function selectProject(projectId: string): void {
@@ -3114,6 +3688,7 @@ function selectProject(projectId: string): void {
     if (wasGlobalSearch) void loadRecords(projectId, { preserveHistory: true });
     return;
   }
+  currentPage.value = 1;
   activeProjectId.value = projectId;
 }
 
@@ -3132,18 +3707,38 @@ function openGlobalSearchResult(record: ProjectRecord): void {
 
 function selectAllVisible(): void {
   const selectableRows = tableRows.value.filter((row) => !isDraft(row));
-  const selectedIds = new Set(selectedRecords.value.map((record) => record.id));
+  const selectedIds = selectedRecordIds.value;
   if (selectableRows.every((row) => selectedIds.has(row.id))) return;
-  if (selectedIds.size) tableRef.value?.clearSelection();
-  tableRef.value?.toggleAllSelection();
+  const next = new Set(selectedIds);
+  selectableRows.forEach((row) => {
+    next.add(row.id);
+    selectedRecordCache.set(row.id, row);
+    tableRef.value?.toggleRowSelection(row, true);
+  });
+  selectedRecordIds.value = next;
+  selectedRecords.value = selectableRows;
 }
 
 function invertVisibleSelection(): void {
-  const selectedIds = new Set(selectedRecords.value.map((record) => record.id));
+  const selectedIds = new Set(selectedRecordIds.value);
+  const next = new Set(selectedIds);
+  const nextVisible: ProjectRecord[] = [];
   tableRef.value?.clearSelection();
   tableRows.value.forEach((row) => {
-    if (!isDraft(row)) tableRef.value?.toggleRowSelection(row, !selectedIds.has(row.id));
+    if (isDraft(row)) return;
+    const selected = !selectedIds.has(row.id);
+    tableRef.value?.toggleRowSelection(row, selected);
+    if (selected) {
+      next.add(row.id);
+      nextVisible.push(row);
+      selectedRecordCache.set(row.id, row);
+    } else {
+      next.delete(row.id);
+      selectedRecordCache.delete(row.id);
+    }
   });
+  selectedRecordIds.value = next;
+  selectedRecords.value = nextVisible;
 }
 
 function selectByDateRange(): void {
@@ -3180,6 +3775,36 @@ function rowCellStyle({
     return { "--cell-highlight-color": cellColor } as CSSProperties;
   }
   return row.highlight_color ? { backgroundColor: row.highlight_color } : {};
+}
+
+async function selectedTargetRecords(): Promise<ProjectRecord[]> {
+  const recordIds = [...selectedRecordIds.value];
+  const missing = recordIds.filter(
+    (recordId) =>
+      !records.value.some((record) => record.id === recordId) && !selectedRecordCache.has(recordId),
+  );
+  if (missing.length) {
+    const fetched = await getRecordsByIds(missing);
+    fetched.forEach((record) => selectedRecordCache.set(record.id, record));
+  }
+  return recordIds
+    .map(
+      (recordId) =>
+        records.value.find((record) => record.id === recordId) ?? selectedRecordCache.get(recordId),
+    )
+    .filter((record): record is ProjectRecord => Boolean(record));
+}
+
+async function mapInChunks<T, R>(
+  values: T[],
+  worker: (value: T) => Promise<R>,
+  chunkSize = 25,
+): Promise<R[]> {
+  const result: R[] = [];
+  for (let index = 0; index < values.length; index += chunkSize) {
+    result.push(...(await Promise.all(values.slice(index, index + chunkSize).map(worker))));
+  }
+  return result;
 }
 
 function rowClassName({ row }: { row: LedgerRow }): string {
@@ -3226,7 +3851,9 @@ function openHighlightDialog(targets: ProjectRecord[]): void {
 }
 
 function openSelectedHighlightDialog(): void {
-  openHighlightDialog(selectedRecords.value);
+  void selectedTargetRecords().then(openHighlightDialog).catch((error) => {
+    ElMessage.error(error instanceof Error ? error.message : "读取所选记录失败");
+  });
 }
 
 function openCellHighlightDialog(): void {
@@ -3343,7 +3970,7 @@ async function clearSelectedHighlight(): Promise<void> {
     await submitHighlight(null);
     return;
   }
-  const recordIds = [...new Set(selectedRecords.value.map((record) => record.id))];
+  const recordIds = [...selectedRecordIds.value];
   if (!recordIds.length) {
     ElMessage.warning("请先勾选需要清除底色的记录");
     return;
@@ -3353,7 +3980,494 @@ async function clearSelectedHighlight(): Promise<void> {
 }
 
 async function handleManagerChanged(): Promise<void> {
+  await appStore.reloadProjects();
+  await loadViewPresets(activeProjectId.value);
   await loadRecords();
+}
+
+function defaultViewState(): LedgerViewState {
+  const projectFields = (currentProject.value?.fields ?? []).slice().sort(
+    (left, right) => left.sort_order - right.sort_order,
+  );
+  return {
+    columns: projectFields.map((field) => ({
+      field_id: field.id,
+      width: field.width,
+      hidden: field.hidden,
+      pinned: field.system_key === "experiment_date" || field.system_key === "status",
+    })),
+    frozen_until_field_id: null,
+    sort: null,
+    filters: {},
+  };
+}
+
+function currentViewState(): LedgerViewState {
+  const base = activeViewState.value ?? defaultViewState();
+  return {
+    columns: base.columns.map((column) => ({ ...column })),
+    frozen_until_field_id: base.frozen_until_field_id,
+    sort: ledgerSort.value
+      ? {
+          field_id: ledgerSort.value.fieldId,
+          direction: ledgerSort.value.order === "descending" ? "desc" : "asc",
+        }
+      : null,
+    filters: Object.fromEntries(
+      Object.entries(ledgerFilters.value).filter((entry) => Boolean(entry[1])),
+    ) as Record<string, Record<string, unknown>>,
+  };
+}
+
+function applyViewPreset(preset: LedgerViewPreset | null): void {
+  activeViewPresetId.value = preset?.id ?? "";
+  activeViewState.value = preset
+    ? {
+        columns: preset.state.columns.map((column) => ({ ...column })),
+        frozen_until_field_id: preset.state.frozen_until_field_id,
+        sort: preset.state.sort ? { ...preset.state.sort } : null,
+        filters: { ...preset.state.filters },
+      }
+    : defaultViewState();
+  ledgerSort.value = preset?.state.sort
+    ? {
+        fieldId: preset.state.sort.field_id,
+        order: preset.state.sort.direction === "desc" ? "descending" : "ascending",
+      }
+    : null;
+  ledgerFilters.value = { ...(preset?.state.filters ?? {}) } as LedgerFilterMap;
+  currentPage.value = 1;
+  activeGridCell.value = null;
+  clearGridCellSelection();
+  void loadRecords(activeProjectId.value, { preserveHistory: true });
+}
+
+function handleViewPresetChange(presetId: string | undefined): void {
+  applyViewPreset(viewPresets.value.find((item) => item.id === presetId) ?? null);
+}
+
+async function loadViewPresets(projectId: string): Promise<void> {
+  const requestSequence = ++viewLoadSequence;
+  if (!projectId) {
+    viewPresets.value = [];
+    activeViewPresetId.value = "";
+    activeViewState.value = null;
+    return;
+  }
+  try {
+    const presets = await listLedgerViewPresets(projectId);
+    if (requestSequence !== viewLoadSequence || projectId !== activeProjectId.value) return;
+    viewPresets.value = presets;
+    const selected =
+      presets.find((preset) => preset.id === activeViewPresetId.value) ??
+      presets.find((preset) => preset.is_default) ??
+      null;
+    activeViewPresetId.value = selected?.id ?? "";
+    activeViewState.value = selected?.state ?? defaultViewState();
+    ledgerSort.value = selected?.state.sort
+      ? {
+          fieldId: selected.state.sort.field_id,
+          order: selected.state.sort.direction === "desc" ? "descending" : "ascending",
+        }
+      : null;
+    ledgerFilters.value = { ...(selected?.state.filters ?? {}) } as LedgerFilterMap;
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "视图读取失败");
+  }
+}
+
+async function saveCurrentViewAs(): Promise<void> {
+  if (!activeProjectId.value) return;
+  try {
+    const { value } = await ElMessageBox.prompt("输入视图名称", "另存为命名视图", {
+      inputPlaceholder: "例如：报告录入视图",
+      inputValidator: (input) => (input.trim() ? true : "视图名称不能为空"),
+    });
+    viewBusy.value = true;
+    const preset = await createLedgerViewPreset(activeProjectId.value, {
+      name: value.trim(),
+      state: currentViewState(),
+    });
+    await loadViewPresets(activeProjectId.value);
+    applyViewPreset(preset);
+    ElMessage.success("命名视图已保存");
+  } catch (error) {
+    if (error !== "cancel" && error !== "close") {
+      ElMessage.error(error instanceof Error ? error.message : "视图保存失败");
+    }
+  } finally {
+    viewBusy.value = false;
+  }
+}
+
+async function overwriteCurrentView(): Promise<void> {
+  const preset = viewPresets.value.find((item) => item.id === activeViewPresetId.value);
+  if (!preset) {
+    await saveCurrentViewAs();
+    return;
+  }
+  viewBusy.value = true;
+  try {
+    const updated = await updateLedgerViewPreset(preset.id, { state: currentViewState() });
+    await loadViewPresets(activeProjectId.value);
+    activeViewPresetId.value = updated.id;
+    ElMessage.success("当前视图已更新");
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "视图更新失败");
+  } finally {
+    viewBusy.value = false;
+  }
+}
+
+async function renameCurrentView(): Promise<void> {
+  const preset = viewPresets.value.find((item) => item.id === activeViewPresetId.value);
+  if (!preset) return;
+  try {
+    const { value } = await ElMessageBox.prompt("输入新名称", "重命名视图", {
+      inputValue: preset.name,
+      inputValidator: (input) => (input.trim() ? true : "视图名称不能为空"),
+    });
+    await updateLedgerViewPreset(preset.id, { name: value.trim() });
+    await loadViewPresets(activeProjectId.value);
+  } catch (error) {
+    if (error !== "cancel" && error !== "close") {
+      ElMessage.error(error instanceof Error ? error.message : "视图重命名失败");
+    }
+  }
+}
+
+async function setCurrentViewDefault(): Promise<void> {
+  if (!activeViewPresetId.value) return;
+  await setDefaultLedgerViewPreset(activeViewPresetId.value);
+  await loadViewPresets(activeProjectId.value);
+  ElMessage.success("已设为默认视图");
+}
+
+async function removeCurrentView(): Promise<void> {
+  const preset = viewPresets.value.find((item) => item.id === activeViewPresetId.value);
+  if (!preset) return;
+  try {
+    await ElMessageBox.confirm(`确认删除视图“${preset.name}”？`, "删除命名视图", {
+      type: "warning",
+    });
+    await deleteLedgerViewPreset(preset.id);
+    await loadViewPresets(activeProjectId.value);
+    applyViewPreset(null);
+  } catch (error) {
+    if (error !== "cancel" && error !== "close") {
+      ElMessage.error(error instanceof Error ? error.message : "视图删除失败");
+    }
+  }
+}
+
+function freezeThroughField(field: FieldDefinition): void {
+  const state = activeViewState.value ?? defaultViewState();
+  activeViewState.value = { ...state, frozen_until_field_id: field.id };
+  closeColumnTools();
+  refreshTableLayout();
+}
+
+function clearFrozenFields(): void {
+  const state = activeViewState.value ?? defaultViewState();
+  activeViewState.value = { ...state, frozen_until_field_id: null };
+  refreshTableLayout();
+}
+
+function ensureActiveViewState(): LedgerViewState {
+  if (!activeViewState.value) activeViewState.value = defaultViewState();
+  return activeViewState.value;
+}
+
+function moveViewColumn(index: number, offset: -1 | 1): void {
+  const state = ensureActiveViewState();
+  const target = index + offset;
+  if (target < 0 || target >= state.columns.length) return;
+  const columns = state.columns.map((column) => ({ ...column }));
+  const [column] = columns.splice(index, 1);
+  if (!column) return;
+  columns.splice(target, 0, column);
+  activeViewState.value = { ...state, columns };
+  activeGridCell.value = null;
+  clearGridCellSelection();
+  refreshTableLayout();
+}
+
+function updateViewColumn(
+  fieldId: string,
+  property: "hidden" | "pinned",
+  value: boolean,
+): void {
+  const state = ensureActiveViewState();
+  const field = currentProject.value?.fields.find((item) => item.id === fieldId);
+  if (property === "pinned" && field?.system_key === "pathology_number") return;
+  activeViewState.value = {
+    ...state,
+    columns: state.columns.map((column) =>
+      column.field_id === fieldId ? { ...column, [property]: value } : column,
+    ),
+  };
+  activeGridCell.value = null;
+  clearGridCellSelection();
+  refreshTableLayout();
+}
+
+function resetQuickEntry(): void {
+  const state = activeViewState.value ?? defaultViewState();
+  const pinned = new Set(
+    state.columns.filter((column) => column.pinned).map((column) => column.field_id),
+  );
+  quickEntryFields.value.forEach((field) => {
+    if (field.system_key === "pathology_number") {
+      quickEntryValues[field.id] = "";
+    } else if (!pinned.has(field.id)) {
+      quickEntryValues[field.id] = field.system_key === "status" ? "待实验" : "";
+    } else if (!(field.id in quickEntryValues)) {
+      quickEntryValues[field.id] = field.system_key === "status" ? "待实验" : "";
+    }
+  });
+}
+
+function openQuickEntry(): void {
+  resetQuickEntry();
+  quickEntryVisible.value = true;
+  void nextTick(() => quickEntryPathologyRef.value?.focus?.());
+}
+
+function updateQuickEntryValue(field: FieldDefinition, value: string): void {
+  if (pendingValidationAction && validationPanel.value?.label === "快速录入") {
+    dismissValidationPanel();
+  }
+  quickEntryValues[field.id] = value;
+}
+
+function toggleQuickEntryPinned(field: FieldDefinition): void {
+  if (field.system_key === "pathology_number") return;
+  const state = activeViewState.value ?? defaultViewState();
+  activeViewState.value = {
+    ...state,
+    columns: state.columns.map((column) =>
+      column.field_id === field.id ? { ...column, pinned: !column.pinned } : column,
+    ),
+  };
+}
+
+function isQuickEntryPinned(field: FieldDefinition): boolean {
+  return Boolean(
+    (activeViewState.value ?? defaultViewState()).columns.find(
+      (column) => column.field_id === field.id,
+    )?.pinned,
+  );
+}
+
+async function saveQuickEntryAndNext(): Promise<void> {
+  const project = currentProject.value;
+  if (!project) return;
+  const pathologyField = quickEntryFields.value.find(
+    (field) => field.system_key === "pathology_number",
+  );
+  const pathology = pathologyField ? (quickEntryValues[pathologyField.id] ?? "").trim() : "";
+  if (!pathology) {
+    ElMessage.warning("病理号不能为空");
+    void nextTick(() => quickEntryPathologyRef.value?.focus?.());
+    return;
+  }
+  const statusField = quickEntryFields.value.find((field) => field.system_key === "status");
+  const dateField = quickEntryFields.value.find(
+    (field) => field.system_key === "experiment_date",
+  );
+  const numberField = quickEntryFields.value.find(
+    (field) => field.system_key === "experiment_number",
+  );
+  quickEntrySaving.value = true;
+  try {
+    const customValues = Object.fromEntries(
+      quickEntryFields.value
+        .filter((field) => !field.is_core)
+        .map((field) => [field.id, (quickEntryValues[field.id] ?? "").trim()]),
+    );
+    const payload = {
+      project_id: project.id,
+      pathology_number: pathology,
+      status: ((statusField && quickEntryValues[statusField.id]) || "待实验") as RecordStatus,
+      experiment_date:
+        dateField && quickEntryValues[dateField.id]
+          ? normalizeDate(quickEntryValues[dateField.id] ?? "")
+          : null,
+      experiment_number: numberField ? quickEntryValues[numberField.id] || null : null,
+      values: customValues,
+    };
+    const validation = await validateNewRecord(payload);
+    const errors = validation.issues.filter((issue) => issue.severity === "error");
+    const warnings = validation.issues.filter((issue) => issue.severity === "warning");
+    if (errors.length || warnings.length) {
+      pendingValidationAction = errors.length
+        ? null
+        : () => commitQuickEntryRecord(payload, project.id);
+      validationPanel.value = {
+        token: "",
+        projectId: project.id,
+        label: "快速录入",
+        issues: validation.issues,
+        affectedCount: 1,
+        skippedLocked: 0,
+        cellKeys: [],
+        cellVersions: {},
+        canContinue: !errors.length,
+      };
+      return;
+    }
+    if (validation.issues.length) {
+      validationPanel.value = {
+        token: "",
+        projectId: project.id,
+        label: "快速录入提示",
+        issues: validation.issues,
+        affectedCount: 1,
+        skippedLocked: 0,
+        cellKeys: [],
+        cellVersions: {},
+        canContinue: false,
+      };
+    }
+    await commitQuickEntryRecord(payload, project.id);
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "快速录入保存失败");
+  } finally {
+    quickEntrySaving.value = false;
+  }
+}
+
+async function commitQuickEntryRecord(
+  payload: Parameters<typeof createRecord>[0],
+  projectId: string,
+): Promise<void> {
+    const created = await createRecord(payload);
+    if (currentPage.value === Math.max(1, Math.ceil((recordTotal.value + 1) / pageSize))) {
+      records.value.push(created);
+      rememberRecord(created);
+    }
+    recordTotal.value += 1;
+    pushHistory("快速新增台账记录", [], [created], projectId);
+    resetQuickEntry();
+    await nextTick();
+    quickEntryPathologyRef.value?.focus?.();
+    ElMessage.success("记录已保存，可继续录入下一条");
+}
+
+function handleQuickEntryKeydown(event: KeyboardEvent, field: FieldDefinition): void {
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+    event.preventDefault();
+    void saveQuickEntryAndNext();
+    return;
+  }
+  if (event.key !== "Enter" || event.shiftKey) return;
+  if (field.data_type === "text" && !field.is_core) return;
+  event.preventDefault();
+  const index = quickEntryFields.value.findIndex((item) => item.id === field.id);
+  const nextField = quickEntryFields.value[index + 1];
+  if (!nextField) {
+    void saveQuickEntryAndNext();
+    return;
+  }
+  const nextElement = document.querySelector<HTMLElement>(
+    `[data-quick-entry-field="${nextField.id}"] input, ` +
+      `[data-quick-entry-field="${nextField.id}"] textarea`,
+  );
+  nextElement?.focus();
+}
+
+function selectedRecordIdsForReplace(): string[] {
+  const selectedCells = selectedGridCellPositions();
+  if (selectedCells.length) {
+    return [
+      ...new Set(
+        selectedCells
+          .filter(
+            (position) => fields.value[position.columnIndex]?.id === findReplaceForm.fieldId,
+          )
+          .map((position) => tableRows.value[position.rowIndex])
+          .filter((row): row is LedgerRow => Boolean(row && !isDraft(row)))
+          .map((row) => row.id),
+      ),
+    ];
+  }
+  return records.value.map((record) => record.id);
+}
+
+function openFindReplace(): void {
+  if (editingGridCell.value) {
+    void finishGridCellEdit(true, false).then((saved) => {
+      if (saved) openFindReplace();
+    });
+    return;
+  }
+  const activeField = activeGridCell.value
+    ? fields.value[activeGridCell.value.columnIndex]
+    : fields.value[0];
+  findReplaceForm.fieldId = activeField?.id ?? "";
+  findReplaceForm.find = "";
+  findReplaceForm.replacement = "";
+  findReplaceForm.matchMode = "substring";
+  findReplaceForm.caseSensitive = false;
+  findReplacePreview.value = null;
+  findReplaceVisible.value = true;
+}
+
+async function runFindReplacePreview(): Promise<void> {
+  if (!findReplaceForm.fieldId) {
+    ElMessage.warning("请选择要处理的表头");
+    return;
+  }
+  let recordIds = selectedRecordIdsForReplace();
+  if (!selectedGridCellPositions().length) {
+    const result = await queryRecordIds({ ...buildRecordQuery(), limit: 1000, offset: 0 });
+    recordIds = result.record_ids;
+  }
+  if (!recordIds.length) {
+    ElMessage.warning("当前范围没有记录");
+    return;
+  }
+  findReplaceLoading.value = true;
+  try {
+    findReplacePreview.value = await previewReplace({
+      project_id: activeProjectId.value,
+      field_id: findReplaceForm.fieldId,
+      record_ids: recordIds,
+      find: findReplaceForm.find,
+      replacement: findReplaceForm.replacement,
+      match_mode: findReplaceForm.matchMode,
+      case_sensitive: findReplaceForm.caseSensitive,
+    });
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "查找替换预览失败");
+  } finally {
+    findReplaceLoading.value = false;
+  }
+}
+
+async function commitFindReplace(): Promise<void> {
+  const preview = findReplacePreview.value;
+  if (!preview?.token) return;
+  findReplaceLoading.value = true;
+  try {
+    const hasErrors = preview.issues.some((issue) => issue.severity === "error");
+    if (hasErrors) {
+      ElMessage.error("存在严格验证错误，不能提交");
+      return;
+    }
+    const result = await commitReplace(
+      preview.token,
+      preview.issues.some((issue) => issue.severity === "warning"),
+    );
+    result.records.forEach(replaceRecord);
+    pushCellHistory("查找替换", result.changes, activeProjectId.value);
+    findReplaceVisible.value = false;
+    ElMessage.success(`已替换 ${result.changes.length} 个单元格，可一次撤销`);
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "查找替换提交失败");
+  } finally {
+    findReplaceLoading.value = false;
+  }
 }
 
 async function handleHeaderResize(
@@ -3365,30 +4479,25 @@ async function handleHeaderResize(
   const field = fields.value.find((item) => item.id === fieldId);
   if (!field || Math.round(newWidth) === field.width) return;
   try {
-    await updateField(field.id, { width: Math.round(newWidth) });
-    await appStore.reloadProjects();
+    if (activeViewState.value) {
+      const state = activeViewState.value;
+      activeViewState.value = {
+        ...state,
+        columns: state.columns.map((column) =>
+          column.field_id === field.id
+            ? { ...column, width: Math.round(newWidth) }
+            : column,
+        ),
+      };
+    } else {
+      await updateField(field.id, { width: Math.round(newWidth) });
+      await appStore.reloadProjects();
+    }
     await nextTick();
     tableRef.value?.doLayout();
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "列宽保存失败");
   }
-}
-
-function workbookRowFor(record: LedgerRow, rowNumber: number): WorkbookImportRow {
-  const projectFields = currentProject.value?.fields ?? [];
-  const values: Record<string, string> = {};
-  projectFields.forEach((field) => {
-    if (!field.is_core) values[field.id] = (record.values[field.id] ?? "").trim();
-  });
-  return {
-    row_number: rowNumber,
-    record_id: isDraft(record) ? null : record.id,
-    pathology_number: record.pathology_number.trim(),
-    status: record.status,
-    experiment_date: record.experiment_date ? normalizeDate(record.experiment_date) : null,
-    experiment_number: record.experiment_number?.trim() || null,
-    values,
-  };
 }
 
 async function pasteGrid(
@@ -3418,8 +4527,8 @@ async function pasteGrid(
       rowValues.map((value, columnOffset) => ({ rowOffset, columnOffset, value })),
     );
   if (!entries.length) return [];
-  const changedRows = new Map<string, { record: LedgerRow; rowNumber: number }>();
-  const beforeById = new Map<string, ProjectRecord>();
+  const changedDraftRows = new Map<string, { record: LedgerRow; rowNumber: number }>();
+  const existingChanges: RecordCellChange[] = [];
   const changedPositions: GridCellPosition[] = [];
   const changedPositionKeys = new Set<string>();
   let skippedLocked = 0;
@@ -3449,48 +4558,140 @@ async function pasteGrid(
         return;
       }
       const value = exactCells ? entry.value : entry.value.trim();
-      if (!isDraft(record) && !beforeById.has(record.id)) {
-        beforeById.set(record.id, snapshotRecord(record));
+      const expectedValue = valueFor(record, field);
+      if (!isDraft(record)) {
+        existingChanges.push({
+          record_id: record.id,
+          field_id: field.id,
+          value,
+          expected_value: expectedValue,
+        });
+        setCellSaveState(record.id, field.id, { status: "saving" });
       }
-      // Validate core values before mutating the row.  This keeps an invalid
-      // pasted date from becoming an unexplainable batch-save failure.
-      payloadForField(record, field, value);
       setValue(record, field, value);
-      if (field.system_key === "experiment_date") {
-        record.experiment_date = normalizeDate(value) || null;
+      if (isDraft(record)) {
+        changedDraftRows.set(record.id, {
+          record,
+          rowNumber: targetRowIndex + 2,
+        });
       }
-      changedRows.set(record.id, {
-        record,
-        rowNumber: targetRowIndex + 2,
-      });
       changedCells += 1;
     });
 
-    const committableEntries = [...changedRows.values()].filter(
-      ({ record }) => !isDraft(record) || record.pathology_number.trim(),
+    const committableDrafts = [...changedDraftRows.values()].filter(
+      ({ record }) => record.pathology_number.trim(),
     );
-    const rowsToCommit = committableEntries.map(({ record, rowNumber }) =>
-      workbookRowFor(record, rowNumber),
+    const batchNewRecords: RecordBatchNewRecord[] = committableDrafts.map(({ record }) => ({
+      client_id: record.id,
+      pathology_number: record.pathology_number.trim(),
+      status: record.status,
+      experiment_date: record.experiment_date ? normalizeDate(record.experiment_date) : null,
+      experiment_number: record.experiment_number?.trim() || null,
+      values: Object.fromEntries(
+        (currentProject.value?.fields ?? [])
+          .filter((field) => !field.is_core)
+          .map((field) => [field.id, (record.values[field.id] ?? "").trim()]),
+      ),
+    }));
+    const batchPreview = existingChanges.length || batchNewRecords.length
+      ? await previewCellBatch(projectId, existingChanges, batchNewRecords)
+      : null;
+    const allIssues = batchPreview?.issues ?? [];
+    const errors = allIssues.filter((issue) => issue.severity === "error");
+    const warnings = allIssues.filter((issue) => issue.severity === "warning");
+    const cellKeys = changedPositions.flatMap((position) => {
+      const data = gridCellData(position);
+      return data ? [persistedKey(data.record.id, data.field.id)] : [];
+    });
+    const cellVersions = Object.fromEntries(
+      cellKeys.map((key) => [key, cellSaveVersions.get(key) ?? 0]),
     );
-    if (rowsToCommit.length) {
-      const result = await commitWorkbookImport(projectId, rowsToCommit);
-      const committedRecords = reconcileCommittedPaste(committableEntries, result.record_ids);
-      if (!committedRecords) {
-        await loadRecords(projectId, { showLoading: false });
-      } else {
+
+    const commitPasteChanges = async (acceptWarnings: boolean): Promise<void> => {
+      const batchResult = batchPreview
+        ? await commitCellBatch(
+            batchPreview.token,
+            acceptWarnings,
+            committableDrafts.length > 0,
+          )
+        : null;
+      const completedKeys = new Set(
+        existingChanges
+          .map((change) => persistedKey(change.record_id, change.field_id))
+          .filter((key) => (cellSaveVersions.get(key) ?? 0) === cellVersions[key]),
+      );
+      batchResult?.records.forEach((record) =>
+        replaceRecordPreservingPending(record, completedKeys),
+      );
+      completedKeys.forEach((key) => {
+        const [recordId = "", fieldId = ""] = key.split(":");
+        if (recordId && fieldId) setCellSaveState(recordId, fieldId, { status: "saved" });
+      });
+
+      let committedDraftRecords: ProjectRecord[] = [];
+      if (committableDrafts.length) {
+        committedDraftRecords = reconcileCommittedPaste(
+          committableDrafts,
+          batchResult?.created_record_ids ?? [],
+          batchResult?.records ?? [],
+        ) ?? [];
+        if (!committedDraftRecords.length && batchResult?.created_record_ids.length) {
+          await loadRecords(projectId, { showLoading: false, preserveHistory: true });
+        }
+      }
+      if (committableDrafts.length && batchResult) {
         pushHistory(
           `${operationLabel}台账数据`,
-          [...beforeById.values()],
-          committedRecords.map(snapshotRecord),
+          batchResult.before,
+          batchResult.after,
           projectId,
         );
+      } else if (batchResult) {
+        pushCellHistory(`${operationLabel}台账数据`, batchResult.changes, projectId);
       }
-       ElMessage.success(`已${operationLabel} ${changedCells} 个单元格${result.created ? `，新建 ${result.created} 条记录` : ""}`);
-    } else if (changedCells) {
-      ElMessage.success(`已${operationLabel} ${changedCells} 个单元格，填写病理号后将自动保存`);
+      if (batchResult || committedDraftRecords.length) {
+        ElMessage.success(`已${operationLabel} ${changedCells} 个单元格`);
+      } else if (changedCells) {
+        ElMessage.success(`已${operationLabel} ${changedCells} 个单元格，填写病理号后将自动保存`);
+      }
+      if (skippedLocked) ElMessage.info(`已跳过 ${skippedLocked} 个锁定单元格`);
+    };
+
+    if (errors.length || warnings.length) {
+      pendingValidationAction = errors.length ? null : () => commitPasteChanges(true);
+      validationPanel.value = {
+        token: "",
+        projectId,
+        label: `${operationLabel}台账数据`,
+        issues: allIssues,
+        affectedCount: batchPreview?.affected_count ?? 0,
+        skippedLocked: (batchPreview?.skipped_locked ?? 0) + skippedLocked,
+        cellKeys,
+        cellVersions,
+        canContinue: !errors.length,
+      };
+      existingChanges.forEach((change) => {
+        setCellSaveState(change.record_id, change.field_id, {
+          status: errors.length ? "error" : "dirty",
+          message: errors[0]?.message ?? "等待警告确认",
+        });
+      });
+      return changedPositions;
     }
-    if (skippedLocked) {
-      ElMessage.info(`已跳过 ${skippedLocked} 个锁定单元格`);
+
+    await commitPasteChanges(false);
+    if (allIssues.length) {
+      validationPanel.value = {
+        token: "",
+        projectId,
+        label: `${operationLabel}台账数据`,
+        issues: allIssues,
+        affectedCount: batchPreview?.affected_count ?? 0,
+        skippedLocked: (batchPreview?.skipped_locked ?? 0) + skippedLocked,
+        cellKeys,
+        cellVersions,
+        canContinue: false,
+      };
     }
     return changedPositions;
   } catch (error) {
@@ -3501,7 +4702,7 @@ async function pasteGrid(
 }
 
 async function updateSelectedStatus(status: RecordStatus): Promise<void> {
-  const targets = selectedRecords.value.filter((record) => !record.locked);
+  const targets = (await selectedTargetRecords()).filter((record) => !record.locked);
   if (!targets.length) {
     ElMessage.warning("没有可修改的未锁定记录");
     return;
@@ -3509,7 +4710,9 @@ async function updateSelectedStatus(status: RecordStatus): Promise<void> {
   loading.value = true;
   try {
     const before = targets.map(snapshotRecord);
-    const updated = await Promise.all(targets.map((record) => updateRecord(record.id, { status })));
+    const updated = await mapInChunks(targets, (record) =>
+      updateRecord(record.id, { status }),
+    );
     updated.forEach(replaceRecord);
     pushHistory("批量修改状态", before, updated, targets[0]?.project_id ?? activeProjectId.value);
     ElMessage.success(`已将 ${targets.length} 条记录标记为${status}`);
@@ -3521,14 +4724,15 @@ async function updateSelectedStatus(status: RecordStatus): Promise<void> {
 }
 
 async function updateSelectedLock(locked: boolean): Promise<void> {
-  if (!selectedRecords.value.length) {
+  const selectedTargets = await selectedTargetRecords();
+  if (!selectedTargets.length) {
     ElMessage.warning("请先勾选记录");
     return;
   }
   loading.value = true;
   try {
-    const updated = await Promise.all(
-      selectedRecords.value.map((record) => setRecordLock(record.id, locked)),
+    const updated = await mapInChunks(selectedTargets, (record) =>
+      setRecordLock(record.id, locked),
     );
     updated.forEach(replaceRecord);
     ElMessage.success(locked ? "所选记录已锁定" : "所选记录已解锁");
@@ -3540,7 +4744,7 @@ async function updateSelectedLock(locked: boolean): Promise<void> {
 }
 
 async function updateSelectedReportStatus(reportGenerated: boolean): Promise<void> {
-  const targets = selectedRecords.value.filter((record) => !record.locked);
+  const targets = (await selectedTargetRecords()).filter((record) => !record.locked);
   if (!targets.length) {
     ElMessage.warning("没有可修改的未锁定记录");
     return;
@@ -3548,10 +4752,13 @@ async function updateSelectedReportStatus(reportGenerated: boolean): Promise<voi
   loading.value = true;
   try {
     const before = targets.map(snapshotRecord);
-    const updated = await setRecordsReportGenerated(
-      targets.map((record) => record.id),
-      reportGenerated,
-    );
+    const updated: ProjectRecord[] = [];
+    const targetIds = targets.map((record) => record.id);
+    for (let index = 0; index < targetIds.length; index += 1000) {
+      updated.push(
+        ...(await setRecordsReportGenerated(targetIds.slice(index, index + 1000), reportGenerated)),
+      );
+    }
     updated.forEach(replaceRecord);
     pushHistory(
       "批量修改报告状态",
@@ -3568,12 +4775,13 @@ async function updateSelectedReportStatus(reportGenerated: boolean): Promise<voi
 }
 
 async function deleteSelectedRecords(): Promise<void> {
-  if (!selectedRecords.value.length) {
+  const selectedTargets = await selectedTargetRecords();
+  if (!selectedTargets.length) {
     ElMessage.warning("请先勾选需要删除的记录");
     return;
   }
-  const targets = selectedRecords.value.filter((record) => !record.locked);
-  const lockedCount = selectedRecords.value.length - targets.length;
+  const targets = selectedTargets.filter((record) => !record.locked);
+  const lockedCount = selectedTargets.length - targets.length;
   if (!targets.length) {
     ElMessage.warning("所选记录均已锁定，请先解锁后再删除");
     return;
@@ -3600,9 +4808,14 @@ async function deleteSelectedRecords(): Promise<void> {
 
   loading.value = true;
   try {
-    const results = await Promise.allSettled(
-      targets.map((record) => deleteRecord(record.id)),
-    );
+    const results: PromiseSettledResult<void>[] = [];
+    for (let index = 0; index < targets.length; index += 25) {
+      results.push(
+        ...(await Promise.allSettled(
+          targets.slice(index, index + 25).map((record) => deleteRecord(record.id)),
+        )),
+      );
+    }
     const deletedIds = new Set(
       targets
         .filter((_record, index) => results[index]?.status === "fulfilled")
@@ -3612,7 +4825,10 @@ async function deleteSelectedRecords(): Promise<void> {
       .filter((record) => deletedIds.has(record.id))
       .map(snapshotRecord);
     records.value = records.value.filter((record) => !deletedIds.has(record.id));
+    recordTotal.value = Math.max(0, recordTotal.value - deletedIds.size);
     selectedRecords.value = [];
+    selectedRecordIds.value = new Set();
+    selectedRecordCache.clear();
     activeGridCell.value = null;
     clearGridCellSelection();
     rememberAll();
@@ -3799,6 +5015,7 @@ async function confirmDateRangeDelete(): Promise<void> {
     bulkDeletePreview.value = null;
     const deletedIds = new Set(result.deleted_records.map((record) => record.id));
     records.value = records.value.filter((record) => !deletedIds.has(record.id));
+    recordTotal.value = Math.max(0, recordTotal.value - result.deleted);
     activeGridCell.value = null;
     clearGridCellSelection();
     rememberAll();
@@ -3860,6 +5077,7 @@ async function removeRecord(record: ProjectRecord): Promise<void> {
     const before = snapshotRecord(record);
     await deleteRecord(record.id);
     records.value = records.value.filter((item) => item.id !== record.id);
+    recordTotal.value = Math.max(0, recordTotal.value - 1);
     activeGridCell.value = null;
     clearGridCellSelection();
     pushHistory("删除台账记录", [before], [], before.project_id);
@@ -3878,7 +5096,19 @@ async function exportCurrentProject(): Promise<void> {
     if (start && end && start > end) throw new Error("导出开始日期不能晚于结束日期");
     exportFilter.start = start;
     exportFilter.end = end;
-    const items = records.value.filter((record) => {
+    const items: ProjectRecord[] = [];
+    let offset = 0;
+    while (true) {
+      const page = await queryRecords({
+        ...buildRecordQuery(),
+        limit: 1000,
+        offset,
+      });
+      items.push(...page.items);
+      offset += page.items.length;
+      if (!page.items.length || offset >= page.total) break;
+    }
+    const exportItems = items.filter((record) => {
       const date = record.experiment_date ?? "";
       return (!start || date >= start) && (!end || date <= end);
     });
@@ -3888,7 +5118,7 @@ async function exportCurrentProject(): Promise<void> {
           name: currentProject.value.name,
           headers: ["_record_id", "_project_id", ...fields.value.map((field) => field.label)],
           hiddenColumns: [1, 2],
-          rows: items.map((record) => [
+          rows: exportItems.map((record) => [
             record.id,
             record.project_id,
             ...fields.value.map((field) => valueFor(record, field)),
@@ -3898,7 +5128,7 @@ async function exportCurrentProject(): Promise<void> {
       `${currentProject.value.name}_台账`,
     );
     if (!saved) return;
-    ElMessage.success(`已导出 ${items.length} 条记录`);
+    ElMessage.success(`已导出 ${exportItems.length} 条记录`);
   } catch (error) {
     ElMessage.warning(error instanceof Error ? error.message : "导出条件无效");
   }
@@ -3925,6 +5155,75 @@ watch(
   },
   { deep: true },
 );
+const selectedGridStats = computed(() => {
+  const positions = selectedGridCellPositions();
+  const summary = summarizeLedgerSelection(
+    positions.flatMap((position) => {
+      const data = gridCellData(position);
+      return data
+        ? [{ value: valueFor(data.record, data.field), dataType: data.field.data_type }]
+        : [];
+    }),
+  );
+  const states = positions.map((position) => {
+    const data = gridCellData(position);
+    return data ? cellSaveStates.value.get(persistedKey(data.record.id, data.field.id))?.status : undefined;
+  });
+  const saveStatus: CellSaveStatus | "idle" = states.includes("error")
+    ? "error"
+    : states.includes("saving")
+      ? "saving"
+      : states.includes("dirty")
+        ? "dirty"
+        : states.length && states.every((state) => state === "saved")
+          ? "saved"
+          : "idle";
+  return {
+    ...summary,
+    saveStatus,
+  };
+});
+const quickEntryFields = computed(() => {
+  const projectFields = currentProject.value?.fields ?? [];
+  const visibleIds = new Set(fields.value.map((field) => field.id));
+  const byId = new Map(projectFields.map((field) => [field.id, field]));
+  const orderedIds = (activeViewState.value?.columns ?? [])
+    .map((column) => column.field_id)
+    .filter((fieldId) => byId.has(fieldId));
+  projectFields
+    .slice()
+    .sort((left, right) => left.sort_order - right.sort_order)
+    .forEach((field) => {
+      if (!orderedIds.includes(field.id)) orderedIds.push(field.id);
+    });
+  return orderedIds.flatMap((fieldId) => {
+    const field = byId.get(fieldId);
+    return field && (field.is_core || visibleIds.has(field.id)) ? [field] : [];
+  });
+});
+const viewColumnRows = computed(() => {
+  const projectFields = currentProject.value?.fields ?? [];
+  const byId = new Map(projectFields.map((field) => [field.id, field]));
+  const state = activeViewState.value ?? defaultViewState();
+  const rows = state.columns.flatMap((column) => {
+    const field = byId.get(column.field_id);
+    return field ? [{ field, column }] : [];
+  });
+  projectFields.forEach((field) => {
+    if (!rows.some((row) => row.field.id === field.id)) {
+      rows.push({
+        field,
+        column: {
+          field_id: field.id,
+          width: field.width,
+          hidden: field.hidden,
+          pinned: field.system_key === "experiment_date" || field.system_key === "status",
+        },
+      });
+    }
+  });
+  return rows;
+});
 
 watch(
   () => [
@@ -3940,8 +5239,8 @@ watch(activeProjectId, async (projectId, previousProjectId) => {
   const load = (async () => {
     stopGridCellDrag(false);
     closeLedgerOverlays();
-    ledgerSort.value = null;
-    ledgerFilters.value = {};
+    activeViewPresetId.value = "";
+    activeViewState.value = null;
     editingGridCell.value = null;
     editingGridSnapshot.value = null;
     activeGridCell.value = null;
@@ -3961,6 +5260,7 @@ watch(activeProjectId, async (projectId, previousProjectId) => {
     bulkDeletePreview.value = null;
     persistedValues.clear();
     void router.replace({ query: { ...route.query, project: projectId } });
+    await loadViewPresets(projectId);
     await loadRecords(projectId, { preserveHistory: true });
     await nextTick();
     refreshTableLayout();
@@ -3993,6 +5293,7 @@ async function initializeLedger(): Promise<void> {
   appliedSearch.scope = "current";
   appliedSearch.projectIds = [];
   await router.replace({ query: { ...route.query, project: initialProjectId } });
+  await loadViewPresets(initialProjectId);
   await loadRecords(initialProjectId);
   await nextTick();
   refreshTableLayout();
@@ -4040,6 +5341,8 @@ onBeforeUnmount(() => {
   stopGridCellDrag(false);
   stopGridFillDrag();
   stopSelectionDrag();
+  recordsAbortController?.abort();
+  recordsAbortController = null;
   editingGridCell.value = null;
   editingGridSnapshot.value = null;
   activeGridCell.value = null;
@@ -4131,6 +5434,8 @@ onBeforeUnmount(() => {
             >
               新增记录
             </el-button>
+            <el-button :icon="Plus" @click="openQuickEntry">快速录入</el-button>
+            <el-button @click="openFindReplace">查找替换</el-button>
             <el-button :icon="Download" @click="exportVisible = !exportVisible">
               导出 Excel
             </el-button>
@@ -4182,6 +5487,36 @@ onBeforeUnmount(() => {
             <el-button type="danger" plain :icon="Delete" @click="openBulkDeleteDialog">
               按日期批量删除
             </el-button>
+          </div>
+          <div v-if="!globalSearchActive" class="ledger-view-toolbar">
+            <el-select
+              :model-value="activeViewPresetId"
+              clearable
+              placeholder="系统默认视图"
+              :loading="viewBusy"
+              @change="handleViewPresetChange"
+            >
+              <el-option
+                v-for="preset in viewPresets"
+                :key="preset.id"
+                :label="`${preset.name}${preset.is_default ? '（默认）' : ''}`"
+                :value="preset.id"
+              />
+            </el-select>
+            <el-button @click="saveCurrentViewAs">另存为视图</el-button>
+            <el-button @click="overwriteCurrentView">保存当前视图</el-button>
+            <el-button @click="viewColumnsVisible = true">列顺序/隐藏/固定</el-button>
+            <el-dropdown :disabled="!activeViewPresetId">
+              <el-button>视图管理</el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item @click="renameCurrentView">重命名</el-dropdown-item>
+                  <el-dropdown-item @click="setCurrentViewDefault">设为默认</el-dropdown-item>
+                  <el-dropdown-item divided @click="removeCurrentView">删除视图</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+            <el-button @click="applyViewPreset(null)">恢复系统默认</el-button>
           </div>
           <div v-if="searchScope === 'selected'" class="ledger-search-advanced">
             <el-select
@@ -4269,7 +5604,8 @@ onBeforeUnmount(() => {
       <strong v-if="hasGridCellSelection">已选 {{ gridCellSelectionCount }} 个单元格</strong>
       <strong v-else>已选 {{ selectedCount }} 条记录</strong>
       <div class="selection-quick-actions" aria-label="快速选择">
-        <el-button @click="selectAllVisible">全选</el-button>
+        <el-button @click="selectAllVisible">全选当前页</el-button>
+        <el-button @click="selectAllFilteredRecords">选择全部筛选结果</el-button>
         <el-button @click="invertVisibleSelection">反选</el-button>
       </div>
       <EditableDateInput
@@ -4389,6 +5725,7 @@ onBeforeUnmount(() => {
           width="55"
           fixed="left"
           align="center"
+          reserve-selection
           :selectable="(row: LedgerRow) => !isDraft(row)"
         />
         <el-table-column width="42" fixed="left" align="center">
@@ -4406,6 +5743,7 @@ onBeforeUnmount(() => {
           class-name="ledger-editor-column"
           :label="field.label"
           :width="field.width"
+          :fixed="frozenFieldIds.has(field.id) ? 'left' : undefined"
           align="center"
           header-align="center"
           resizable
@@ -4499,6 +5837,22 @@ onBeforeUnmount(() => {
               <span v-if="fieldErrorFor(row, field)" class="cell-field-error">
                 {{ fieldErrorFor(row, field) }}
               </span>
+              <span
+                v-if="cellSaveStateFor(row, field)"
+                class="cell-save-state"
+                :class="`is-${cellSaveStateFor(row, field)?.status}`"
+                :title="cellSaveStateFor(row, field)?.message ?? ''"
+              >
+                {{
+                  cellSaveStateFor(row, field)?.status === 'saving'
+                    ? '保存中'
+                    : cellSaveStateFor(row, field)?.status === 'saved'
+                      ? '已保存'
+                      : cellSaveStateFor(row, field)?.status === 'error'
+                        ? '失败'
+                        : '未保存'
+                }}
+              </span>
             </div>
           </template>
         </el-table-column>
@@ -4567,6 +5921,12 @@ onBeforeUnmount(() => {
             @click="setLedgerSort(columnToolsField, null)"
           >
             取消排序
+          </el-button>
+        </div>
+        <div class="ledger-column-tools-sort">
+          <el-button size="small" @click="freezeThroughField(columnToolsField)">冻结到此列</el-button>
+          <el-button size="small" :disabled="!activeViewState?.frozen_until_field_id" @click="clearFrozenFields">
+            取消冻结
           </el-button>
         </div>
         <div class="ledger-column-tools-filter-label">筛选</div>
@@ -4671,6 +6031,24 @@ onBeforeUnmount(() => {
         </button>
       </div>
       <div class="ledger-zoom-footer">
+        <div v-if="selectedGridStats.selected" class="ledger-selection-stats">
+          <span>选中 {{ selectedGridStats.selected }}</span>
+          <span>非空 {{ selectedGridStats.nonEmpty }}</span>
+          <span v-if="selectedGridStats.numericCount">数字 {{ selectedGridStats.numericCount }}</span>
+          <span v-if="selectedGridStats.numericCount">合计 {{ selectedGridStats.sum }}</span>
+          <span v-if="selectedGridStats.average !== null">平均 {{ selectedGridStats.average.toFixed(2) }}</span>
+          <span v-if="selectedGridStats.min !== null">最小 {{ selectedGridStats.min }}</span>
+          <span v-if="selectedGridStats.max !== null">最大 {{ selectedGridStats.max }}</span>
+          <span>状态 {{ cellSaveStatusLabels[selectedGridStats.saveStatus] }}</span>
+        </div>
+        <el-pagination
+          v-model:current-page="currentPage"
+          :page-size="pageSize"
+          :total="recordTotal"
+          layout="total, prev, pager, next"
+          small
+          @current-change="changeLedgerPage"
+        />
         <div class="ledger-zoom-control" aria-label="台账缩放">
           <el-button text :icon="Minus" :disabled="historyReplayLoading" @click="zoomOut" />
           <el-slider
@@ -4710,6 +6088,174 @@ onBeforeUnmount(() => {
     @select-project="selectProject"
     @open-templates="templateManagerVisible = true"
   />
+
+  <el-drawer
+    v-model="quickEntryVisible"
+    title="快速连续录入"
+    size="520px"
+    destroy-on-close
+    @open="resetQuickEntry"
+  >
+    <p class="dialog-note">保存成功后保留已固定字段，其余字段清空并重新聚焦病理号。</p>
+    <el-form label-position="top">
+      <el-form-item
+        v-for="field in quickEntryFields"
+        :key="field.id"
+        :label="field.label"
+      >
+        <div class="quick-entry-field" :data-quick-entry-field="field.id">
+          <EditableDateInput
+            v-if="field.data_type === 'date' || field.system_key === 'experiment_date'"
+            :model-value="quickEntryValues[field.id] ?? ''"
+            @update:model-value="updateQuickEntryValue(field, $event)"
+            @keydown="handleQuickEntryKeydown($event, field)"
+          />
+          <EditableChoiceInput
+            v-else-if="field.data_type === 'select' || field.options.length"
+            :model-value="quickEntryValues[field.id] ?? (field.system_key === 'status' ? '待实验' : '')"
+            :options="fieldOptions(field)"
+            @update:model-value="updateQuickEntryValue(field, $event)"
+            @keydown="handleQuickEntryKeydown($event, field)"
+          />
+          <el-input
+            v-else
+            :ref="field.system_key === 'pathology_number' ? 'quickEntryPathologyRef' : undefined"
+            :model-value="quickEntryValues[field.id] ?? ''"
+            :type="field.is_core ? 'text' : 'textarea'"
+            :autosize="field.is_core ? undefined : { minRows: 1, maxRows: 4 }"
+            @update:model-value="updateQuickEntryValue(field, String($event))"
+            @keydown="handleQuickEntryKeydown($event, field)"
+          />
+          <el-button
+            text
+            :type="isQuickEntryPinned(field) ? 'primary' : undefined"
+            :disabled="field.system_key === 'pathology_number'"
+            @click="toggleQuickEntryPinned(field)"
+          >
+            {{ isQuickEntryPinned(field) ? '已固定' : '固定' }}
+          </el-button>
+        </div>
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button @click="quickEntryVisible = false">关闭</el-button>
+      <el-button type="primary" :loading="quickEntrySaving" @click="saveQuickEntryAndNext">
+        保存并下一条（Ctrl+Enter）
+      </el-button>
+    </template>
+  </el-drawer>
+
+  <el-dialog v-model="viewColumnsVisible" title="当前视图的列设置" width="760px">
+    <p class="dialog-note">这些调整只影响当前视图；点击“保存当前视图”或“另存为视图”后持久保存。</p>
+    <el-table :data="viewColumnRows" row-key="field.id" border max-height="520">
+      <el-table-column label="顺序" width="120" align="center">
+        <template #default="{ $index }">
+          <el-button link :disabled="$index === 0" @click="moveViewColumn($index, -1)">上移</el-button>
+          <el-button link :disabled="$index === viewColumnRows.length - 1" @click="moveViewColumn($index, 1)">下移</el-button>
+        </template>
+      </el-table-column>
+      <el-table-column label="表头" min-width="180">
+        <template #default="{ row }">{{ row.field.label }}</template>
+      </el-table-column>
+      <el-table-column label="显示" width="110" align="center">
+        <template #default="{ row }">
+          <el-switch
+            :model-value="!row.column.hidden"
+            @update:model-value="updateViewColumn(row.field.id, 'hidden', !$event)"
+          />
+        </template>
+      </el-table-column>
+      <el-table-column label="连续录入时保留" width="160" align="center">
+        <template #default="{ row }">
+          <el-switch
+            :model-value="row.column.pinned"
+            :disabled="row.field.system_key === 'pathology_number'"
+            @update:model-value="updateViewColumn(row.field.id, 'pinned', $event)"
+          />
+        </template>
+      </el-table-column>
+      <el-table-column label="列宽" width="100" align="center">
+        <template #default="{ row }">{{ row.column.width }}</template>
+      </el-table-column>
+    </el-table>
+    <template #footer>
+      <el-button @click="viewColumnsVisible = false">完成</el-button>
+    </template>
+  </el-dialog>
+
+  <el-dialog v-model="findReplaceVisible" title="查找替换" width="660px">
+    <el-form label-position="top">
+      <el-form-item label="指定表头">
+        <el-select v-model="findReplaceForm.fieldId" filterable>
+          <el-option v-for="field in fields" :key="field.id" :label="field.label" :value="field.id" />
+        </el-select>
+      </el-form-item>
+      <div class="two-column-dialog-form">
+        <el-form-item label="查找内容">
+          <el-input v-model="findReplaceForm.find" />
+        </el-form-item>
+        <el-form-item label="替换为">
+          <el-input v-model="findReplaceForm.replacement" />
+        </el-form-item>
+      </div>
+      <div class="two-column-dialog-form">
+        <el-form-item label="匹配方式">
+          <el-radio-group v-model="findReplaceForm.matchMode">
+            <el-radio-button value="substring">子串</el-radio-button>
+            <el-radio-button value="whole">完整单元格</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="大小写">
+          <el-checkbox v-model="findReplaceForm.caseSensitive">区分大小写</el-checkbox>
+        </el-form-item>
+      </div>
+    </el-form>
+    <div v-if="findReplacePreview" class="replace-preview-panel">
+      <strong>匹配 {{ findReplacePreview.matched_count }} 个单元格</strong>
+      <span v-if="findReplacePreview.skipped_locked">，跳过锁定 {{ findReplacePreview.skipped_locked }} 个</span>
+      <ul v-if="findReplacePreview.issues.length">
+        <li v-for="(issue, index) in findReplacePreview.issues.slice(0, 20)" :key="index">
+          {{ issue.message }}
+        </li>
+      </ul>
+    </div>
+    <template #footer>
+      <el-button @click="findReplaceVisible = false">取消</el-button>
+      <el-button :loading="findReplaceLoading" @click="runFindReplacePreview">预览</el-button>
+      <el-button
+        type="primary"
+        :loading="findReplaceLoading"
+        :disabled="!findReplacePreview?.matched_count || findReplacePreview.issues.some((issue) => issue.severity === 'error')"
+        @click="commitFindReplace"
+      >
+        确认替换
+      </el-button>
+    </template>
+  </el-dialog>
+
+  <div v-if="validationPanel" class="validation-panel" role="status">
+    <div>
+      <strong>{{ validationPanel.label }}</strong>
+      <span>影响 {{ validationPanel.affectedCount }} 个单元格</span>
+      <span v-if="validationPanel.skippedLocked">，跳过锁定 {{ validationPanel.skippedLocked }} 个</span>
+      <ul>
+        <li v-for="(issue, index) in validationPanel.issues.slice(0, 20)" :key="index" :class="`is-${issue.severity}`">
+          {{ issue.message }}
+        </li>
+      </ul>
+    </div>
+    <div class="validation-panel-actions">
+      <el-button @click="dismissValidationPanel">关闭</el-button>
+      <el-button
+        v-if="validationPanel.canContinue"
+        type="primary"
+        :loading="validationCommitLoading"
+        @click="continueValidationCommit"
+      >
+        忽略警告并继续
+      </el-button>
+    </div>
+  </div>
 
   <el-dialog v-model="assignDialogVisible" title="复制为其他项目记录" width="480px">
     <p class="dialog-note">
@@ -5991,5 +7537,115 @@ onBeforeUnmount(() => {
 :deep(.ledger-table-card .el-table__body-wrapper .el-scrollbar__thumb) {
   border-radius: 999px;
   background: #98a2b3;
+}
+
+.ledger-view-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.ledger-view-toolbar > .el-select {
+  width: 210px;
+}
+
+.cell-save-state {
+  position: absolute;
+  right: 4px;
+  top: 2px;
+  z-index: 3;
+  color: #667085;
+  font-size: 10px;
+  line-height: 14px;
+  pointer-events: none;
+}
+
+.cell-save-state.is-saving {
+  color: #2563eb;
+}
+
+.cell-save-state.is-saved {
+  color: #16803c;
+}
+
+.cell-save-state.is-error {
+  color: #d92d20;
+  font-weight: 700;
+}
+
+.ledger-selection-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  color: #475467;
+  font-size: 12px;
+}
+
+.quick-entry-field {
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+}
+
+.two-column-dialog-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.replace-preview-panel {
+  border: 1px solid #d0d5dd;
+  border-radius: 8px;
+  padding: 12px;
+  background: #f8fafc;
+}
+
+.replace-preview-panel ul,
+.validation-panel ul {
+  max-height: 150px;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding-left: 20px;
+}
+
+.validation-panel {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 3000;
+  display: flex;
+  width: min(680px, calc(100vw - 48px));
+  max-height: 320px;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid #f0b849;
+  border-radius: 10px;
+  padding: 16px;
+  background: #fffaf0;
+  box-shadow: 0 12px 36px rgb(16 24 40 / 20%);
+}
+
+.validation-panel li.is-error {
+  color: #b42318;
+}
+
+.validation-panel li.is-warning {
+  color: #b54708;
+}
+
+.validation-panel li.is-suggestion {
+  color: #175cd3;
+}
+
+.validation-panel-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: flex-start;
+  gap: 8px;
 }
 </style>

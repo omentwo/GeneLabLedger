@@ -27,7 +27,13 @@ import {
 } from "@/api/projects";
 import { ApiError } from "@/api/client";
 import { useAppStore } from "@/stores/app";
-import type { DataType, FieldDefinition, LedgerTemplate } from "@/types/api";
+import type {
+  DataType,
+  FieldDefinition,
+  FieldValidationRules,
+  LedgerTemplate,
+  ValidationMode,
+} from "@/types/api";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -51,19 +57,29 @@ const workingFields = ref<FieldDefinition[]>([]);
 const saving = ref(false);
 const fieldDialogVisible = ref(false);
 const optionsDialogVisible = ref(false);
+const validationDialogVisible = ref(false);
 const editingOptionsField = ref<FieldDefinition | null>(null);
+const editingValidationField = ref<FieldDefinition | null>(null);
 const optionsDraft = ref<string[]>([]);
 const newField = reactive<{
   label: string;
   data_type: DataType;
   width: number;
   optionsText: string;
+  validation_mode: ValidationMode;
+  validation_rules: FieldValidationRules;
 }>({
   label: "",
   data_type: "text",
   width: 120,
   optionsText: "",
+  validation_mode: "suggestion",
+  validation_rules: {},
 });
+const validationDraft = reactive<{
+  mode: ValidationMode;
+  rules: FieldValidationRules;
+}>({ mode: "suggestion", rules: {} });
 
 const currentProject = computed(() =>
   appStore.projects.find((project) => project.id === currentProjectId.value),
@@ -75,6 +91,11 @@ const dataTypeLabels: Record<DataType, string> = {
   date: "日期",
   select: "备选输入",
 };
+const validationModeLabels: Record<ValidationMode, string> = {
+  suggestion: "建议",
+  warning: "警告",
+  strict: "严格",
+};
 
 function cloneFields(fields: FieldDefinition[]): FieldDefinition[] {
   return fields
@@ -82,6 +103,7 @@ function cloneFields(fields: FieldDefinition[]): FieldDefinition[] {
     .sort((a, b) => a.sort_order - b.sort_order)
     .map((field) => ({
       ...field,
+      validation_rules: { ...(field.validation_rules ?? {}) },
       options: field.options.map((option) => ({ ...option })),
     }));
 }
@@ -289,6 +311,12 @@ async function saveField(field: FieldDefinition): Promise<void> {
       data_type: field.data_type,
       width: Number(field.width),
       hidden: field.hidden,
+      ...(field.is_core
+        ? {}
+        : {
+            validation_mode: field.validation_mode,
+            validation_rules: field.validation_rules,
+          }),
     });
     await reloadAndNotify();
     ElMessage.success(`“${label}”已保存`);
@@ -328,6 +356,8 @@ function openAddField(): void {
     data_type: "text",
     width: 120,
     optionsText: "",
+    validation_mode: "suggestion",
+    validation_rules: {},
   });
   fieldDialogVisible.value = true;
 }
@@ -344,6 +374,8 @@ async function addField(): Promise<void> {
       data_type: newField.data_type,
       width: Number(newField.width),
       options: parseOptions(newField.optionsText),
+      validation_mode: newField.validation_mode,
+      validation_rules: newField.validation_rules,
     });
     fieldDialogVisible.value = false;
     await reloadAndNotify();
@@ -387,6 +419,32 @@ async function saveOptions(): Promise<void> {
     ElMessage.success("备选项已保存；表格中仍可输入任意内容");
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "备选项保存失败");
+  } finally {
+    saving.value = false;
+  }
+}
+
+function editValidation(field: FieldDefinition): void {
+  editingValidationField.value = field;
+  validationDraft.mode = field.validation_mode ?? "suggestion";
+  validationDraft.rules = { ...(field.validation_rules ?? {}) };
+  validationDialogVisible.value = true;
+}
+
+async function saveValidation(): Promise<void> {
+  const field = editingValidationField.value;
+  if (!field || field.is_core) return;
+  saving.value = true;
+  try {
+    await updateField(field.id, {
+      validation_mode: validationDraft.mode,
+      validation_rules: validationDraft.rules,
+    });
+    validationDialogVisible.value = false;
+    await reloadAndNotify();
+    ElMessage.success("验证规则已保存");
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "验证规则保存失败");
   } finally {
     saving.value = false;
   }
@@ -579,7 +637,15 @@ watch(
               </span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="190" fixed="right">
+          <el-table-column label="验证" width="90" align="center">
+            <template #default="{ row }: { row: FieldDefinition }">
+              <span v-if="row.is_core">固定</span>
+              <el-button v-else link type="primary" @click="editValidation(row)">
+                {{ validationModeLabels[row.validation_mode ?? 'suggestion'] }}
+              </el-button>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="230" fixed="right">
             <template #default="{ row }: { row: FieldDefinition }">
               <el-button link type="primary" @click="saveField(row)">保存</el-button>
               <el-button
@@ -589,6 +655,13 @@ watch(
                 @click="editOptions(row)"
               >
                 备选项
+              </el-button>
+              <el-button
+                link
+                :disabled="row.is_core"
+                @click="editValidation(row)"
+              >
+                验证
               </el-button>
               <el-button
                 link
@@ -639,6 +712,58 @@ watch(
           />
         </el-form-item>
       </div>
+      <el-form-item label="验证模式">
+        <el-select v-model="newField.validation_mode">
+          <el-option label="建议（允许输入，仅提示）" value="suggestion" />
+          <el-option label="警告（提交前确认）" value="warning" />
+          <el-option label="严格（不符合时阻止）" value="strict" />
+        </el-select>
+      </el-form-item>
+      <div class="two-column-form">
+        <el-form-item label="必填">
+          <el-switch v-model="newField.validation_rules.required" />
+        </el-form-item>
+        <el-form-item label="最大字符数">
+          <el-input-number
+            v-model="newField.validation_rules.max_length"
+            :min="1"
+            :max="10000"
+            controls-position="right"
+          />
+        </el-form-item>
+      </div>
+      <div v-if="newField.data_type === 'number'" class="two-column-form">
+        <el-form-item label="最小值">
+          <el-input-number v-model="newField.validation_rules.min_number" controls-position="right" />
+        </el-form-item>
+        <el-form-item label="最大值">
+          <el-input-number v-model="newField.validation_rules.max_number" controls-position="right" />
+        </el-form-item>
+      </div>
+      <el-form-item v-if="newField.data_type === 'number'" label="最多小数位">
+        <el-input-number
+          v-model="newField.validation_rules.decimal_places"
+          :min="0"
+          :max="12"
+          controls-position="right"
+        />
+      </el-form-item>
+      <div v-if="newField.data_type === 'date'" class="two-column-form">
+        <el-form-item label="最早日期">
+          <el-date-picker
+            v-model="newField.validation_rules.min_date"
+            type="date"
+            value-format="YYYY-MM-DD"
+          />
+        </el-form-item>
+        <el-form-item label="最晚日期">
+          <el-date-picker
+            v-model="newField.validation_rules.max_date"
+            type="date"
+            value-format="YYYY-MM-DD"
+          />
+        </el-form-item>
+      </div>
       <el-form-item label="备选项（可选，每行一个）">
         <el-input
           v-model="newField.optionsText"
@@ -652,6 +777,77 @@ watch(
     <template #footer>
       <el-button @click="fieldDialogVisible = false">取消</el-button>
       <el-button type="primary" :loading="saving" @click="addField">添加</el-button>
+    </template>
+  </el-dialog>
+
+  <el-dialog
+    v-model="validationDialogVisible"
+    :title="`验证规则：${editingValidationField?.label ?? ''}`"
+    width="620px"
+    append-to-body
+  >
+    <el-form label-position="top">
+      <el-form-item label="验证模式">
+        <el-radio-group v-model="validationDraft.mode">
+          <el-radio-button value="suggestion">建议</el-radio-button>
+          <el-radio-button value="warning">警告</el-radio-button>
+          <el-radio-button value="strict">严格</el-radio-button>
+        </el-radio-group>
+        <div class="form-help">
+          建议模式只提示；警告模式提交前确认；严格模式会阻止整批提交。
+        </div>
+      </el-form-item>
+      <div class="two-column-form">
+        <el-form-item label="必填">
+          <el-switch v-model="validationDraft.rules.required" />
+        </el-form-item>
+        <el-form-item label="最大字符数">
+          <el-input-number
+            v-model="validationDraft.rules.max_length"
+            :min="1"
+            :max="10000"
+            controls-position="right"
+          />
+        </el-form-item>
+      </div>
+      <template v-if="editingValidationField?.data_type === 'number'">
+        <div class="two-column-form">
+          <el-form-item label="最小值">
+            <el-input-number v-model="validationDraft.rules.min_number" controls-position="right" />
+          </el-form-item>
+          <el-form-item label="最大值">
+            <el-input-number v-model="validationDraft.rules.max_number" controls-position="right" />
+          </el-form-item>
+        </div>
+        <el-form-item label="最多小数位">
+          <el-input-number
+            v-model="validationDraft.rules.decimal_places"
+            :min="0"
+            :max="12"
+            controls-position="right"
+          />
+        </el-form-item>
+      </template>
+      <div v-if="editingValidationField?.data_type === 'date'" class="two-column-form">
+        <el-form-item label="最早日期">
+          <el-date-picker
+            v-model="validationDraft.rules.min_date"
+            type="date"
+            value-format="YYYY-MM-DD"
+          />
+        </el-form-item>
+        <el-form-item label="最晚日期">
+          <el-date-picker
+            v-model="validationDraft.rules.max_date"
+            type="date"
+            value-format="YYYY-MM-DD"
+          />
+        </el-form-item>
+      </div>
+    </el-form>
+    <template #footer>
+      <el-button @click="validationDialogVisible = false">取消</el-button>
+      <el-button type="primary" :loading="saving" @click="saveValidation">保存规则</el-button>
     </template>
   </el-dialog>
 

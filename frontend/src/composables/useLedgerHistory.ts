@@ -4,19 +4,51 @@ import type { ProjectRecord, RecordOperationDirection } from "@/types/api";
 
 export const LEDGER_HISTORY_LIMIT = 20;
 
-export interface LedgerHistoryEntry {
+interface LedgerHistoryBase {
   operationId: string;
   projectId: string;
   label: string;
+}
+
+export interface LedgerRecordHistoryEntry extends LedgerHistoryBase {
+  kind: "records";
   before: ProjectRecord[];
   after: ProjectRecord[];
 }
+
+export interface LedgerCellHistoryChange {
+  recordId: string;
+  fieldId: string;
+  before: string;
+  after: string;
+}
+
+export interface LedgerCellHistoryEntry extends LedgerHistoryBase {
+  kind: "cells";
+  changes: LedgerCellHistoryChange[];
+}
+
+export type LedgerHistoryEntry = LedgerRecordHistoryEntry | LedgerCellHistoryEntry;
 
 export function cloneLedgerRecord(record: ProjectRecord): ProjectRecord {
   return {
     ...record,
     values: { ...record.values },
     cell_highlight_colors: { ...record.cell_highlight_colors },
+  };
+}
+
+export function createLedgerCellHistoryEntry(
+  projectId: string,
+  label: string,
+  changes: LedgerCellHistoryChange[],
+): LedgerCellHistoryEntry {
+  return {
+    kind: "cells",
+    operationId: newOperationId(),
+    projectId,
+    label,
+    changes: changes.map((change) => ({ ...change })),
   };
 }
 
@@ -34,6 +66,7 @@ export function createLedgerHistoryEntry(
   after: ProjectRecord[],
 ): LedgerHistoryEntry {
   return {
+    kind: "records",
     operationId: newOperationId(),
     projectId,
     label,

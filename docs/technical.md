@@ -69,6 +69,7 @@ Electron 负责桌面边界和文件对话框，Vue 前端只通过 HTTP API 和
 Project
   ├─ FieldDefinition ── FieldOption
   ├─ ProjectRecord ── RecordValue
+  ├─ LedgerViewPreset
   └─ ReportTemplate ── ReportTemplateVersion ── ReportMapping
 
 AutoExportTask ── AutoExportRun
@@ -79,10 +80,11 @@ AppSetting
 | 模型 | 关键字段与约束 |
 |---|---|
 | `Project` | UUID 主键；名称唯一；保存顺序和是否参与实验编排 |
-| `FieldDefinition` | 项目内 `key`、`system_key` 唯一；支持 text/number/date/select；核心字段不可删除 |
+| `FieldDefinition` | 项目内 `key`、`system_key` 唯一；支持 text/number/date/select、建议/警告/严格验证及 JSON 规则；核心字段不可删除 |
 | `FieldOption` | 同一字段的选项值唯一，保存排序 |
-| `ProjectRecord` | UUID 主键；`pathology_number` 可重复并建索引；`experiment_number` 非空时全库唯一；保存状态、实验日期、报告标记和锁定标记 |
+| `ProjectRecord` | UUID 主键；`pathology_number` 可重复并建索引；`experiment_number` 非空时在项目内唯一；保存状态、实验日期、报告标记和锁定标记 |
 | `RecordValue` | 记录与自定义字段的组合唯一；值以文本保存并由字段定义解释 |
+| `LedgerViewPreset` | 项目内名称唯一；以稳定字段 ID 保存列顺序、宽度、隐藏、冻结、排序、筛选和快速录入图钉 |
 | `ReportTemplate` / `Version` | 项目内模板名称唯一；版本号在模板内唯一；版本保存 DOCX 路径和占位符快照 |
 | `ReportMapping` | 同一模板版本的占位符唯一；来源为字段、固定值、当前日期、实验编号、空白或未映射 |
 | `AutoExportTask` / `Run` | 任务名唯一；保存项目、绝对目录、周期、重试、保留和下一次运行时间；每次运行独立记录状态和文件路径 |
@@ -93,8 +95,9 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 
 - 锁定记录不能修改、导入覆盖或删除；锁定/解锁操作本身可审计。
 - 实验编号批量回写先将目标旧编号置为 `NULL` 并 `flush`，再写入新编号，避免交换编号触发唯一约束。
-- Excel 导入提交会重新校验项目归属、UUID、锁定状态和全库实验编号冲突，并在一个事务中写入记录值和审计。
+- Excel 导入提交会重新校验项目归属、UUID、锁定状态和项目内实验编号冲突，并在一个事务中写入记录值和审计。
 - 批量删除执行时比较预览得到的完整 UUID 集合；集合变化或包含锁定记录即拒绝执行。
+- 单元格粘贴、填充和查找替换先预检查字段规则与预期旧值，再在一个事务中提交；严格错误阻止整批写入，锁定记录跳过，警告需显式确认。
 
 所有创建/更新时间和审计时间由应用以 UTC 生成；`experiment_date` 是不带时区的业务日期，展示和调度时转换为 `Asia/Shanghai`。
 
@@ -107,13 +110,15 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 | 系统 | `GET /api/health`；`GET /api/audit-logs`；`GET/PUT /api/settings/{key}` | 健康检查、审计查询、通用设置 |
 | 项目 | `GET/POST /api/projects`；`PATCH/DELETE /api/projects/{project_id}` | 项目列表、创建、编辑、删除 |
 | 表头 | `GET/POST /api/projects/{project_id}/fields`；`PATCH/DELETE /api/projects/fields/{field_id}`；`PUT /api/projects/fields/{field_id}/options`；`PUT /api/projects/{project_id}/fields/reorder` | 动态字段及选项管理 |
+| 台账视图 | `GET/POST /api/projects/{project_id}/view-presets`；`PATCH/DELETE /api/projects/view-presets/{preset_id}`；`POST /api/projects/view-presets/{preset_id}/default` | 命名视图、默认视图和稳定字段布局 |
 | 台账 | `GET/POST /api/records`；`GET/PATCH/DELETE /api/records/{record_id}`；`PUT /api/records/{record_id}/lock`；`POST /api/records/{record_id}/assign-project`；`PUT /api/records/report-status` | 记录查询、CRUD、锁定、分配项目、报告标记 |
+| 动态查询与批量单元格 | `POST /api/records/query`；`POST /api/records/query/ids`；`POST /api/records/cell-batches/preview`；`POST /api/records/cell-batches/commit`；`POST /api/records/replace/preview`；`POST /api/records/replace/commit` | 动态字段分页筛选排序、跨页 ID、粘贴/填充与查找替换的预检查和原子提交 |
 | 编号与批删 | `POST /api/records/experiment-numbers`；`POST /api/records/bulk-delete/preview`；`POST /api/records/bulk-delete/execute` | 实验编号原子回写、预览/执行批量删除 |
 | 报告 | `GET/POST /api/report-templates`；`POST /api/report-templates/{template_id}/versions`；`PUT /api/report-template-versions/{version_id}/mappings`；`DELETE /api/report-templates/{template_id}`；`GET /api/printers`；`GET /api/print-engines`；`POST /api/reports/print` | 模板版本、映射、打印机和直接打印 |
 | Excel | `POST /api/exports/workbook`；`POST /api/imports/workbook/preview`；`POST /api/imports/workbook/commit` | XLSX 生成、预览导入、原子提交 |
 | 自动导出 | `GET /api/auto-export/config`；`GET/POST /api/auto-export/tasks`；`PUT/DELETE /api/auto-export/tasks/{task_id}`；`POST /api/auto-export/tasks/{task_id}/run`；`GET /api/auto-export/tasks/{task_id}/runs`；`POST /api/auto-export/validate-cron` | 任务配置、立即执行、历史查询、Cron 校验 |
 
-记录列表支持项目、状态、实验日期、报告状态、关键字、`limit/offset` 分页；默认 `limit=100`，最大 1,000。
+兼容记录列表支持项目、状态、实验日期、报告状态、关键字和 `limit/offset`。主台账使用复杂查询接口，每页固定 200 条，并支持动态字段筛选、排序和筛选结果的完整 ID 集合。
 
 ## 6. 文件处理与业务服务
 
@@ -142,7 +147,7 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 
 主要环境变量使用 `GENE_LEDGER_` 前缀：`DATA_DIR`、`DATABASE_URL`、`HOST`、`PORT`、`AUTO_CREATE_SCHEMA`、`MAX_TEMPLATE_SIZE_MB`、`AUDIT_LOG_RETENTION_DAYS`、`AUDIT_LOG_MAX_ROWS`。桌面启动通过命令行参数覆盖数据目录、主机和端口。
 
-迁移脚本位于 `backend/migrations/versions/`。当前迁移链包含初始结构、工作流字段、自动导出任务以及 `f3b7c9d2e410`；最后一个迁移删除旧的实验批次/运行和 Case 结构，将病理号写入 `project_records`，且明确不提供 downgrade。对已有数据库执行前必须备份 `ledger.db` 和 `templates/`。
+迁移脚本位于 `backend/migrations/versions/`。`e5f6a7b8c9d0` 增加字段验证配置和项目命名视图。启动检测到旧 SQLite 结构时，会先在数据目录的 `backups/` 下生成带时间戳的数据库副本，再执行迁移或桌面兼容升级；报告模板目录仍应纳入外部备份。
 
 普通开发后端的初始化流程由 `backend/run_backend.ps1` 执行：必要时 `uv sync --dev`，构建前端，运行 `alembic upgrade head`，再启动 `uvicorn app.main:app --host 127.0.0.1 --port 8000`。桌面 launcher 使用 `auto_create_schema=True`，不应把该行为误认为 `Settings` 的默认值。
 
@@ -171,8 +176,8 @@ backend/app/config.py                  Settings 与业务目录
 backend/app/database.py                SQLAlchemy 引擎与 SQLite 外键
 backend/app/models.py                  ORM 模型与约束
 backend/app/api/system.py              健康、审计、设置
-backend/app/api/projects.py            项目、动态字段与选项
-backend/app/api/records.py             台账、编号、锁定、批量删除
+backend/app/api/projects.py            项目、动态字段、验证规则与命名视图
+backend/app/api/records.py             台账、复杂查询、单元格批处理、编号与批量删除
 backend/app/api/imports.py              Excel 预览与提交
 backend/app/api/exports.py              Excel 字节流导出
 backend/app/api/reports.py              模板、映射、打印
@@ -180,6 +185,8 @@ backend/app/api/auto_exports.py         自动导出任务与运行历史
 backend/app/services/workbook_import.py XLSX 解析
 backend/app/services/workbooks.py       XLSX 生成
 backend/app/services/docx_template.py   DOCX 占位符处理
+backend/app/services/cell_batches.py    单元格预检查、并发校验与原子提交
+backend/app/services/field_validation.py 字段归一化与验证规则
 backend/app/services/auto_exports.py    调度、执行、重试、保留
 backend/app/services/office_printing.py Word/WPS 打印
 backend/desktop/launcher.py             桌面 sidecar 入口

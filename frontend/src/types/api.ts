@@ -1,5 +1,16 @@
 export type DataType = "text" | "number" | "date" | "select";
 export type RecordStatus = "待实验" | "已完成";
+export type ValidationMode = "suggestion" | "warning" | "strict";
+
+export interface FieldValidationRules {
+  required?: boolean;
+  min_number?: number | null;
+  max_number?: number | null;
+  decimal_places?: number | null;
+  min_date?: string | null;
+  max_date?: string | null;
+  max_length?: number | null;
+}
 export type MappingSourceType =
   | "unmapped"
   | "field"
@@ -25,6 +36,8 @@ export interface FieldDefinition {
   hidden: boolean;
   sort_order: number;
   width: number;
+  validation_mode?: ValidationMode;
+  validation_rules?: FieldValidationRules;
   options: FieldOption[];
 }
 
@@ -60,7 +73,38 @@ export interface LedgerTemplateField {
   hidden: boolean;
   sort_order: number;
   width: number;
+  validation_mode?: ValidationMode;
+  validation_rules?: FieldValidationRules;
   options: string[];
+}
+
+export interface LedgerViewColumnState {
+  field_id: string;
+  width: number;
+  hidden: boolean;
+  pinned: boolean;
+}
+
+export interface LedgerViewSortState {
+  field_id: string;
+  direction: "asc" | "desc";
+}
+
+export interface LedgerViewState {
+  columns: LedgerViewColumnState[];
+  frozen_until_field_id: string | null;
+  sort: LedgerViewSortState | null;
+  filters: Record<string, Record<string, unknown>>;
+}
+
+export interface LedgerViewPreset {
+  id: string;
+  project_id: string;
+  name: string;
+  state: LedgerViewState;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface LedgerTemplate {
@@ -128,6 +172,96 @@ export interface RecordCreateInput {
   experiment_number?: string | null;
   highlight_color?: string | null;
   values: Record<string, string>;
+}
+
+export type RecordFieldFilterOperator =
+  | "contains"
+  | "equals"
+  | "in"
+  | "date_between"
+  | "number_between"
+  | "is_empty"
+  | "not_empty";
+
+export interface RecordFieldFilter {
+  field_id: string;
+  operator: RecordFieldFilterOperator;
+  value?: string | null;
+  values?: string[];
+  start?: string | null;
+  end?: string | null;
+}
+
+export interface RecordComplexQuery {
+  project_id: string;
+  status?: string | null;
+  search?: string | null;
+  experiment_date_from?: string | null;
+  experiment_date_to?: string | null;
+  report_generated?: boolean | null;
+  field_filters: RecordFieldFilter[];
+  sort?: LedgerViewSortState | null;
+  limit: number;
+  offset: number;
+}
+
+export interface RecordIdList {
+  record_ids: string[];
+  total: number;
+}
+
+export interface RecordCellChange {
+  record_id: string;
+  field_id: string;
+  value: string;
+  expected_value?: string | null;
+}
+
+export interface RecordBatchNewRecord {
+  client_id: string;
+  pathology_number: string;
+  status: RecordStatus;
+  experiment_date: string | null;
+  experiment_number: string | null;
+  values: Record<string, string>;
+}
+
+export interface RecordValidationIssue {
+  record_id: string;
+  field_id: string;
+  severity: "suggestion" | "warning" | "error";
+  message: string;
+}
+
+export interface RecordCellBatchPreview {
+  token: string;
+  affected_count: number;
+  skipped_locked: number;
+  issues: RecordValidationIssue[];
+  expires_at: string;
+}
+
+export interface RecordCellBatchCommitResult {
+  records: ProjectRecord[];
+  skipped_locked: number;
+  changes: Array<{
+    record_id: string;
+    field_id: string;
+    before: string;
+    after: string;
+  }>;
+  created_record_ids: string[];
+  before: ProjectRecord[];
+  after: ProjectRecord[];
+}
+
+export interface RecordReplacePreview {
+  token: string;
+  matched_count: number;
+  skipped_locked: number;
+  issues: RecordValidationIssue[];
+  samples: RecordCellChange[];
+  expires_at: string;
 }
 
 export interface RecordUpdateInput {

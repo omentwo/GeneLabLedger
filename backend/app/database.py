@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import shutil
 from collections.abc import Generator
 from datetime import UTC, datetime
+from pathlib import Path
 
 from fastapi import Request
 from sqlalchemy import DateTime, Engine, create_engine, event
@@ -65,8 +67,70 @@ class Database:
     def create_all(self) -> None:
         from app import models  # noqa: F401
 
+        self.backup_sqlite_before_schema_upgrade()
         self._migrate_record_experiment_number_scope()
+        self._migrate_v010_field_validation()
         Base.metadata.create_all(self.engine)
+
+    def backup_sqlite_before_schema_upgrade(self) -> None:
+        """Create one timestamped copy before an installed database is altered."""
+        if self.engine.dialect.name != "sqlite":
+            return
+        database_name = self.engine.url.database
+        if not database_name or database_name == ":memory:":
+            return
+        database_path = Path(database_name).resolve()
+        if not database_path.is_file():
+            return
+        with self.engine.connect() as connection:
+            field_columns = {
+                str(row[1])
+                for row in connection.exec_driver_sql("PRAGMA table_info(field_definitions)")
+            }
+            view_exists = bool(
+                connection.exec_driver_sql(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='ledger_view_presets'"
+                ).scalar()
+            )
+        needs_upgrade = not {"validation_mode", "validation_rules"}.issubset(field_columns)
+        needs_upgrade = needs_upgrade or not view_exists
+        if not needs_upgrade:
+            return
+        backup_dir = database_path.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+        backup_path = backup_dir / f"ledger-before-v0.10.0-{timestamp}.db"
+        suffix = 1
+        while backup_path.exists():
+            backup_path = backup_dir / f"ledger-before-v0.10.0-{timestamp}-{suffix}.db"
+            suffix += 1
+        shutil.copy2(database_path, backup_path)
+
+    def _migrate_v010_field_validation(self) -> None:
+        """Keep packaged desktop upgrades compatible with ``create_all``."""
+        if self.engine.dialect.name != "sqlite":
+            return
+        with self.engine.begin() as connection:
+            table_exists = connection.exec_driver_sql(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='field_definitions'"
+            ).scalar()
+            if not table_exists:
+                return
+            columns = {
+                str(row[1])
+                for row in connection.exec_driver_sql("PRAGMA table_info(field_definitions)")
+            }
+            if "validation_mode" not in columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE field_definitions ADD COLUMN validation_mode "
+                    "VARCHAR(24) NOT NULL DEFAULT 'suggestion'"
+                )
+            if "validation_rules" not in columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE field_definitions ADD COLUMN validation_rules "
+                    "JSON NOT NULL DEFAULT '{}'"
+                )
 
     def _migrate_record_experiment_number_scope(self) -> None:
         """Replace the pre-0.9.3 global experiment-number index in SQLite.

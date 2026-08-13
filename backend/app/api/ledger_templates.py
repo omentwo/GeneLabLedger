@@ -44,7 +44,7 @@ def _clean_fields(values: list[LedgerTemplateField]) -> list[dict[str, Any]]:
             )
         if system_key:
             seen_system_keys.add(system_key)
-        item = field.model_dump()
+        item = field.model_dump(mode="json")
         item["key"] = key
         item["label"] = field.label.strip()
         item["system_key"] = system_key
@@ -69,6 +69,8 @@ def project_field_payload(project: Project) -> list[dict[str, Any]]:
             "hidden": field.hidden,
             "sort_order": index,
             "width": field.width,
+            "validation_mode": field.validation_mode,
+            "validation_rules": dict(field.validation_rules or {}),
             "options": [
                 option.value for option in sorted(field.options, key=lambda option: option.sort_order)
             ],
@@ -100,6 +102,8 @@ def apply_template_fields(session: Session, project: Project, template: LedgerTe
             hidden=bool(item.get("hidden", False)),
             sort_order=int(item.get("sort_order", index)),
             width=int(item.get("width", 120)),
+            validation_mode=str(item.get("validation_mode") or "suggestion"),
+            validation_rules=dict(item.get("validation_rules") or {}),
         )
         session.add(field)
         session.flush()

@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 DataType = Literal["text", "number", "date", "select"]
 RecordStatus = Literal["待实验", "已完成"]
+ValidationMode = Literal["suggestion", "warning", "strict"]
 _HEX_COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
@@ -61,6 +62,28 @@ class FieldOptionRead(BaseModel):
     sort_order: int
 
 
+class FieldValidationRules(BaseModel):
+    required: bool = False
+    min_number: float | None = None
+    max_number: float | None = None
+    decimal_places: int | None = Field(default=None, ge=0, le=12)
+    min_date: date | None = None
+    max_date: date | None = None
+    max_length: int | None = Field(default=None, ge=1, le=10000)
+
+    @model_validator(mode="after")
+    def validate_ranges(self) -> FieldValidationRules:
+        if (
+            self.min_number is not None
+            and self.max_number is not None
+            and self.min_number > self.max_number
+        ):
+            raise ValueError("最小数字不能大于最大数字")
+        if self.min_date is not None and self.max_date is not None and self.min_date > self.max_date:
+            raise ValueError("最早日期不能晚于最晚日期")
+        return self
+
+
 class FieldRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -74,6 +97,8 @@ class FieldRead(BaseModel):
     hidden: bool
     sort_order: int
     width: int
+    validation_mode: ValidationMode = "suggestion"
+    validation_rules: dict[str, object] = Field(default_factory=dict)
     options: list[FieldOptionRead] = Field(default_factory=list)
 
 
@@ -82,6 +107,8 @@ class FieldCreate(BaseModel):
     data_type: DataType = "text"
     width: int = Field(default=120, ge=58, le=600)
     options: list[str] = Field(default_factory=list)
+    validation_mode: ValidationMode = "suggestion"
+    validation_rules: FieldValidationRules = Field(default_factory=FieldValidationRules)
 
     @field_validator("label")
     @classmethod
@@ -105,6 +132,8 @@ class FieldUpdate(BaseModel):
     sort_order: int | None = Field(default=None, ge=0)
     width: int | None = Field(default=None, ge=58, le=600)
     hidden: bool | None = None
+    validation_mode: ValidationMode | None = None
+    validation_rules: FieldValidationRules | None = None
 
     @field_validator("label")
     @classmethod
@@ -197,6 +226,59 @@ class ProjectForceDeleteResponse(BaseModel):
     cleanup_warnings: list[str] = Field(default_factory=list)
 
 
+class LedgerViewColumnState(BaseModel):
+    field_id: str = Field(min_length=1, max_length=36)
+    width: int = Field(default=120, ge=58, le=600)
+    hidden: bool = False
+    pinned: bool = False
+
+
+class LedgerViewSortState(BaseModel):
+    field_id: str = Field(min_length=1, max_length=36)
+    direction: Literal["asc", "desc"] = "asc"
+
+
+class LedgerViewState(BaseModel):
+    columns: list[LedgerViewColumnState] = Field(default_factory=list, max_length=500)
+    frozen_until_field_id: str | None = Field(default=None, max_length=36)
+    sort: LedgerViewSortState | None = None
+    filters: dict[str, dict[str, object]] = Field(default_factory=dict)
+
+
+class LedgerViewPresetCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    state: LedgerViewState = Field(default_factory=LedgerViewState)
+    is_default: bool = False
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str) -> str:
+        return value.strip()
+
+
+class LedgerViewPresetUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    state: LedgerViewState | None = None
+    is_default: bool | None = None
+
+    @field_validator("name")
+    @classmethod
+    def clean_optional_name(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
+
+
+class LedgerViewPresetRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    project_id: str
+    name: str
+    state: LedgerViewState
+    is_default: bool
+    created_at: datetime
+    updated_at: datetime
+
+
 class LedgerTemplateField(BaseModel):
     key: str = Field(min_length=1, max_length=120)
     label: str = Field(min_length=1, max_length=120)
@@ -207,6 +289,8 @@ class LedgerTemplateField(BaseModel):
     sort_order: int = Field(default=0, ge=0)
     width: int = Field(default=120, ge=58, le=600)
     options: list[str] = Field(default_factory=list)
+    validation_mode: ValidationMode = "suggestion"
+    validation_rules: FieldValidationRules = Field(default_factory=FieldValidationRules)
 
     @field_validator("key", "label")
     @classmethod
@@ -463,6 +547,151 @@ class RecordList(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class RecordFieldFilter(BaseModel):
+    field_id: str = Field(min_length=1, max_length=36)
+    operator: Literal[
+        "contains",
+        "equals",
+        "in",
+        "date_between",
+        "number_between",
+        "is_empty",
+        "not_empty",
+    ] = "contains"
+    value: str | None = Field(default=None, max_length=10000)
+    values: list[str] = Field(default_factory=list, max_length=500)
+    start: str | None = Field(default=None, max_length=100)
+    end: str | None = Field(default=None, max_length=100)
+
+
+class RecordQuerySort(BaseModel):
+    field_id: str = Field(min_length=1, max_length=36)
+    direction: Literal["asc", "desc"] = "asc"
+
+
+class RecordQueryRequest(BaseModel):
+    project_id: str = Field(min_length=1, max_length=36)
+    status: str | None = Field(default=None, max_length=40)
+    search: str | None = Field(default=None, max_length=500)
+    experiment_date_from: date | None = None
+    experiment_date_to: date | None = None
+    report_generated: bool | None = None
+    field_filters: list[RecordFieldFilter] = Field(default_factory=list, max_length=200)
+    sort: RecordQuerySort | None = None
+    limit: int = Field(default=200, ge=1, le=1000)
+    offset: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def validate_date_range(self) -> RecordQueryRequest:
+        if (
+            self.experiment_date_from is not None
+            and self.experiment_date_to is not None
+            and self.experiment_date_from > self.experiment_date_to
+        ):
+            raise ValueError("开始日期不能晚于结束日期")
+        return self
+
+
+class RecordIdList(BaseModel):
+    record_ids: list[str] = Field(default_factory=list)
+    total: int
+
+
+class RecordIdsRequest(BaseModel):
+    record_ids: list[str] = Field(min_length=1, max_length=20000)
+
+
+class RecordCellChange(BaseModel):
+    record_id: str = Field(min_length=1, max_length=36)
+    field_id: str = Field(min_length=1, max_length=36)
+    value: str = Field(default="", max_length=10000)
+    expected_value: str | None = Field(default=None, max_length=10000)
+
+
+class RecordBatchNewRecord(BaseModel):
+    client_id: str = Field(min_length=1, max_length=100)
+    pathology_number: str = Field(min_length=1, max_length=160)
+    status: RecordStatus = "待实验"
+    experiment_date: date | None = None
+    experiment_number: str | None = Field(default=None, max_length=80)
+    values: dict[str, str] = Field(default_factory=dict)
+
+
+class RecordCellBatchPreview(BaseModel):
+    project_id: str = Field(min_length=1, max_length=36)
+    changes: list[RecordCellChange] = Field(default_factory=list, max_length=10000)
+    new_records: list[RecordBatchNewRecord] = Field(default_factory=list, max_length=10000)
+
+    @model_validator(mode="after")
+    def validate_non_empty_batch(self) -> RecordCellBatchPreview:
+        if not self.changes and not self.new_records:
+            raise ValueError("批量操作不能为空")
+        client_ids = [record.client_id for record in self.new_records]
+        if len(client_ids) != len(set(client_ids)):
+            raise ValueError("新增记录中存在重复的客户端标识")
+        return self
+
+
+class RecordValidationIssue(BaseModel):
+    record_id: str
+    field_id: str
+    severity: Literal["suggestion", "warning", "error"]
+    message: str
+
+
+class RecordCreateValidationRead(BaseModel):
+    issues: list[RecordValidationIssue] = Field(default_factory=list)
+
+
+class RecordCellBatchPreviewRead(BaseModel):
+    token: str
+    affected_count: int
+    skipped_locked: int
+    issues: list[RecordValidationIssue] = Field(default_factory=list)
+    expires_at: datetime
+
+
+class RecordCellBatchCommit(BaseModel):
+    token: str = Field(min_length=32, max_length=64)
+    accept_warnings: bool = False
+    include_snapshots: bool = False
+
+
+class RecordCommittedCellChange(BaseModel):
+    record_id: str
+    field_id: str
+    before: str
+    after: str
+
+
+class RecordCellBatchCommitRead(BaseModel):
+    records: list[RecordRead] = Field(default_factory=list)
+    skipped_locked: int = 0
+    changes: list[RecordCommittedCellChange] = Field(default_factory=list)
+    created_record_ids: list[str] = Field(default_factory=list)
+    before: list[RecordOperationSnapshot] = Field(default_factory=list)
+    after: list[RecordOperationSnapshot] = Field(default_factory=list)
+
+
+class RecordReplacePreview(BaseModel):
+    project_id: str = Field(min_length=1, max_length=36)
+    field_id: str = Field(min_length=1, max_length=36)
+    record_ids: list[str] = Field(min_length=1, max_length=20000)
+    find: str = Field(default="", max_length=10000)
+    replacement: str = Field(default="", max_length=10000)
+    match_mode: Literal["substring", "whole"] = "substring"
+    case_sensitive: bool = False
+
+
+class RecordReplacePreviewRead(BaseModel):
+    token: str
+    matched_count: int
+    skipped_locked: int
+    issues: list[RecordValidationIssue] = Field(default_factory=list)
+    samples: list[RecordCellChange] = Field(default_factory=list)
+    expires_at: datetime
 
 
 class ReportMappingInput(BaseModel):
