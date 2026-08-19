@@ -121,6 +121,7 @@ describe("ledger data operation APIs", () => {
       id: "record-1",
       project_id: "project-1",
       project_name: "项目 1",
+      position: 1,
       pathology_number: "H-1",
       status: "待实验" as const,
       experiment_date: null,

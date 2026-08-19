@@ -346,6 +346,7 @@ def duplicate_project(
         for source_record in source.records:
             cloned_record = ProjectRecord(
                 project_id=new_project.id,
+                position=source_record.position,
                 status=source_record.status,
                 experiment_date=source_record.experiment_date,
                 pathology_number=source_record.pathology_number,

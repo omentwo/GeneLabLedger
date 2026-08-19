@@ -361,6 +361,8 @@ class RecordCreate(BaseModel):
     experiment_number: str | None = Field(default=None, max_length=80)
     highlight_color: str | None = Field(default=None, max_length=7)
     values: dict[str, str] = Field(default_factory=dict)
+    insert_before_record_id: str | None = Field(default=None, min_length=1, max_length=36)
+    insert_after_record_id: str | None = Field(default=None, min_length=1, max_length=36)
 
     @field_validator("pathology_number")
     @classmethod
@@ -376,6 +378,12 @@ class RecordCreate(BaseModel):
     @classmethod
     def clean_highlight_color(cls, value: str | None) -> str | None:
         return normalize_highlight_color(value)
+
+    @model_validator(mode="after")
+    def validate_insert_anchor(self) -> RecordCreate:
+        if self.insert_before_record_id and self.insert_after_record_id:
+            raise ValueError("只能指定一个插入位置")
+        return self
 
 
 class RecordUpdate(BaseModel):
@@ -465,6 +473,7 @@ class RecordRead(BaseModel):
     id: str
     project_id: str
     project_name: str
+    position: int
     pathology_number: str
     status: str
     experiment_date: date | None
@@ -483,6 +492,7 @@ class RecordOperationSnapshot(BaseModel):
 
     id: str = Field(min_length=1, max_length=36)
     project_id: str = Field(min_length=1, max_length=36)
+    position: int = Field(ge=1)
     pathology_number: str = Field(min_length=1, max_length=160)
     status: RecordStatus
     experiment_date: date | None = None
@@ -617,6 +627,14 @@ class RecordBatchNewRecord(BaseModel):
     experiment_date: date | None = None
     experiment_number: str | None = Field(default=None, max_length=80)
     values: dict[str, str] = Field(default_factory=dict)
+    insert_before_record_id: str | None = Field(default=None, min_length=1, max_length=36)
+    insert_after_record_id: str | None = Field(default=None, min_length=1, max_length=36)
+
+    @model_validator(mode="after")
+    def validate_insert_anchor(self) -> RecordBatchNewRecord:
+        if self.insert_before_record_id and self.insert_after_record_id:
+            raise ValueError("只能指定一个插入位置")
+        return self
 
 
 class RecordCellBatchPreview(BaseModel):

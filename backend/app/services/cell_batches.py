@@ -16,6 +16,7 @@ from app.models import FieldDefinition, ProjectRecord, RecordValue
 from app.schemas import RecordBatchNewRecord, RecordCellChange
 from app.services.field_validation import FieldValueIssue, validate_field_value
 from app.services.record_operations import snapshot_record
+from app.services.records import allocate_record_position, next_record_position
 from app.services.serializers import record_dict
 
 PREVIEW_TTL = timedelta(minutes=10)
@@ -37,6 +38,8 @@ class StoredNewRecord:
     experiment_date: str
     experiment_number: str
     values: tuple[tuple[str, str], ...]
+    insert_before_record_id: str | None
+    insert_after_record_id: str | None
 
 
 @dataclass(frozen=True)
@@ -221,6 +224,8 @@ def _validate_new_records(
                 experiment_date=normalized_core["experiment_date"],
                 experiment_number=normalized_core["experiment_number"],
                 values=tuple(normalized_values),
+                insert_before_record_id=row.insert_before_record_id,
+                insert_after_record_id=row.insert_after_record_id,
             )
         )
     return stored, issues
@@ -407,6 +412,8 @@ def commit_cell_batch(
             experiment_date=date.fromisoformat(row.experiment_date) if row.experiment_date else None,
             experiment_number=row.experiment_number or None,
             values=dict(row.values),
+            insert_before_record_id=row.insert_before_record_id,
+            insert_after_record_id=row.insert_after_record_id,
         )
         for row in preview.new_records
     ]
@@ -447,9 +454,39 @@ def commit_cell_batch(
             )
         for record_id, values in custom_by_record.items():
             _apply_custom_values(session, records[record_id], values)
+        has_anchors = any(
+            row.insert_before_record_id or row.insert_after_record_id
+            for row in normalized_new_rows
+        )
+        next_position = None if has_anchors else next_record_position(session, preview.project_id)
+        before_anchor_tails: dict[str, str] = {}
+        after_anchor_tails: dict[str, str] = {}
         for row in normalized_new_rows:
+            before_tail_id = (
+                before_anchor_tails.get(row.insert_before_record_id)
+                if row.insert_before_record_id
+                else None
+            )
+            effective_before_id = row.insert_before_record_id if not before_tail_id else None
+            effective_after_id = before_tail_id
+            if row.insert_after_record_id:
+                effective_after_id = after_anchor_tails.get(
+                    row.insert_after_record_id,
+                    row.insert_after_record_id,
+                )
+            position = (
+                allocate_record_position(
+                    session,
+                    preview.project_id,
+                    before_record_id=effective_before_id,
+                    after_record_id=effective_after_id,
+                )
+                if effective_before_id or effective_after_id
+                else next_position or next_record_position(session, preview.project_id)
+            )
             created = ProjectRecord(
                 project_id=preview.project_id,
+                position=position,
                 pathology_number=row.pathology_number,
                 status=row.status,
                 experiment_date=date.fromisoformat(row.experiment_date) if row.experiment_date else None,
@@ -457,6 +494,12 @@ def commit_cell_batch(
             )
             session.add(created)
             session.flush()
+            if row.insert_before_record_id:
+                before_anchor_tails[row.insert_before_record_id] = created.id
+            if row.insert_after_record_id:
+                after_anchor_tails[row.insert_after_record_id] = created.id
+            if next_position is not None:
+                next_position += 1
             _apply_custom_values(session, created, dict(row.values))
             created_records.append(created)
         session.flush()

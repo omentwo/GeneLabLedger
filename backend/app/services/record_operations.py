@@ -25,6 +25,7 @@ def snapshot_record(record: ProjectRecord) -> dict:
     return {
         "id": record.id,
         "project_id": record.project_id,
+        "position": record.position,
         "pathology_number": record.pathology_number,
         "status": record.status,
         "experiment_date": record.experiment_date,
@@ -40,6 +41,9 @@ def snapshot_record(record: ProjectRecord) -> dict:
 
 
 def _snapshot_matches(record: ProjectRecord, snapshot: RecordOperationSnapshot) -> bool:
+    # Position is intentionally excluded: inserting another row shifts ledger
+    # positions without changing record content. The snapshot position is used
+    # only when an undo/redo operation recreates a deleted record.
     if record.id != snapshot.id:
         return False
     if record.project_id != snapshot.project_id:
@@ -78,6 +82,8 @@ def _apply_snapshot(
     record: ProjectRecord,
     snapshot: RecordOperationSnapshot,
 ) -> None:
+    # Do not overwrite position on an existing record for the same reason it is
+    # excluded from conflict matching above.
     record.project_id = snapshot.project_id
     record.pathology_number = snapshot.pathology_number
     record.status = snapshot.status
@@ -108,6 +114,7 @@ def _create_from_snapshot(
     record = ProjectRecord(
         id=snapshot.id,
         project_id=snapshot.project_id,
+        position=snapshot.position,
         pathology_number=snapshot.pathology_number,
         status=snapshot.status,
         experiment_date=snapshot.experiment_date,

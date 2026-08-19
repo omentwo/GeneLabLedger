@@ -13,6 +13,7 @@ function record(id: string): ProjectRecord {
     id,
     project_id: "project-1",
     project_name: "项目 1",
+    position: 1,
     pathology_number: id,
     status: "待实验",
     experiment_date: null,

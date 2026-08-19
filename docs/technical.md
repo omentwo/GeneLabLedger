@@ -82,7 +82,7 @@ AppSetting
 | `Project` | UUID 主键；名称唯一；保存顺序和是否参与实验编排 |
 | `FieldDefinition` | 项目内 `key`、`system_key` 唯一；支持 text/number/date/select、建议/警告/严格验证及 JSON 规则；核心字段不可删除 |
 | `FieldOption` | 同一字段的选项值唯一，保存排序 |
-| `ProjectRecord` | UUID 主键；`pathology_number` 可重复并建索引；`experiment_number` 非空时在项目内唯一；保存状态、实验日期、报告标记和锁定标记 |
+| `ProjectRecord` | UUID 主键；以项目内 `position` 保存稳定行序；`pathology_number` 可重复并建索引；`experiment_number` 非空时在项目内唯一；保存状态、实验日期、报告标记和锁定标记 |
 | `RecordValue` | 记录与自定义字段的组合唯一；值以文本保存并由字段定义解释 |
 | `LedgerViewPreset` | 项目内名称唯一；以稳定字段 ID 保存列顺序、宽度、隐藏、冻结、排序、筛选和快速录入图钉 |
 | `ReportTemplate` / `Version` | 项目内模板名称唯一；版本号在模板内唯一；版本保存 DOCX 路径和占位符快照 |
@@ -111,14 +111,14 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 | 项目 | `GET/POST /api/projects`；`PATCH/DELETE /api/projects/{project_id}` | 项目列表、创建、编辑、删除 |
 | 表头 | `GET/POST /api/projects/{project_id}/fields`；`PATCH/DELETE /api/projects/fields/{field_id}`；`PUT /api/projects/fields/{field_id}/options`；`PUT /api/projects/{project_id}/fields/reorder` | 动态字段及选项管理 |
 | 台账视图 | `GET/POST /api/projects/{project_id}/view-presets`；`PATCH/DELETE /api/projects/view-presets/{preset_id}`；`POST /api/projects/view-presets/{preset_id}/default` | 命名视图、默认视图和稳定字段布局 |
-| 台账 | `GET/POST /api/records`；`GET/PATCH/DELETE /api/records/{record_id}`；`PUT /api/records/{record_id}/lock`；`POST /api/records/{record_id}/assign-project`；`PUT /api/records/report-status` | 记录查询、CRUD、锁定、分配项目、报告标记 |
+| 台账 | `GET/POST /api/records`；`GET/PATCH/DELETE /api/records/{record_id}`；`PUT /api/records/{record_id}/lock`；`POST /api/records/{record_id}/assign-project`；`PUT /api/records/report-status` | 记录查询、CRUD、相对目标行插入、锁定、分配项目、报告标记 |
 | 动态查询与批量单元格 | `POST /api/records/query`；`POST /api/records/query/ids`；`POST /api/records/cell-batches/preview`；`POST /api/records/cell-batches/commit`；`POST /api/records/replace/preview`；`POST /api/records/replace/commit` | 动态字段分页筛选排序、跨页 ID、粘贴/填充与查找替换的预检查和原子提交 |
 | 编号与批删 | `POST /api/records/experiment-numbers`；`POST /api/records/bulk-delete/preview`；`POST /api/records/bulk-delete/execute` | 实验编号原子回写、预览/执行批量删除 |
 | 报告 | `GET/POST /api/report-templates`；`POST /api/report-templates/{template_id}/versions`；`PUT /api/report-template-versions/{version_id}/mappings`；`DELETE /api/report-templates/{template_id}`；`GET /api/printers`；`GET /api/print-engines`；`POST /api/reports/print` | 模板版本、映射、打印机和直接打印 |
 | Excel | `POST /api/exports/workbook`；`POST /api/imports/workbook/preview`；`POST /api/imports/workbook/commit` | XLSX 生成、预览导入、原子提交 |
 | 自动导出 | `GET /api/auto-export/config`；`GET/POST /api/auto-export/tasks`；`PUT/DELETE /api/auto-export/tasks/{task_id}`；`POST /api/auto-export/tasks/{task_id}/run`；`GET /api/auto-export/tasks/{task_id}/runs`；`POST /api/auto-export/validate-cron` | 任务配置、立即执行、历史查询、Cron 校验 |
 
-兼容记录列表支持项目、状态、实验日期、报告状态、关键字和 `limit/offset`。主台账使用复杂查询接口，每页固定 200 条，并支持动态字段筛选、排序和筛选结果的完整 ID 集合。
+兼容记录列表支持项目、状态、实验日期、报告状态、关键字和 `limit/offset`。主台账使用复杂查询接口，每页固定 200 条，并支持动态字段筛选、排序和筛选结果的完整 ID 集合。未指定字段排序时按项目内 `position` 返回；创建请求可用 `insert_before_record_id` 或 `insert_after_record_id` 指定相对插入位置，其他新增路径追加到末尾。
 
 ## 6. 文件处理与业务服务
 

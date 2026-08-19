@@ -144,6 +144,7 @@ export interface ProjectRecord {
   id: string;
   project_id: string;
   project_name: string;
+  position: number;
   pathology_number: string;
   status: RecordStatus;
   experiment_date: string | null;
@@ -172,6 +173,8 @@ export interface RecordCreateInput {
   experiment_number?: string | null;
   highlight_color?: string | null;
   values: Record<string, string>;
+  insert_before_record_id?: string;
+  insert_after_record_id?: string;
 }
 
 export type RecordFieldFilterOperator =
@@ -224,6 +227,8 @@ export interface RecordBatchNewRecord {
   experiment_date: string | null;
   experiment_number: string | null;
   values: Record<string, string>;
+  insert_before_record_id?: string;
+  insert_after_record_id?: string;
 }
 
 export interface RecordValidationIssue {

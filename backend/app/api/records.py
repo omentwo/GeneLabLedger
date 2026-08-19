@@ -50,6 +50,7 @@ from app.services.cell_batches import (
 from app.services.field_validation import validate_field_value
 from app.services.record_operations import apply_record_operation, snapshot_record
 from app.services.records import (
+    allocate_record_position,
     assign_record_to_project,
     replace_record_values,
     require_project,
@@ -144,10 +145,18 @@ def list_records(
     )
     base = select(ProjectRecord).where(*filters)
     total = session.scalar(select(func.count()).select_from(base.subquery())) or 0
+    ledger_ordered = bool(project_id and scope != "all") or (
+        scope == "selected" and len(normalized_project_ids) == 1
+    )
+    ordering = (
+        (ProjectRecord.position.asc(), ProjectRecord.id.asc())
+        if ledger_ordered
+        else (ProjectRecord.created_at.asc(), ProjectRecord.id.asc())
+    )
     records = list(
         session.scalars(
             base.options(*record_load_options())
-            .order_by(ProjectRecord.created_at.asc(), ProjectRecord.id.asc())
+            .order_by(*ordering)
             .offset(offset)
             .limit(limit)
         )
@@ -266,9 +275,9 @@ def _complex_record_statement(
         if sort_field.data_type == "number":
             sort_expression = cast(sort_expression, Float)
         order = sort_expression.desc() if payload.sort.direction == "desc" else sort_expression.asc()
-        statement = statement.order_by(order, ProjectRecord.created_at.asc(), ProjectRecord.id.asc())
+        statement = statement.order_by(order, ProjectRecord.position.asc(), ProjectRecord.id.asc())
     else:
-        statement = statement.order_by(ProjectRecord.created_at.asc(), ProjectRecord.id.asc())
+        statement = statement.order_by(ProjectRecord.position.asc(), ProjectRecord.id.asc())
     return statement
 
 
@@ -648,19 +657,26 @@ def create_record(payload: RecordCreate, session: Session = Depends(get_session)
         )
         if existing:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="实验编号已存在")
-    record = ProjectRecord(
-        project_id=payload.project_id,
-        pathology_number=normalized_core["pathology_number"],
-        status=normalized_core["status"],
-        experiment_date=(
-            date.fromisoformat(normalized_core["experiment_date"])
-            if normalized_core["experiment_date"]
-            else None
-        ),
-        experiment_number=normalized_core["experiment_number"] or None,
-        highlight_color=payload.highlight_color,
-    )
     try:
+        position = allocate_record_position(
+            session,
+            payload.project_id,
+            before_record_id=payload.insert_before_record_id,
+            after_record_id=payload.insert_after_record_id,
+        )
+        record = ProjectRecord(
+            project_id=payload.project_id,
+            position=position,
+            pathology_number=normalized_core["pathology_number"],
+            status=normalized_core["status"],
+            experiment_date=(
+                date.fromisoformat(normalized_core["experiment_date"])
+                if normalized_core["experiment_date"]
+                else None
+            ),
+            experiment_number=normalized_core["experiment_number"] or None,
+            highlight_color=payload.highlight_color,
+        )
         session.add(record)
         session.flush()
         replace_record_values(
@@ -680,6 +696,9 @@ def create_record(payload: RecordCreate, session: Session = Depends(get_session)
                 "status": record.status,
                 "experiment_number": record.experiment_number,
                 "highlight_color": record.highlight_color,
+                "position": record.position,
+                "insert_before_record_id": payload.insert_before_record_id,
+                "insert_after_record_id": payload.insert_after_record_id,
             },
         )
         session.commit()
@@ -1027,7 +1046,7 @@ def bulk_delete_records(session: Session, payload: BulkDeleteFilter) -> list[Pro
             select(ProjectRecord)
             .where(*bulk_delete_conditions(payload))
             .options(selectinload(ProjectRecord.values))
-            .order_by(ProjectRecord.created_at, ProjectRecord.id)
+            .order_by(ProjectRecord.position, ProjectRecord.id)
         )
     )
 

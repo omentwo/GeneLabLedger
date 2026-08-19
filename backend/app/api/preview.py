@@ -90,7 +90,7 @@ def _build_ledger_source(
         select(ProjectRecord)
         .where(*filters)
         .options(selectinload(ProjectRecord.values))
-        .order_by(ProjectRecord.created_at.asc(), ProjectRecord.id.asc())
+        .order_by(ProjectRecord.position.asc(), ProjectRecord.id.asc())
     )
     all_records = list(session.scalars(base_query))
     selected_targets = {(item.record_id, item.field_id) for item in payload.cells}
@@ -127,7 +127,7 @@ def _build_ledger_source(
             for record_id in record_by_id
             if any(target[0] == record_id for target in selected_targets)
         ]
-        ordered_records.sort(key=lambda record: (record.created_at, record.id))
+        ordered_records.sort(key=lambda record: (record.position, record.id))
         selected_field_ids = {field_id for _, field_id in selected_targets}
         ordered_fields = [field for field in fields if field.id in selected_field_ids]
         first_field_index = min(fields.index(field) for field in ordered_fields)
@@ -196,7 +196,7 @@ def create_ledger_print_preview(
         select(ProjectRecord)
         .where(*filters)
         .options(selectinload(ProjectRecord.values))
-        .order_by(ProjectRecord.created_at.asc(), ProjectRecord.id.asc())
+        .order_by(ProjectRecord.position.asc(), ProjectRecord.id.asc())
     )
     all_records = list(session.scalars(base_query))
     selected_targets = {(item.record_id, item.field_id) for item in payload.cells}
@@ -234,7 +234,7 @@ def create_ledger_print_preview(
             for record_id in record_by_id
             if any(target[0] == record_id for target in selected_targets)
         ]
-        ordered_records.sort(key=lambda record: (record.created_at, record.id))
+        ordered_records.sort(key=lambda record: (record.position, record.id))
         selected_field_ids = {field_id for _, field_id in selected_targets}
         ordered_fields = [field for field in fields if field.id in selected_field_ids]
         first_field_index = min(fields.index(field) for field in ordered_fields)

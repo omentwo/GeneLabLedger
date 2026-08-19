@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   commitCellBatch,
   commitReplace,
+  createRecord,
   previewCellBatch,
   queryRecordIds,
   queryRecords,
@@ -103,6 +104,25 @@ describe("v0.10 ledger APIs", () => {
       token: "b".repeat(32),
       accept_warnings: false,
       include_snapshots: false,
+    });
+  });
+
+  it("sends an anchored position when a draft is inserted from the context menu", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({}));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createRecord({
+      project_id: "p1",
+      pathology_number: "26-00002",
+      status: "待实验",
+      experiment_date: null,
+      values: {},
+      insert_before_record_id: "r2",
+    });
+
+    expect(JSON.parse(String((fetchMock.mock.calls[0]![1] as RequestInit).body))).toMatchObject({
+      pathology_number: "26-00002",
+      insert_before_record_id: "r2",
     });
   });
 

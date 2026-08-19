@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import (
@@ -34,6 +34,57 @@ def require_record(session: Session, record_id: str, *, include_values: bool = F
     if not record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="台账记录不存在")
     return record
+
+
+def next_record_position(session: Session, project_id: str) -> int:
+    current = session.scalar(
+        select(func.max(ProjectRecord.position)).where(ProjectRecord.project_id == project_id)
+    )
+    return (current or 0) + 1
+
+
+def allocate_record_position(
+    session: Session,
+    project_id: str,
+    *,
+    before_record_id: str | None = None,
+    after_record_id: str | None = None,
+) -> int:
+    """Return an append or anchored position and make room inside one ledger."""
+    anchor_id = before_record_id or after_record_id
+    if not anchor_id:
+        return next_record_position(session, project_id)
+
+    # A previous insertion in the same transaction may already have shifted
+    # this row, so bypass any stale identity-map position.
+    anchor = session.get(ProjectRecord, anchor_id, populate_existing=True)
+    if not anchor:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="插入位置对应的记录已不存在，请刷新后重试",
+        )
+    if anchor.project_id != project_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="插入位置不属于当前项目",
+        )
+
+    position = anchor.position + (1 if after_record_id else 0)
+    session.execute(
+        update(ProjectRecord)
+        .where(
+            ProjectRecord.project_id == project_id,
+            ProjectRecord.position >= position,
+        )
+        # Moving a row to make room is not a user edit. Keep its timestamp
+        # stable so older undo/redo snapshots remain valid.
+        .values(
+            position=ProjectRecord.position + 1,
+            updated_at=ProjectRecord.updated_at,
+        ),
+        execution_options={"synchronize_session": False},
+    )
+    return position
 
 
 def validate_record_values(
@@ -164,6 +215,7 @@ def assign_record_to_project(
     require_project(session, target_project_id)
     target = ProjectRecord(
         project_id=target_project_id,
+        position=next_record_position(session, target_project_id),
         pathology_number=source_record.pathology_number,
         status="待实验",
     )

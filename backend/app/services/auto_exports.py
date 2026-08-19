@@ -281,7 +281,7 @@ def create_export_file(session: Session, task: AutoExportTask) -> Path:
                 .options(
                     selectinload(ProjectRecord.values).selectinload(RecordValue.field),
                 )
-                .order_by(ProjectRecord.created_at, ProjectRecord.id)
+                .order_by(ProjectRecord.position, ProjectRecord.id)
             )
         )
         rows = []

@@ -1,7 +1,17 @@
 import type { FieldDefinition, ProjectRecord } from "@/types/api";
 import { comparePathologyNumbers } from "@/utils/pathologySort";
 
-export type LedgerRow = ProjectRecord & { _draft?: true };
+export type LedgerDraftPlacement = "before" | "after";
+export type LedgerRow = ProjectRecord & {
+  _draft?: true;
+  _insertAnchorId?: string;
+  _insertPlacement?: LedgerDraftPlacement;
+  _insertGroupId?: string;
+  _insertGroupOrder?: number;
+  _insertOriginAnchorId?: string;
+  _insertOriginPlacement?: LedgerDraftPlacement;
+};
+export type LedgerInsertedGroupRegistry = Map<string, Map<number, string>>;
 export type LedgerSortOrder = "ascending" | "descending";
 export type LedgerSortState = {
   fieldId: string;
@@ -100,7 +110,42 @@ export function compareLedgerRows(
   return order === "descending" ? -comparison : comparison;
 }
 
-/** Apply local filter/sort state while keeping draft rows at the bottom. */
+/** Keep a multi-row insertion stable even when its drafts are saved out of order. */
+export function reanchorInsertedDraftGroup(
+  drafts: LedgerRow[],
+  savedDraft: LedgerRow,
+  createdRecordId: string,
+  registry: LedgerInsertedGroupRegistry,
+): void {
+  const groupId = savedDraft._insertGroupId;
+  const savedOrder = savedDraft._insertGroupOrder;
+  if (!groupId || savedOrder === undefined) return;
+
+  const savedMembers = registry.get(groupId) ?? new Map<number, string>();
+  savedMembers.set(savedOrder, createdRecordId);
+  registry.set(groupId, savedMembers);
+  const orderedMembers = [...savedMembers.entries()].sort(([left], [right]) => left - right);
+
+  drafts.forEach((candidate) => {
+    if (candidate.id === savedDraft.id || candidate._insertGroupId !== groupId) return;
+    const candidateOrder = candidate._insertGroupOrder;
+    if (candidateOrder === undefined) return;
+    const predecessor = [...orderedMembers].reverse().find(([order]) => order < candidateOrder);
+    const successor = orderedMembers.find(([order]) => order > candidateOrder);
+    if (predecessor) {
+      candidate._insertAnchorId = predecessor[1];
+      candidate._insertPlacement = "after";
+    } else if (successor) {
+      candidate._insertAnchorId = successor[1];
+      candidate._insertPlacement = "before";
+    } else {
+      candidate._insertAnchorId = candidate._insertOriginAnchorId;
+      candidate._insertPlacement = candidate._insertOriginPlacement;
+    }
+  });
+}
+
+/** Apply local filter/sort state and merge anchored drafts around their target row. */
 export function applyLedgerTableView(
   rows: LedgerRow[],
   fields: FieldDefinition[],
@@ -115,12 +160,34 @@ export function applyLedgerTableView(
     fields.every((field) => matchesLedgerFilter(row, field, filters[field.id])),
   );
 
-  if (sortState) {
-    const field = fields.find((candidate) => candidate.id === sortState.fieldId);
-    if (field) {
-      filtered.sort((left, right) => compareLedgerRows(left, right, field, sortState.order));
-    }
+  const sortField = sortState
+    ? fields.find((candidate) => candidate.id === sortState.fieldId)
+    : undefined;
+  if (sortState && sortField) {
+    filtered.sort((left, right) => compareLedgerRows(left, right, sortField, sortState.order));
+  } else {
+    filtered.sort((left, right) => left.position - right.position || left.id.localeCompare(right.id));
   }
 
-  return [...filtered, ...drafts];
+  const visibleIds = new Set(filtered.map((row) => row.id));
+  const before = new Map<string, LedgerRow[]>();
+  const after = new Map<string, LedgerRow[]>();
+  const unanchored: LedgerRow[] = [];
+  drafts.forEach((draft) => {
+    const anchorId = draft._insertAnchorId;
+    if (!anchorId || !visibleIds.has(anchorId)) {
+      unanchored.push(draft);
+      return;
+    }
+    const groups = draft._insertPlacement === "after" ? after : before;
+    const group = groups.get(anchorId) ?? [];
+    group.push(draft);
+    groups.set(anchorId, group);
+  });
+
+  const result: LedgerRow[] = [];
+  filtered.forEach((row) => {
+    result.push(...(before.get(row.id) ?? []), row, ...(after.get(row.id) ?? []));
+  });
+  return [...result, ...unanchored];
 }

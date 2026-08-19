@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import Request
-from sqlalchemy import DateTime, Engine, create_engine, event
+from sqlalchemy import DateTime, Engine, create_engine, event, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.types import TypeDecorator
 
@@ -70,6 +70,7 @@ class Database:
         self.backup_sqlite_before_schema_upgrade()
         self._migrate_record_experiment_number_scope()
         self._migrate_v010_field_validation()
+        self._migrate_record_positions()
         Base.metadata.create_all(self.engine)
 
     def backup_sqlite_before_schema_upgrade(self) -> None:
@@ -93,17 +94,24 @@ class Database:
                     "AND name='ledger_view_presets'"
                 ).scalar()
             )
-        needs_upgrade = not {"validation_mode", "validation_rules"}.issubset(field_columns)
-        needs_upgrade = needs_upgrade or not view_exists
+            record_columns = {
+                str(row[1])
+                for row in connection.exec_driver_sql("PRAGMA table_info(project_records)")
+            }
+        needs_v010_upgrade = not {"validation_mode", "validation_rules"}.issubset(field_columns)
+        needs_v010_upgrade = needs_v010_upgrade or not view_exists
+        needs_position_upgrade = bool(record_columns) and "position" not in record_columns
+        needs_upgrade = needs_v010_upgrade or needs_position_upgrade
         if not needs_upgrade:
             return
         backup_dir = database_path.parent / "backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-        backup_path = backup_dir / f"ledger-before-v0.10.0-{timestamp}.db"
+        version = "v0.10.1" if needs_position_upgrade else "v0.10.0"
+        backup_path = backup_dir / f"ledger-before-{version}-{timestamp}.db"
         suffix = 1
         while backup_path.exists():
-            backup_path = backup_dir / f"ledger-before-v0.10.0-{timestamp}-{suffix}.db"
+            backup_path = backup_dir / f"ledger-before-{version}-{timestamp}-{suffix}.db"
             suffix += 1
         shutil.copy2(database_path, backup_path)
 
@@ -131,6 +139,49 @@ class Database:
                     "ALTER TABLE field_definitions ADD COLUMN validation_rules "
                     "JSON NOT NULL DEFAULT '{}'"
                 )
+
+    def _migrate_record_positions(self) -> None:
+        """Add and backfill stable per-project row positions for packaged desktops."""
+        if self.engine.dialect.name != "sqlite":
+            return
+        with self.engine.begin() as connection:
+            table_exists = connection.exec_driver_sql(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_records'"
+            ).scalar()
+            if not table_exists:
+                return
+            columns = {
+                str(row[1])
+                for row in connection.exec_driver_sql("PRAGMA table_info(project_records)")
+            }
+            if "position" not in columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE project_records ADD COLUMN position INTEGER NOT NULL DEFAULT 0"
+                )
+                rows = connection.execute(
+                    text(
+                        "SELECT id, project_id FROM project_records "
+                        "ORDER BY project_id, created_at, id"
+                    )
+                ).all()
+                counters: dict[str, int] = {}
+                updates = []
+                for record_id, project_id in rows:
+                    position = counters.get(project_id, 0) + 1
+                    counters[project_id] = position
+                    updates.append({"record_id": record_id, "position": position})
+                if updates:
+                    connection.execute(
+                        text(
+                            "UPDATE project_records SET position = :position "
+                            "WHERE id = :record_id"
+                        ),
+                        updates,
+                    )
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_record_project_position "
+                "ON project_records (project_id, position)"
+            )
 
     def _migrate_record_experiment_number_scope(self) -> None:
         """Replace the pre-0.9.3 global experiment-number index in SQLite.

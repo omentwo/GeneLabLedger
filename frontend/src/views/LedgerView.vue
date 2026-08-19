@@ -107,6 +107,7 @@ import type {
   RecordBatchNewRecord,
   RecordCellChange,
   RecordComplexQuery,
+  RecordCreateInput,
   RecordFieldFilter,
   RecordReplacePreview,
   RecordValidationIssue,
@@ -115,8 +116,12 @@ import { formatShanghaiDateTime } from "@/utils/datetime";
 import {
   applyLedgerTableView,
   getLedgerFieldValue,
+  reanchorInsertedDraftGroup,
+  type LedgerDraftPlacement,
   type LedgerFieldFilter,
   type LedgerFilterMap,
+  type LedgerInsertedGroupRegistry,
+  type LedgerRow,
   type LedgerSortState,
 } from "@/utils/ledgerTableView";
 import { summarizeLedgerSelection } from "@/utils/ledgerSelectionStats";
@@ -131,7 +136,6 @@ const canRedoHistory = ledgerHistory.canRedo;
 const historyBusy = ledgerHistory.busy;
 
 const activeProjectId = ref("");
-type LedgerRow = ProjectRecord & { _draft?: true };
 const records = ref<ProjectRecord[]>([]);
 const selectedRecords = ref<ProjectRecord[]>([]);
 const ledgerDisplaySettings = ref<LedgerDisplaySettings>({
@@ -462,6 +466,7 @@ const highlightPalette = [
   ),
 ];
 const persistedValues = new Map<string, string>();
+const insertedGroupRegistry: LedgerInsertedGroupRegistry = new Map();
 let draftSequence = 0;
 let loadSequence = 0;
 let viewLoadSequence = 0;
@@ -2208,7 +2213,7 @@ function contextRowCopySelection(row: LedgerRow): {
 
 function positionLedgerContextMenu(event: MouseEvent): void {
   const width = 230;
-  const height = 360;
+  const height = 440;
   ledgerContextMenu.value = {
     x: Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8)),
     y: Math.max(8, Math.min(event.clientY, window.innerHeight - height - 8)),
@@ -2329,6 +2334,63 @@ async function contextToggleLock(): Promise<void> {
   const row = contextMenuRow.value;
   if (row && !isDraft(row)) await toggleRecordLock(row);
   finishContextMenuAction();
+}
+
+function insertDraftRowsAt(
+  anchorId: string,
+  placement: LedgerDraftPlacement,
+  count: number,
+): void {
+  if (!currentProject.value || loading.value) return;
+  const groupId = `insert-${draftSequence + 1}`;
+  const inserted = Array.from({ length: count }, (_, order) =>
+    makeDraftRow({ anchorId, placement, groupId, order }),
+  );
+  draftRows.value.push(...inserted);
+
+  void nextTick(() => {
+    const rowIndex = tableRows.value.findIndex((row) => row.id === inserted[0]?.id);
+    const columnIndex = fields.value.findIndex(
+      (field) => field.system_key === "pathology_number",
+    );
+    if (rowIndex >= 0 && columnIndex >= 0) {
+      enterGridCellEdit({ rowIndex, columnIndex });
+    }
+  });
+}
+
+async function contextInsertRows(placement: LedgerDraftPlacement): Promise<void> {
+  const row = contextMenuRow.value;
+  if (!row || isDraft(row)) return finishContextMenuAction();
+  const anchorId = row.id;
+  finishContextMenuAction();
+  try {
+    const { value } = await ElMessageBox.prompt(
+      "请输入要插入的行数（1–100）。新行填写病理号后会自动保存。",
+      placement === "before" ? "在当前记录上方插入" : "在当前记录下方插入",
+      {
+        inputValue: "1",
+        inputPlaceholder: "行数",
+        confirmButtonText: "插入",
+        cancelButtonText: "取消",
+        inputValidator: (input) => {
+          const count = Number(input.trim());
+          return Number.isInteger(count) && count >= 1 && count <= 100
+            ? true
+            : "请输入 1 到 100 之间的整数";
+        },
+      },
+    );
+    const count = Number(value.trim());
+    insertDraftRowsAt(anchorId, placement, count);
+    ElMessage.success(`已插入 ${count} 行，请从病理号开始录入`);
+    if (ledgerSort.value || Object.values(ledgerFilters.value).some(Boolean)) {
+      ElMessage.info("当前视图有排序或筛选；记录保存后会继续按当前视图规则显示");
+    }
+  } catch (error) {
+    if (error === "cancel" || error === "close") return;
+    ElMessage.error(error instanceof Error ? error.message : "插入行失败");
+  }
 }
 
 async function clearGridCellRange(): Promise<void> {
@@ -2594,14 +2656,28 @@ function handleSelectionClickCapture(event: MouseEvent): void {
   suppressSelectionClick = false;
 }
 
-function makeDraftRow(): LedgerRow {
+function makeDraftRow(
+  insertion?: {
+    anchorId: string;
+    placement: LedgerDraftPlacement;
+    groupId: string;
+    order: number;
+  },
+): LedgerRow {
   const now = new Date().toISOString();
   draftSequence += 1;
   return {
     id: `draft-${draftSequence}`,
     _draft: true,
+    _insertAnchorId: insertion?.anchorId,
+    _insertPlacement: insertion?.placement,
+    _insertGroupId: insertion?.groupId,
+    _insertGroupOrder: insertion?.order,
+    _insertOriginAnchorId: insertion?.anchorId,
+    _insertOriginPlacement: insertion?.placement,
     project_id: activeProjectId.value,
     project_name: currentProject.value?.name ?? "",
+    position: 0,
     pathology_number: "",
     status: "待实验",
     experiment_date: null,
@@ -2937,8 +3013,7 @@ function reconcileOperationResult(result: {
     else records.value.push(record);
   });
   records.value.sort((left, right) => {
-    const created = left.created_at.localeCompare(right.created_at);
-    return created || left.id.localeCompare(right.id);
+    return left.position - right.position || left.id.localeCompare(right.id);
   });
   selectedRecords.value = [];
   selectedRecordIds.value = new Set();
@@ -2946,6 +3021,19 @@ function reconcileOperationResult(result: {
   activeGridCell.value = null;
   clearGridCellSelection();
   rememberAll();
+}
+
+function reanchorPendingInsertedDrafts(record: LedgerRow, created: ProjectRecord): void {
+  reanchorInsertedDraftGroup(draftRows.value, record, created.id, insertedGroupRegistry);
+}
+
+function cleanupInsertedGroupRegistry(): void {
+  const activeGroupIds = new Set(
+    draftRows.value.flatMap((draft) => draft._insertGroupId ? [draft._insertGroupId] : []),
+  );
+  insertedGroupRegistry.forEach((_, groupId) => {
+    if (!activeGroupIds.has(groupId)) insertedGroupRegistry.delete(groupId);
+  });
 }
 
 async function replayHistoryEntry(
@@ -3005,6 +3093,7 @@ function reconcileCommittedPaste(
     if (isDraft(record)) {
       const serverRecord = serverRecords.find((item) => item.id === committedId);
       const persistedRecord = serverRecord ?? ({ ...record, id: committedId } as LedgerRow);
+      reanchorPendingInsertedDrafts(record, persistedRecord);
       if ("_draft" in persistedRecord) delete persistedRecord._draft;
       records.value.push(persistedRecord as ProjectRecord);
       committedRecords.push(persistedRecord as ProjectRecord);
@@ -3016,6 +3105,7 @@ function reconcileCommittedPaste(
   });
   if (committedDraftIds.size) {
     draftRows.value = draftRows.value.filter((row) => !committedDraftIds.has(row.id));
+    cleanupInsertedGroupRegistry();
     recordTotal.value += committedDraftIds.size;
   }
   rememberAll();
@@ -3050,13 +3140,19 @@ async function persistDraft(record: LedgerRow, notify = true): Promise<boolean> 
     fields.value.forEach((field) => {
       if (!field.is_core) values[field.id] = (record.values[field.id] ?? "").trim();
     });
-    const payload = {
+    const payload: RecordCreateInput = {
       project_id: projectId,
       pathology_number: pathologyNumber,
       status: record.status,
       experiment_date: experimentDate || null,
       experiment_number: record.experiment_number?.trim() || null,
       values,
+      ...(record._insertAnchorId && record._insertPlacement === "before"
+        ? { insert_before_record_id: record._insertAnchorId }
+        : {}),
+      ...(record._insertAnchorId && record._insertPlacement === "after"
+        ? { insert_after_record_id: record._insertAnchorId }
+        : {}),
     };
     const validation = await validateNewRecord(payload);
     const errors = validation.issues.filter((issue) => issue.severity === "error");
@@ -3099,15 +3195,31 @@ function finishPersistedDraft(
   notify: boolean,
 ): void {
     const draftIndex = draftRows.value.findIndex((item) => item.id === record.id);
+    reanchorPendingInsertedDrafts(record, created);
     if (draftIndex >= 0) draftRows.value.splice(draftIndex, 1);
+    cleanupInsertedGroupRegistry();
     if (activeProjectId.value === projectId) {
+      if (record._insertAnchorId) {
+        records.value = records.value.map((item) =>
+          item.position >= created.position
+            ? { ...item, position: item.position + 1 }
+            : item,
+        );
+      }
       records.value.push(created);
+      records.value.sort(
+        (left, right) => left.position - right.position || left.id.localeCompare(right.id),
+      );
       recordTotal.value += 1;
       rememberRecord(created);
-      scrollTableToBottom();
+      if (!record._insertAnchorId) scrollTableToBottom();
     }
     pushHistory("新增台账记录", [], [created], projectId);
-    if (notify) ElMessage.success("病理号已自动保存，记录已加入表格底部");
+    if (notify) {
+      ElMessage.success(
+        record._insertAnchorId ? "病理号已自动保存，记录位置已保留" : "病理号已自动保存，记录已加入表格底部",
+      );
+    }
 }
 
 async function saveField(
@@ -3499,6 +3611,7 @@ async function loadRecords(
     if (isGlobalScope) {
       records.value = [];
       draftRows.value = [];
+      insertedGroupRegistry.clear();
       globalSearchResults.value = loaded;
       globalSearchTotal.value = total;
       persistedValues.clear();
@@ -4592,6 +4705,12 @@ async function pasteGrid(
           .filter((field) => !field.is_core)
           .map((field) => [field.id, (record.values[field.id] ?? "").trim()]),
       ),
+      ...(record._insertAnchorId && record._insertPlacement === "before"
+        ? { insert_before_record_id: record._insertAnchorId }
+        : {}),
+      ...(record._insertAnchorId && record._insertPlacement === "after"
+        ? { insert_after_record_id: record._insertAnchorId }
+        : {}),
     }));
     const batchPreview = existingChanges.length || batchNewRecords.length
       ? await previewCellBatch(projectId, existingChanges, batchNewRecords)
@@ -4629,6 +4748,9 @@ async function pasteGrid(
       });
 
       let committedDraftRecords: ProjectRecord[] = [];
+      const committedAnchoredDraft = committableDrafts.some(
+        ({ record }) => Boolean(record._insertAnchorId),
+      );
       if (committableDrafts.length) {
         committedDraftRecords = reconcileCommittedPaste(
           committableDrafts,
@@ -4636,6 +4758,9 @@ async function pasteGrid(
           batchResult?.records ?? [],
         ) ?? [];
         if (!committedDraftRecords.length && batchResult?.created_record_ids.length) {
+          await loadRecords(projectId, { showLoading: false, preserveHistory: true });
+        }
+        if (committedDraftRecords.length && committedAnchoredDraft) {
           await loadRecords(projectId, { showLoading: false, preserveHistory: true });
         }
       }
@@ -5246,6 +5371,7 @@ watch(activeProjectId, async (projectId, previousProjectId) => {
     activeGridCell.value = null;
     clearGridCellSelection();
     draftRows.value = [];
+    insertedGroupRegistry.clear();
     selectedRecords.value = [];
     selectionStartDate.value = "";
     selectionEndDate.value = "";
@@ -5990,6 +6116,13 @@ onBeforeUnmount(() => {
         @click.stop
         @contextmenu.prevent
       >
+        <button type="button" role="menuitem" @click="contextInsertRows('before')">
+          在当前记录上方插入行…
+        </button>
+        <button type="button" role="menuitem" @click="contextInsertRows('after')">
+          在当前记录下方插入行…
+        </button>
+        <div class="ledger-context-menu-separator" role="separator" />
         <button type="button" role="menuitem" @click="contextCopy">复制当前选区</button>
         <button
           type="button"
@@ -6954,6 +7087,12 @@ onBeforeUnmount(() => {
 .ledger-context-menu button:disabled {
   color: #b8c0cc;
   cursor: not-allowed;
+}
+
+.ledger-context-menu-separator {
+  height: 1px;
+  margin: 5px 4px;
+  background: #eaecf0;
 }
 
 .date-filter,

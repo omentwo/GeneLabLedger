@@ -172,7 +172,7 @@ def test_experiment_numbering_only_updates_numbers_and_remains_editable(
     assert rejected.status_code == 409
 
 
-def test_records_are_listed_oldest_first_and_custom_fields_are_independent(
+def test_records_follow_ledger_position_and_custom_fields_are_independent(
     client: TestClient,
     seeded_projects: dict[str, dict],
 ) -> None:
@@ -203,6 +203,82 @@ def test_records_are_listed_oldest_first_and_custom_fields_are_independent(
     assert updated.status_code == 200
     assert updated.json()["values"][custom["id"]] == "150ng"
     assert client.get(f"/api/records/{first['id']}").json()["values"][custom["id"]] == "100ng"
+
+
+def test_records_can_be_inserted_before_or_after_any_row(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    tb_id = seeded_projects["TB"]["id"]
+    braf_id = seeded_projects["BRAFV600E"]["id"]
+    first = client.post(
+        "/api/records",
+        json={"project_id": tb_id, "pathology_number": "INSERT-001"},
+    ).json()
+    second = client.post(
+        "/api/records",
+        json={"project_id": tb_id, "pathology_number": "INSERT-002"},
+    ).json()
+    third = client.post(
+        "/api/records",
+        json={"project_id": tb_id, "pathology_number": "INSERT-003"},
+    ).json()
+
+    above = client.post(
+        "/api/records",
+        json={
+            "project_id": tb_id,
+            "pathology_number": "INSERT-ABOVE",
+            "insert_before_record_id": second["id"],
+        },
+    )
+    assert above.status_code == 201, above.text
+    below = client.post(
+        "/api/records",
+        json={
+            "project_id": tb_id,
+            "pathology_number": "INSERT-BELOW",
+            "insert_after_record_id": second["id"],
+        },
+    )
+    assert below.status_code == 201, below.text
+
+    listed = client.get(f"/api/records?project_id={tb_id}&limit=1000").json()["items"]
+    expected_ids = [first["id"], above.json()["id"], second["id"], below.json()["id"], third["id"]]
+    assert [record["id"] for record in listed] == expected_ids
+    assert [record["position"] for record in listed] == [1, 2, 3, 4, 5]
+
+    queried = client.post(
+        "/api/records/query",
+        json={"project_id": tb_id, "field_filters": [], "limit": 200, "offset": 0},
+    )
+    assert queried.status_code == 200, queried.text
+    assert [record["id"] for record in queried.json()["items"]] == expected_ids
+
+    other = client.post(
+        "/api/records",
+        json={"project_id": braf_id, "pathology_number": "INSERT-OTHER"},
+    ).json()
+    wrong_project = client.post(
+        "/api/records",
+        json={
+            "project_id": tb_id,
+            "pathology_number": "INSERT-WRONG",
+            "insert_before_record_id": other["id"],
+        },
+    )
+    assert wrong_project.status_code == 422
+
+    duplicate_anchor = client.post(
+        "/api/records",
+        json={
+            "project_id": tb_id,
+            "pathology_number": "INSERT-INVALID",
+            "insert_before_record_id": first["id"],
+            "insert_after_record_id": second["id"],
+        },
+    )
+    assert duplicate_anchor.status_code == 422
 
 
 def test_record_search_supports_project_scopes(
@@ -336,6 +412,88 @@ def test_record_operation_undo_redo_updates_and_restores_exact_record_id(
     assert deleted_again.status_code == 200
     assert deleted_again.json()["deleted_ids"] == [created["id"]]
     assert client.get(f"/api/records/{created['id']}").status_code == 404
+
+
+def test_record_history_survives_position_shifts_from_later_inserts(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    project_id = seeded_projects["TB"]["id"]
+    head = client.post(
+        "/api/records",
+        json={"project_id": project_id, "pathology_number": "HISTORY-POSITION-HEAD"},
+    ).json()
+    target = client.post(
+        "/api/records",
+        json={"project_id": project_id, "pathology_number": "HISTORY-POSITION-TARGET"},
+    ).json()
+    before_edit = client.get(f"/api/records/{target['id']}").json()
+    edited = client.patch(
+        f"/api/records/{target['id']}",
+        json={"status": "已完成"},
+    ).json()
+    inserted = client.post(
+        "/api/records",
+        json={
+            "project_id": project_id,
+            "pathology_number": "HISTORY-POSITION-INSERTED",
+            "insert_before_record_id": target["id"],
+        },
+    ).json()
+    shifted = client.get(f"/api/records/{target['id']}").json()
+    assert shifted["position"] == edited["position"] + 1
+    assert shifted["updated_at"] == edited["updated_at"]
+
+    undo_insert = client.post(
+        "/api/records/operations/apply",
+        json={
+            "operation_id": "history-position-insert",
+            "project_id": project_id,
+            "direction": "undo",
+            "before": [],
+            "after": [inserted],
+        },
+    )
+    assert undo_insert.status_code == 200, undo_insert.text
+
+    undo_edit = client.post(
+        "/api/records/operations/apply",
+        json={
+            "operation_id": "history-position-edit",
+            "project_id": project_id,
+            "direction": "undo",
+            "before": [before_edit],
+            "after": [edited],
+        },
+    )
+    assert undo_edit.status_code == 200, undo_edit.text
+    assert undo_edit.json()["records"][0]["status"] == "待实验"
+
+    redo_edit = client.post(
+        "/api/records/operations/apply",
+        json={
+            "operation_id": "history-position-edit",
+            "project_id": project_id,
+            "direction": "redo",
+            "before": [before_edit],
+            "after": [edited],
+        },
+    )
+    assert redo_edit.status_code == 200, redo_edit.text
+    redo_insert = client.post(
+        "/api/records/operations/apply",
+        json={
+            "operation_id": "history-position-insert",
+            "project_id": project_id,
+            "direction": "redo",
+            "before": [],
+            "after": [inserted],
+        },
+    )
+    assert redo_insert.status_code == 200, redo_insert.text
+
+    listed = client.get(f"/api/records?project_id={project_id}&limit=1000").json()["items"]
+    assert [record["id"] for record in listed] == [head["id"], inserted["id"], target["id"]]
 
 
 def test_record_operation_rejects_conflicts_without_partial_changes(

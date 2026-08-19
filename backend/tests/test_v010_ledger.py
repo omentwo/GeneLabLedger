@@ -358,6 +358,84 @@ def test_mixed_cell_and_new_record_batch_is_atomic_and_undoable(
     assert ids == {"record_ids": [], "total": 0}
 
 
+def test_cell_batch_preserves_order_for_multiple_anchored_drafts(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    project_id = seeded_projects["TB"]["id"]
+    anchor = create_record(client, project_id, "PASTE-ANCHOR")
+    tail = create_record(client, project_id, "PASTE-TAIL")
+    preview = client.post(
+        "/api/records/cell-batches/preview",
+        json={
+            "project_id": project_id,
+            "changes": [],
+            "new_records": [
+                {
+                    "client_id": "draft-1",
+                    "pathology_number": "PASTE-001",
+                    "insert_after_record_id": anchor["id"],
+                },
+                {
+                    "client_id": "draft-2",
+                    "pathology_number": "PASTE-002",
+                    "insert_after_record_id": anchor["id"],
+                },
+            ],
+        },
+    )
+    assert preview.status_code == 200, preview.text
+    committed = client.post(
+        "/api/records/cell-batches/commit",
+        json={"token": preview.json()["token"], "include_snapshots": True},
+    )
+    assert committed.status_code == 200, committed.text
+    created_ids = committed.json()["created_record_ids"]
+
+    listed = client.get(f"/api/records?project_id={project_id}&limit=1000").json()["items"]
+    assert [record["id"] for record in listed] == [anchor["id"], *created_ids, tail["id"]]
+    assert [record["position"] for record in listed] == [1, 2, 3, 4]
+
+
+def test_cell_batch_preserves_order_for_multiple_drafts_before_an_anchor(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    project_id = seeded_projects["TB"]["id"]
+    head = create_record(client, project_id, "PASTE-BEFORE-HEAD")
+    anchor = create_record(client, project_id, "PASTE-BEFORE-ANCHOR")
+    preview = client.post(
+        "/api/records/cell-batches/preview",
+        json={
+            "project_id": project_id,
+            "changes": [],
+            "new_records": [
+                {
+                    "client_id": "draft-before-1",
+                    "pathology_number": "PASTE-BEFORE-001",
+                    "insert_before_record_id": anchor["id"],
+                },
+                {
+                    "client_id": "draft-before-2",
+                    "pathology_number": "PASTE-BEFORE-002",
+                    "insert_before_record_id": anchor["id"],
+                },
+            ],
+        },
+    )
+    assert preview.status_code == 200, preview.text
+    committed = client.post(
+        "/api/records/cell-batches/commit",
+        json={"token": preview.json()["token"], "include_snapshots": True},
+    )
+    assert committed.status_code == 200, committed.text
+    created_ids = committed.json()["created_record_ids"]
+
+    listed = client.get(f"/api/records?project_id={project_id}&limit=1000").json()["items"]
+    assert [record["id"] for record in listed] == [head["id"], *created_ids, anchor["id"]]
+    assert [record["position"] for record in listed] == [1, 2, 3, 4]
+
+
 def test_dynamic_query_pagination_sort_filters_and_all_ids(
     client: TestClient,
     seeded_projects: dict[str, dict],
@@ -490,3 +568,41 @@ def test_desktop_schema_upgrade_creates_backup_before_v010_changes(tmp_path: Pat
             row[1] for row in connection.execute("PRAGMA table_info(field_definitions)")
         }
     assert backup_columns == {"id"}
+
+
+def test_desktop_schema_upgrade_backfills_record_positions(tmp_path: Path) -> None:
+    database_path = tmp_path / "legacy-records.db"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "CREATE TABLE project_records ("
+            "id VARCHAR(36) PRIMARY KEY, project_id VARCHAR(36) NOT NULL, created_at DATETIME NOT NULL"
+            ")"
+        )
+        connection.executemany(
+            "INSERT INTO project_records (id, project_id, created_at) VALUES (?, ?, ?)",
+            [
+                ("later", "project-1", "2026-08-02 00:00:00"),
+                ("other", "project-2", "2026-08-01 00:00:00"),
+                ("earlier", "project-1", "2026-08-01 00:00:00"),
+            ],
+        )
+        connection.commit()
+
+    database = Database(f"sqlite:///{database_path.as_posix()}")
+    try:
+        database.backup_sqlite_before_schema_upgrade()
+        database._migrate_record_positions()
+    finally:
+        database.dispose()
+
+    backups = list((tmp_path / "backups").glob("ledger-before-v0.10.1-*.db"))
+    assert len(backups) == 1
+    with sqlite3.connect(database_path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(project_records)")}
+        positions = connection.execute(
+            "SELECT id, position FROM project_records ORDER BY project_id, position"
+        ).fetchall()
+        indexes = {row[1] for row in connection.execute("PRAGMA index_list(project_records)")}
+    assert "position" in columns
+    assert positions == [("earlier", 1), ("later", 2), ("other", 1)]
+    assert "ix_record_project_position" in indexes

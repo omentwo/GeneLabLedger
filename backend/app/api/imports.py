@@ -17,7 +17,7 @@ from app.schemas import (
     WorkbookImportPreviewRow,
     WorkbookImportResult,
 )
-from app.services.records import replace_record_values, require_project
+from app.services.records import next_record_position, replace_record_values, require_project
 from app.services.workbook_import import InvalidWorkbook, ParsedSheet, parse_xlsx
 
 router = APIRouter(prefix="/imports", tags=["Excel 导入"])
@@ -262,6 +262,7 @@ def commit_workbook(
         created = 0
         updated = 0
         record_ids: list[str] = []
+        next_position = next_record_position(session, payload.project_id)
         for row in payload.rows:
             record = existing.get(row.record_id or "")
             action = "update"
@@ -269,8 +270,10 @@ def commit_workbook(
                 record = ProjectRecord(
                     id=row.record_id or str(uuid.uuid4()),
                     project_id=payload.project_id,
+                    position=next_position,
                     pathology_number=row.pathology_number,
                 )
+                next_position += 1
                 session.add(record)
                 session.flush()
                 created += 1

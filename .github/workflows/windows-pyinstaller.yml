@@ -24,11 +24,17 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install and build frontend
+      - name: Install frontend dependencies
         working-directory: frontend
-        run: |
-          npm ci
-          npm run build
+        run: npm ci
+
+      - name: Test frontend
+        working-directory: frontend
+        run: npm run test
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -42,6 +48,14 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install uv
           uv sync --all-groups --locked
+
+      - name: Lint and test backend
+        working-directory: backend
+        shell: pwsh
+        run: |
+          uv run ruff check .
+          $testRoot = Join-Path $env:RUNNER_TEMP "backend-pytest"
+          uv run pytest -q --basetemp $testRoot -p no:cacheprovider
 
       - name: Build Python sidecar with PyInstaller
         working-directory: backend

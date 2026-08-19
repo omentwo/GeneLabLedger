@@ -8,6 +8,7 @@ def record_dict(record: ProjectRecord) -> dict:
         "id": record.id,
         "project_id": record.project_id,
         "project_name": record.project.name,
+        "position": record.position,
         "pathology_number": record.pathology_number,
         "status": record.status,
         "experiment_date": record.experiment_date,

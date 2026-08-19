@@ -50,7 +50,10 @@ class Project(Base, TimestampMixin):
         passive_deletes=True,
         order_by="FieldDefinition.sort_order",
     )
-    records: Mapped[list[ProjectRecord]] = relationship(back_populates="project")
+    records: Mapped[list[ProjectRecord]] = relationship(
+        back_populates="project",
+        order_by="ProjectRecord.position",
+    )
     report_templates: Mapped[list[ReportTemplate]] = relationship(back_populates="project")
     view_presets: Mapped[list[LedgerViewPreset]] = relationship(
         back_populates="project",
@@ -166,10 +169,12 @@ class ProjectRecord(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("project_id", "experiment_number", name="uq_record_project_experiment_number"),
         Index("ix_record_project_status", "project_id", "status"),
+        Index("ix_record_project_position", "project_id", "position"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="待实验", nullable=False)
     experiment_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     pathology_number: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
