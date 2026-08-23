@@ -10,7 +10,7 @@ from app.models import (
     ProjectRecord,
     RecordValue,
 )
-from app.services.field_validation import validate_field_value
+from app.services.field_validation import new_record_field_value, validate_field_value
 
 
 def require_project(session: Session, project_id: str) -> Project:
@@ -93,6 +93,7 @@ def validate_record_values(
     values: dict[str, str],
     *,
     include_required_missing: bool = False,
+    apply_defaults: bool = False,
 ) -> dict[str, str]:
     if not values and not include_required_missing:
         return {}
@@ -123,7 +124,13 @@ def validate_record_values(
     errors: list[str] = []
     field_ids = list(by_id) if include_required_missing else list(values)
     for field_id in field_ids:
-        value, issues = validate_field_value(by_id[field_id], values.get(field_id, ""))
+        field = by_id[field_id]
+        raw_value = (
+            new_record_field_value(field, values)
+            if apply_defaults
+            else values.get(field_id, "")
+        )
+        value, issues = validate_field_value(field, raw_value)
         normalized[field_id] = value
         errors.extend(issue.message for issue in issues if issue.severity == "error")
     if errors:
@@ -180,12 +187,14 @@ def replace_record_values(
     values: dict[str, str],
     *,
     include_required_missing: bool = False,
+    apply_defaults: bool = False,
 ) -> None:
     validated = validate_record_values(
         session,
         record.project_id,
         values,
         include_required_missing=include_required_missing,
+        apply_defaults=apply_defaults,
     )
     existing = {
         value.field_id: value
@@ -221,4 +230,16 @@ def assign_record_to_project(
     )
     session.add(target)
     session.flush()
+    defaults = {
+        field.id: field.default_value
+        for field in session.scalars(
+            select(FieldDefinition).where(
+                FieldDefinition.project_id == target_project_id,
+                FieldDefinition.is_core.is_(False),
+                FieldDefinition.default_value.is_not(None),
+            )
+        )
+        if field.default_value is not None
+    }
+    replace_record_values(session, target, defaults)
     return target

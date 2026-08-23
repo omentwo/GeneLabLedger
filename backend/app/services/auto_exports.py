@@ -292,9 +292,10 @@ def create_export_file(session: Session, task: AutoExportTask) -> Path:
     if not sheets:
         raise ValueError("任务没有可导出的检测项目")
     timestamp = datetime.now(LOCAL_TIMEZONE).strftime("%Y%m%d_%H%M%S")
-    path = output_directory / f"{_safe_filename(task.name)}_{timestamp}.xlsx"
-    if path.exists():
-        path = output_directory / f"{_safe_filename(task.name)}_{timestamp}_{uuid4().hex[:6]}.xlsx"
+    unique_suffix = f"{task.id[:8]}_{uuid4().hex[:8]}"
+    path = output_directory / (
+        f"{_safe_filename(task.name)}_{timestamp}_{unique_suffix}.xlsx"
+    )
     write_xlsx(path, sheets)
     return path
 
@@ -475,13 +476,16 @@ class AutoExportScheduler:
             self._running_task_ids.discard(task_id)
 
 
-def disable_tasks_for_deleted_project(session: Session, project_id: str) -> None:
+def disable_tasks_for_deleted_project(session: Session, project_id: str) -> int:
+    updated = 0
     tasks = list(session.scalars(select(AutoExportTask)))
     for task in tasks:
         if project_id in task.project_ids:
             task.enabled = False
             task.next_run_at = None
             task.last_message = "任务包含已删除的检测项目，已自动停用"
+            updated += 1
+    return updated
 
 
 def clear_next_runs(session: Session) -> None:

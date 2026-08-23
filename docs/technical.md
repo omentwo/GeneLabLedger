@@ -82,7 +82,7 @@ AppSetting
 | `Project` | UUID 主键；名称唯一；保存顺序和是否参与实验编排 |
 | `FieldDefinition` | 项目内 `key`、`system_key` 唯一；支持 text/number/date/select、建议/警告/严格验证及 JSON 规则；核心字段不可删除 |
 | `FieldOption` | 同一字段的选项值唯一，保存排序 |
-| `ProjectRecord` | UUID 主键；以项目内 `position` 保存稳定行序；`pathology_number` 可重复并建索引；`experiment_number` 非空时在项目内唯一；保存状态、实验日期、报告标记和锁定标记 |
+| `ProjectRecord` | UUID 主键；以项目内 `position` 保存稳定行序；`pathology_number` 可重复并建索引；`experiment_number` 可空且可重复；保存状态、实验日期、报告标记和锁定标记 |
 | `RecordValue` | 记录与自定义字段的组合唯一；值以文本保存并由字段定义解释 |
 | `LedgerViewPreset` | 项目内名称唯一；以稳定字段 ID 保存列顺序、宽度、隐藏、冻结、排序、筛选和快速录入图钉 |
 | `ReportTemplate` / `Version` | 项目内模板名称唯一；版本号在模板内唯一；版本保存 DOCX 路径和占位符快照 |
@@ -94,8 +94,8 @@ AppSetting
 SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除和更新通过外键、唯一约束及服务层校验共同保证一致性。核心业务规则包括：
 
 - 锁定记录不能修改、导入覆盖或删除；锁定/解锁操作本身可审计。
-- 实验编号批量回写先将目标旧编号置为 `NULL` 并 `flush`，再写入新编号，避免交换编号触发唯一约束。
-- Excel 导入提交会重新校验项目归属、UUID、锁定状态和项目内实验编号冲突，并在一个事务中写入记录值和审计。
+- 实验编号允许重复；批量编排只校验记录存在、未锁定且仍为“待实验”，再在一个事务中写回编号。
+- Excel 导入提交会重新校验项目归属、UUID、锁定状态和字段规则，并在一个事务中写入记录值和审计。
 - 批量删除执行时比较预览得到的完整 UUID 集合；集合变化或包含锁定记录即拒绝执行。
 - 单元格粘贴、填充和查找替换先预检查字段规则与预期旧值，再在一个事务中提交；严格错误阻止整批写入，锁定记录跳过，警告需显式确认。
 
@@ -124,7 +124,7 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 
 ### 6.1 XLSX
 
-`backend/app/services/workbook_import.py` 直接读取 ZIP 内的 workbook relationships、shared strings、inline strings、布尔和数字单元格，不把上传包解压到磁盘。导入按表头映射到核心/自定义字段，预览阶段产出逐行 `create/update/errors`，提交阶段由 `backend/app/api/imports.py` 负责二次校验和事务。
+`backend/app/services/workbook_import.py` 直接读取 ZIP 内的 workbook relationships、shared strings、inline strings、布尔和数字单元格，不把上传包解压到磁盘。解析器在按单元格列号扩充行数组前先校验坐标和 200 列上限。导入按表头映射到核心/自定义字段，字段标签/key/system key 的跨字段歧义会被拒绝；预览阶段产出逐行 `create/update/errors`，提交阶段由 `backend/app/api/imports.py` 负责二次校验和事务。
 
 导出由 `backend/app/services/workbooks.py` 生成 XLSX；请求模型限制最多 100 个工作表、每表 10,000 行/200 列、总计 2,000,000 个单元格。Electron 保存 IPC 将文件名规范化为 `.xlsx`，限制单次写入不超过 256 MiB，并要求用户确认保存路径。
 
@@ -141,11 +141,11 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 - BrowserWindow 使用 `contextIsolation=true`、`nodeIntegration=false`、`sandbox=true`；渲染进程只能使用 `preload.cjs` 暴露的保存工作簿、选择目录、切换数据目录和重启方法。
 - 主进程拒绝新窗口，生产导航只允许打包入口；每个 IPC handler 校验发送者必须是当前主窗口。
 - 后端仅绑定 `127.0.0.1`，CORS 只允许 `null` 和本地 Vite origin。当前没有用户认证，文件系统和数据目录权限由 Windows 环境负责。
-- 自动导出同一任务使用运行中集合避免重复执行；打印、导入、批删和编号回写均在服务层完成关键状态复核。
+- 自动导出同一任务使用运行中集合避免重复执行；批量单元格预览 token 在提交前原子认领，事务失败时释放、成功时消费；打印、导入、批删和编号回写均在服务层完成关键状态复核。
 
 ## 8. 配置、迁移与数据恢复
 
-主要环境变量使用 `GENE_LEDGER_` 前缀：`DATA_DIR`、`DATABASE_URL`、`HOST`、`PORT`、`AUTO_CREATE_SCHEMA`、`MAX_TEMPLATE_SIZE_MB`、`AUDIT_LOG_RETENTION_DAYS`、`AUDIT_LOG_MAX_ROWS`。桌面启动通过命令行参数覆盖数据目录、主机和端口。
+主要环境变量使用 `GENE_LEDGER_` 前缀：`DATA_DIR`、`DATABASE_URL`、`HOST`、`PORT`、`AUTO_CREATE_SCHEMA`、`MAX_TEMPLATE_SIZE_MB`、`PREVIEW_TTL_SECONDS`、`AUDIT_LOG_RETENTION_DAYS`、`AUDIT_LOG_MAX_ROWS`。PDF 打印预览默认保留 24 小时，启动及生成新预览时会清理过期文件。桌面启动通过命令行参数覆盖数据目录、主机和端口。
 
 迁移脚本位于 `backend/migrations/versions/`。`e5f6a7b8c9d0` 增加字段验证配置和项目命名视图。启动检测到旧 SQLite 结构时，会先在数据目录的 `backups/` 下生成带时间戳的数据库副本，再执行迁移或桌面兼容升级；报告模板目录仍应纳入外部备份。
 

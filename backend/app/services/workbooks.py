@@ -5,6 +5,7 @@ import re
 import zipfile
 from html import escape
 from pathlib import Path
+from uuid import uuid4
 
 INVALID_XML_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
@@ -217,4 +218,9 @@ def build_xlsx(sheets: list[WorkbookSheet]) -> bytes:
 
 
 def write_xlsx(path: Path, sheets: list[WorkbookSheet]) -> None:
-    path.write_bytes(build_xlsx(sheets))
+    temporary_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        temporary_path.write_bytes(build_xlsx(sheets))
+        temporary_path.replace(path)
+    finally:
+        temporary_path.unlink(missing_ok=True)

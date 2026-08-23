@@ -99,6 +99,7 @@ class FieldRead(BaseModel):
     width: int
     validation_mode: ValidationMode = "suggestion"
     validation_rules: dict[str, object] = Field(default_factory=dict)
+    default_value: str | None = None
     options: list[FieldOptionRead] = Field(default_factory=list)
 
 
@@ -109,6 +110,7 @@ class FieldCreate(BaseModel):
     options: list[str] = Field(default_factory=list)
     validation_mode: ValidationMode = "suggestion"
     validation_rules: FieldValidationRules = Field(default_factory=FieldValidationRules)
+    default_value: str | None = Field(default=None, max_length=10000)
 
     @field_validator("label")
     @classmethod
@@ -126,6 +128,13 @@ class FieldCreate(BaseModel):
         return result
 
 
+    @field_validator("default_value")
+    @classmethod
+    def clean_default_value(cls, value: str | None) -> str | None:
+        cleaned = value.strip() if value is not None else ""
+        return cleaned or None
+
+
 class FieldUpdate(BaseModel):
     label: str | None = Field(default=None, min_length=1, max_length=120)
     data_type: DataType | None = None
@@ -134,11 +143,18 @@ class FieldUpdate(BaseModel):
     hidden: bool | None = None
     validation_mode: ValidationMode | None = None
     validation_rules: FieldValidationRules | None = None
+    default_value: str | None = Field(default=None, max_length=10000)
 
     @field_validator("label")
     @classmethod
     def clean_optional_label(cls, value: str | None) -> str | None:
         return value.strip() if value is not None else None
+
+    @field_validator("default_value")
+    @classmethod
+    def clean_optional_default_value(cls, value: str | None) -> str | None:
+        cleaned = value.strip() if value is not None else ""
+        return cleaned or None
 
 
 class FieldOptionsReplace(BaseModel):
@@ -291,6 +307,7 @@ class LedgerTemplateField(BaseModel):
     options: list[str] = Field(default_factory=list)
     validation_mode: ValidationMode = "suggestion"
     validation_rules: FieldValidationRules = Field(default_factory=FieldValidationRules)
+    default_value: str | None = Field(default=None, max_length=10000)
 
     @field_validator("key", "label")
     @classmethod
@@ -307,6 +324,11 @@ class LedgerTemplateField(BaseModel):
                 result.append(cleaned)
         return result
 
+    @field_validator("default_value")
+    @classmethod
+    def clean_default_value(cls, value: str | None) -> str | None:
+        cleaned = value.strip() if value is not None else ""
+        return cleaned or None
 
 class LedgerTemplateCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
@@ -754,6 +776,12 @@ class ReportTemplateRead(BaseModel):
     created_at: datetime
 
 
+class ReportTemplateDeleteResponse(BaseModel):
+    template_id: str
+    removed_template_directory: bool
+    cleanup_warnings: list[str] = Field(default_factory=list)
+
+
 class ReportBatchItem(BaseModel):
     project_record_id: str
 
@@ -951,6 +979,8 @@ class WorkbookImportRow(BaseModel):
 class WorkbookImportPreviewRow(WorkbookImportRow):
     action: Literal["create", "update"]
     errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
 
 
 class WorkbookImportPreviewRead(BaseModel):
@@ -967,6 +997,7 @@ class WorkbookImportPreviewRead(BaseModel):
 class WorkbookImportCommit(BaseModel):
     project_id: str
     rows: list[WorkbookImportRow] = Field(min_length=1, max_length=10000)
+    accept_warnings: bool = False
 
 
 class WorkbookImportResult(BaseModel):

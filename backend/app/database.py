@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fastapi import Request
 from sqlalchemy import DateTime, Engine, create_engine, event, text
+from sqlalchemy.engine import Connection
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.types import TypeDecorator
 
@@ -68,10 +69,29 @@ class Database:
         from app import models  # noqa: F401
 
         self.backup_sqlite_before_schema_upgrade()
-        self._migrate_record_experiment_number_scope()
+        self._migrate_record_experiment_number_uniqueness()
         self._migrate_v010_field_validation()
         self._migrate_record_positions()
         Base.metadata.create_all(self.engine)
+
+    @staticmethod
+    def _sqlite_unique_columns(connection: Connection, table_name: str) -> set[tuple[str, ...]]:
+        result: set[tuple[str, ...]] = set()
+        escaped_table = table_name.replace('"', '""')
+        for row in connection.exec_driver_sql(
+            f'PRAGMA index_list("{escaped_table}")'
+        ):
+            if not bool(row[2]):
+                continue
+            index_name = str(row[1]).replace('"', '""')
+            columns = tuple(
+                str(item[2])
+                for item in connection.exec_driver_sql(
+                    f'PRAGMA index_info("{index_name}")'
+                )
+            )
+            result.add(columns)
+        return result
 
     def backup_sqlite_before_schema_upgrade(self) -> None:
         """Create one timestamped copy before an installed database is altered."""
@@ -98,16 +118,34 @@ class Database:
                 str(row[1])
                 for row in connection.exec_driver_sql("PRAGMA table_info(project_records)")
             }
-        needs_v010_upgrade = not {"validation_mode", "validation_rules"}.issubset(field_columns)
-        needs_v010_upgrade = needs_v010_upgrade or not view_exists
+            record_unique_columns = self._sqlite_unique_columns(connection, "project_records")
+        needs_validation_upgrade = bool(field_columns) and not {
+            "validation_mode",
+            "validation_rules",
+        }.issubset(field_columns)
+        needs_default_upgrade = bool(field_columns) and "default_value" not in field_columns
+        needs_v010_upgrade = needs_validation_upgrade or not view_exists
         needs_position_upgrade = bool(record_columns) and "position" not in record_columns
-        needs_upgrade = needs_v010_upgrade or needs_position_upgrade
+        needs_number_upgrade = any(
+            "experiment_number" in columns for columns in record_unique_columns
+        )
+        needs_upgrade = (
+            needs_v010_upgrade
+            or needs_default_upgrade
+            or needs_position_upgrade
+            or needs_number_upgrade
+        )
         if not needs_upgrade:
             return
         backup_dir = database_path.parent / "backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-        version = "v0.10.1" if needs_position_upgrade else "v0.10.0"
+        if needs_position_upgrade:
+            version = "v0.10.1"
+        elif needs_v010_upgrade:
+            version = "v0.10.0"
+        else:
+            version = "v0.11.0"
         backup_path = backup_dir / f"ledger-before-{version}-{timestamp}.db"
         suffix = 1
         while backup_path.exists():
@@ -138,6 +176,10 @@ class Database:
                 connection.exec_driver_sql(
                     "ALTER TABLE field_definitions ADD COLUMN validation_rules "
                     "JSON NOT NULL DEFAULT '{}'"
+                )
+            if "default_value" not in columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE field_definitions ADD COLUMN default_value TEXT"
                 )
 
     def _migrate_record_positions(self) -> None:
@@ -183,71 +225,140 @@ class Database:
                 "ON project_records (project_id, position)"
             )
 
-    def _migrate_record_experiment_number_scope(self) -> None:
-        """Replace the pre-0.9.3 global experiment-number index in SQLite.
+    def _migrate_record_experiment_number_uniqueness(self) -> None:
+        """Remove legacy experiment-number uniqueness constraints in SQLite.
 
         ``create_all`` intentionally does not alter existing tables.  Ledger
-        duplication needs the number to be unique inside each ledger, so an
-        existing local database is rebuilt once while preserving every row.
+        experiment numbers may repeat, so an existing local database is
+        rebuilt once while preserving every row and foreign-key target.
         """
         if self.engine.dialect.name != "sqlite":
             return
-        with self.engine.begin() as connection:
-            table_sql = connection.exec_driver_sql(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='project_records'"
+        with self.engine.connect() as connection:
+            table_exists = connection.exec_driver_sql(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_records'"
             ).scalar()
-            if not table_sql or "uq_record_experiment_number" not in str(table_sql):
+            if not table_exists:
                 return
+            unique_columns = self._sqlite_unique_columns(connection, "project_records")
+            if not any("experiment_number" in columns for columns in unique_columns):
+                return
+            legacy_columns = {
+                str(row[1])
+                for row in connection.exec_driver_sql("PRAGMA table_info(project_records)")
+            }
+            connection.commit()
             connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
-            connection.exec_driver_sql("ALTER TABLE project_records RENAME TO project_records_legacy")
-            connection.exec_driver_sql("DROP INDEX IF EXISTS ix_record_project_status")
-            connection.exec_driver_sql("DROP INDEX IF EXISTS ix_project_records_pathology_number")
-            connection.exec_driver_sql(
-                """
-                CREATE TABLE project_records (
-                    id VARCHAR(36) NOT NULL,
-                    project_id VARCHAR(36) NOT NULL,
-                    status VARCHAR(40) NOT NULL,
-                    experiment_date DATE,
-                    locked BOOLEAN NOT NULL,
-                    created_at DATETIME NOT NULL,
-                    updated_at DATETIME NOT NULL,
-                    experiment_number VARCHAR(80),
-                    report_generated BOOLEAN DEFAULT 0 NOT NULL,
-                    pathology_number VARCHAR(160) NOT NULL,
-                    highlight_color VARCHAR(7),
-                    cell_highlight_colors JSON NOT NULL,
-                    PRIMARY KEY (id),
-                    CONSTRAINT uq_record_project_experiment_number
-                        UNIQUE (project_id, experiment_number),
-                    FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT
-                )
-                """
-            )
-            connection.exec_driver_sql(
-                """
-                INSERT INTO project_records (
-                    id, project_id, status, experiment_date, locked, created_at,
-                    updated_at, experiment_number, report_generated, pathology_number,
-                    highlight_color, cell_highlight_colors
-                )
-                SELECT
-                    id, project_id, status, experiment_date, locked, created_at,
-                    updated_at, experiment_number, report_generated, pathology_number,
-                    highlight_color, cell_highlight_colors
-                FROM project_records_legacy
-                """
-            )
-            connection.exec_driver_sql("DROP TABLE project_records_legacy")
-            connection.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_record_project_status "
-                "ON project_records (project_id, status)"
-            )
-            connection.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_project_records_pathology_number "
-                "ON project_records (pathology_number)"
-            )
-            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+            if bool(connection.exec_driver_sql("PRAGMA foreign_keys").scalar()):
+                raise RuntimeError("无法暂停 SQLite 外键检查，数据库升级已取消")
+            connection.commit()
+
+            def source(column: str, fallback: str) -> str:
+                return f'"{column}"' if column in legacy_columns else fallback
+
+            try:
+                with connection.begin():
+                    connection.exec_driver_sql("DROP TABLE IF EXISTS project_records_number_new")
+                    connection.exec_driver_sql(
+                        """
+                        CREATE TABLE project_records_number_new (
+                            id VARCHAR(36) NOT NULL,
+                            project_id VARCHAR(36) NOT NULL,
+                            position INTEGER NOT NULL,
+                            status VARCHAR(40) NOT NULL,
+                            experiment_date DATE,
+                            pathology_number VARCHAR(160) NOT NULL,
+                            experiment_number VARCHAR(80),
+                            report_generated BOOLEAN DEFAULT 0 NOT NULL,
+                            locked BOOLEAN NOT NULL,
+                            highlight_color VARCHAR(7),
+                            cell_highlight_colors JSON NOT NULL,
+                            created_at DATETIME NOT NULL,
+                            updated_at DATETIME NOT NULL,
+                            PRIMARY KEY (id),
+                            FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT
+                        )
+                        """
+                    )
+                    target_columns = (
+                        "id",
+                        "project_id",
+                        "position",
+                        "status",
+                        "experiment_date",
+                        "pathology_number",
+                        "experiment_number",
+                        "report_generated",
+                        "locked",
+                        "highlight_color",
+                        "cell_highlight_colors",
+                        "created_at",
+                        "updated_at",
+                    )
+                    source_expressions = (
+                        source("id", "''"),
+                        source("project_id", "''"),
+                        source("position", "0"),
+                        source("status", "'待实验'"),
+                        source("experiment_date", "NULL"),
+                        source("pathology_number", "''"),
+                        source("experiment_number", "NULL"),
+                        source("report_generated", "0"),
+                        source("locked", "0"),
+                        source("highlight_color", "NULL"),
+                        source("cell_highlight_colors", "'{}'"),
+                        source("created_at", "CURRENT_TIMESTAMP"),
+                        source("updated_at", "CURRENT_TIMESTAMP"),
+                    )
+                    connection.exec_driver_sql(
+                        "INSERT INTO project_records_number_new "
+                        f"({', '.join(target_columns)}) "
+                        f"SELECT {', '.join(source_expressions)} FROM project_records"
+                    )
+                    connection.exec_driver_sql("DROP TABLE project_records")
+                    connection.exec_driver_sql(
+                        "ALTER TABLE project_records_number_new RENAME TO project_records"
+                    )
+                    rows = connection.exec_driver_sql(
+                        "SELECT id, project_id FROM project_records "
+                        "ORDER BY project_id, created_at, id"
+                    ).all()
+                    counters: dict[str, int] = {}
+                    for record_id, project_id in rows:
+                        position = counters.get(project_id, 0) + 1
+                        counters[project_id] = position
+                        connection.execute(
+                            text(
+                                "UPDATE project_records SET position = :position "
+                                "WHERE id = :record_id"
+                            ),
+                            {"record_id": record_id, "position": position},
+                        )
+                    connection.exec_driver_sql(
+                        "CREATE INDEX ix_record_project_status "
+                        "ON project_records (project_id, status)"
+                    )
+                    connection.exec_driver_sql(
+                        "CREATE INDEX ix_record_project_position "
+                        "ON project_records (project_id, position)"
+                    )
+                    connection.exec_driver_sql(
+                        "CREATE INDEX ix_project_records_pathology_number "
+                        "ON project_records (pathology_number)"
+                    )
+                    foreign_key_errors = connection.exec_driver_sql(
+                        "PRAGMA foreign_key_check"
+                    ).all()
+                    if foreign_key_errors:
+                        raise RuntimeError(
+                            "SQLite 外键检查失败，数据库升级已回滚："
+                            f"{foreign_key_errors[:3]}"
+                        )
+            finally:
+                if connection.in_transaction():
+                    connection.rollback()
+                connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+                connection.commit()
 
     def drop_all(self) -> None:
         from app import models  # noqa: F401

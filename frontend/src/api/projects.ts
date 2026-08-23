@@ -97,6 +97,7 @@ export function createField(
     options: string[];
     validation_mode?: ValidationMode;
     validation_rules?: FieldValidationRules;
+    default_value?: string | null;
   },
 ): Promise<FieldDefinition> {
   return apiRequest<FieldDefinition>(`/projects/${projectId}/fields`, {
@@ -115,6 +116,7 @@ export function updateField(
     hidden?: boolean;
     validation_mode?: ValidationMode;
     validation_rules?: FieldValidationRules;
+    default_value?: string | null;
   },
 ): Promise<FieldDefinition> {
   return apiRequest<FieldDefinition>(`/projects/fields/${fieldId}`, {

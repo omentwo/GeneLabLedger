@@ -131,6 +131,15 @@ def test_experiment_numbering_only_updates_numbers_and_remains_editable(
             "status": "已完成",
         },
     ).json()
+    same_number = client.post(
+        "/api/records",
+        json={
+            "project_id": tb_id,
+            "pathology_number": "PLAN-SAME-NUMBER",
+            "experiment_number": "20260801-1",
+        },
+    )
+    assert same_number.status_code == 201, same_number.text
 
     assert client.put(f"/api/records/{first['id']}/lock", json={"locked": True}).status_code == 200
     blocked = client.post(
@@ -156,6 +165,9 @@ def test_experiment_numbering_only_updates_numbers_and_remains_editable(
     assert refreshed_first["experiment_date"] == "2026-07-30"
     assert refreshed_second["experiment_date"] == "2026-07-31"
     assert refreshed_first["status"] == refreshed_second["status"] == "待实验"
+    assert client.get(f"/api/records/{same_number.json()['id']}").json()[
+        "experiment_number"
+    ] == "20260801-1"
 
     changed = client.patch(
         f"/api/records/{second['id']}",
@@ -163,6 +175,12 @@ def test_experiment_numbering_only_updates_numbers_and_remains_editable(
     )
     assert changed.status_code == 200
     assert changed.json()["experiment_number"] == "MANUAL-1"
+    same_manual_number = client.patch(
+        f"/api/records/{first['id']}",
+        json={"experiment_number": "MANUAL-1"},
+    )
+    assert same_manual_number.status_code == 200, same_manual_number.text
+    assert same_manual_number.json()["experiment_number"] == "MANUAL-1"
     assert client.get(f"/api/records/{first['id']}").json()["experiment_date"] == "2026-07-30"
     assert client.get(f"/api/records/{second['id']}").json()["status"] == "待实验"
     rejected = client.post(
@@ -615,6 +633,145 @@ def test_excel_export_can_be_previewed_and_imported_by_uuid(
     assert refreshed["experiment_date"] == "2026-08-02"
     assert refreshed["experiment_number"] == "IMP-2"
     assert refreshed["values"][custom["id"]] == "200"
+
+    duplicate_workbook = workbook_bytes(
+        client,
+        headers,
+        [
+            ["", tb["id"], "2026-08-03", "IMPORT-002", "IMP-2", "待实验", "300"],
+            ["", tb["id"], "2026-08-04", "IMPORT-003", "IMP-2", "待实验", "400"],
+        ],
+    )
+    duplicate_preview_response = client.post(
+        "/api/imports/workbook/preview",
+        data={"project_id": tb["id"], "sheet_name": "TB"},
+        files={"file": ("duplicates.xlsx", duplicate_workbook, XLSX_MEDIA_TYPE)},
+    )
+    assert duplicate_preview_response.status_code == 200, duplicate_preview_response.text
+    duplicate_preview = duplicate_preview_response.json()
+    assert duplicate_preview["errors"] == []
+    duplicate_rows = [
+        {
+            key: row[key]
+            for key in (
+                "row_number",
+                "record_id",
+                "pathology_number",
+                "status",
+                "experiment_date",
+                "experiment_number",
+                "values",
+            )
+        }
+        for row in duplicate_preview["rows"]
+    ]
+    duplicate_commit = client.post(
+        "/api/imports/workbook/commit",
+        json={"project_id": tb["id"], "rows": duplicate_rows},
+    )
+    assert duplicate_commit.status_code == 200, duplicate_commit.text
+    assert duplicate_commit.json()["created"] == 2
+    for duplicate_id in duplicate_commit.json()["record_ids"]:
+        assert client.get(f"/api/records/{duplicate_id}").json()["experiment_number"] == "IMP-2"
+
+
+def test_excel_import_enforces_custom_field_errors_and_warning_confirmation(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    strict_project = seeded_projects["TB"]
+    strict_field = client.post(
+        f"/api/projects/{strict_project['id']}/fields",
+        json={
+            "label": "必填批号",
+            "data_type": "text",
+            "validation_mode": "strict",
+            "validation_rules": {"required": True},
+        },
+    ).json()
+    strict_workbook = workbook_bytes(
+        client,
+        ["日期", "病理号", "实验编号", "状态"],
+        [["2026-08-12", "IMPORT-STRICT", "", "待实验"]],
+    )
+    strict_preview = client.post(
+        "/api/imports/workbook/preview",
+        data={"project_id": strict_project["id"], "sheet_name": "TB"},
+        files={"file": ("strict.xlsx", strict_workbook, XLSX_MEDIA_TYPE)},
+    )
+    assert strict_preview.status_code == 200
+    strict_row = strict_preview.json()["rows"][0]
+    assert strict_preview.json()["create_count"] == 0
+    assert strict_row["values"][strict_field["id"]] == ""
+    assert any("必填批号不能为空" in message for message in strict_row["errors"])
+    bypass = client.post(
+        "/api/imports/workbook/commit",
+        json={
+            "project_id": strict_project["id"],
+            "rows": [
+                {
+                    "row_number": 2,
+                    "record_id": None,
+                    "pathology_number": "IMPORT-STRICT",
+                    "status": "待实验",
+                    "experiment_date": "2026-08-12",
+                    "experiment_number": None,
+                    "values": {},
+                }
+            ],
+        },
+    )
+    assert bypass.status_code == 422
+    assert "必填批号不能为空" in bypass.text
+
+    warning_project = seeded_projects["BRAFV600E"]
+    warning_field = client.post(
+        f"/api/projects/{warning_project['id']}/fields",
+        json={
+            "label": "短批号",
+            "data_type": "text",
+            "validation_mode": "warning",
+            "validation_rules": {"max_length": 2},
+        },
+    ).json()
+    warning_workbook = workbook_bytes(
+        client,
+        ["日期", "病理号", "实验编号", "状态", "短批号"],
+        [["2026-08-12", "IMPORT-WARNING", "", "待实验", "TOO-LONG"]],
+    )
+    warning_preview = client.post(
+        "/api/imports/workbook/preview",
+        data={"project_id": warning_project["id"], "sheet_name": "TB"},
+        files={"file": ("warning.xlsx", warning_workbook, XLSX_MEDIA_TYPE)},
+    )
+    assert warning_preview.status_code == 200
+    warning_row = warning_preview.json()["rows"][0]
+    assert warning_row["errors"] == []
+    assert any("最多允许 2 个字符" in message for message in warning_row["warnings"])
+    commit_payload = {
+        "project_id": warning_project["id"],
+        "rows": [
+            {
+                key: warning_row[key]
+                for key in (
+                    "row_number",
+                    "record_id",
+                    "pathology_number",
+                    "status",
+                    "experiment_date",
+                    "experiment_number",
+                    "values",
+                )
+            }
+        ],
+    }
+    refused = client.post("/api/imports/workbook/commit", json=commit_payload)
+    assert refused.status_code == 409
+    commit_payload["accept_warnings"] = True
+    accepted = client.post("/api/imports/workbook/commit", json=commit_payload)
+    assert accepted.status_code == 200, accepted.text
+    record = client.get(f"/api/records/{accepted.json()['record_ids'][0]}").json()
+    assert record["values"][warning_field["id"]] == "TOO-LONG"
 
 
 def test_bulk_delete_by_ledger_date_requires_fresh_preview_and_unlocked_records(

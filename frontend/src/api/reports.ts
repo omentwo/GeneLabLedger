@@ -8,6 +8,7 @@ import type {
   Printer,
   ReportPrintResult,
   ReportTemplate,
+  ReportTemplateDeleteResult,
   ReportTemplateVersion,
 } from "@/types/api";
 
@@ -113,8 +114,8 @@ export function nativePreviewReport(
   );
 }
 
-export function deleteReportTemplate(templateId: string): Promise<void> {
-  return apiRequest<void>(`/report-templates/${templateId}`, {
+export function deleteReportTemplate(templateId: string): Promise<ReportTemplateDeleteResult> {
+  return apiRequest<ReportTemplateDeleteResult>(`/report-templates/${templateId}`, {
     method: "DELETE",
   });
 }

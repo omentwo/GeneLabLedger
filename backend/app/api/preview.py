@@ -20,6 +20,7 @@ from app.schemas import (
     PreviewCapabilitiesRead,
 )
 from app.services.office_preview import OfficePreviewError, OfficePreviewService, PreviewEngineUnavailable
+from app.services.preview_files import cleanup_print_previews
 from app.services.workbooks import build_xlsx
 
 router = APIRouter(tags=["ledger-preview"])
@@ -264,6 +265,10 @@ def create_ledger_print_preview(
 
     preview_id = uuid.uuid4().hex
     settings = request.app.state.settings
+    cleanup_print_previews(
+        settings.report_work_dir,
+        max_age_seconds=settings.preview_ttl_seconds,
+    )
     preview_dir = settings.report_work_dir / "ledger-previews"
     preview_dir.mkdir(parents=True, exist_ok=True)
     input_path = preview_dir / f"{preview_id}.xlsx"
@@ -340,7 +345,12 @@ def get_native_preview_status(
 def get_ledger_print_preview(preview_id: str, request: Request) -> FileResponse:
     if not re.fullmatch(r"[0-9a-f]{32}", preview_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview not found.")
-    report_work_dir = request.app.state.settings.report_work_dir
+    settings = request.app.state.settings
+    report_work_dir = settings.report_work_dir
+    cleanup_print_previews(
+        report_work_dir,
+        max_age_seconds=settings.preview_ttl_seconds,
+    )
     paths = [
         report_work_dir / "ledger-previews" / f"{preview_id}.pdf",
         report_work_dir / "report-previews" / f"{preview_id}.pdf",

@@ -399,7 +399,7 @@ onMounted(() => {
         <strong>实验编号编排</strong>
         <p>选择待实验记录，填写前缀并按顺序回写实验编号；不修改日期、状态，也不会锁定记录。</p>
       </div>
-      <el-tag effect="plain">前缀可重复、编号可反复修改</el-tag>
+      <el-tag effect="plain">实验编号允许重复，也可反复修改</el-tag>
     </section>
 
     <section class="page-card numbering-bar">

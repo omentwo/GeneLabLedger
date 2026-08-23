@@ -47,7 +47,7 @@ from app.services.cell_batches import (
     preview_cell_changes,
     preview_dict,
 )
-from app.services.field_validation import validate_field_value
+from app.services.field_validation import new_record_field_value, validate_field_value
 from app.services.record_operations import apply_record_operation, snapshot_record
 from app.services.records import (
     allocate_record_position,
@@ -492,7 +492,6 @@ def assign_experiment_numbers(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Experiment numbers can only be assigned within one ledger.",
         )
-    project_id = next(iter(project_ids))
     locked = [record.pathology_number for record in ordered if record.locked]
     if locked:
         raise HTTPException(
@@ -506,29 +505,8 @@ def assign_experiment_numbers(
             detail=f"只有“待实验”记录可以编号：{', '.join(not_pending[:20])}",
         )
     numbers = [f"{payload.prefix}-{index}" for index in range(1, len(ordered) + 1)]
-    conflicts = list(
-        session.scalars(
-            select(ProjectRecord)
-            .where(
-                ProjectRecord.experiment_number.in_(numbers),
-                ProjectRecord.project_id == project_id,
-                ~ProjectRecord.id.in_(record_ids),
-            )
-        )
-    )
-    if conflicts:
-        conflict_numbers = sorted(
-            {record.experiment_number for record in conflicts if record.experiment_number}
-        )
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"实验编号已存在：{', '.join(conflict_numbers)}",
-        )
     before = {record.id: record.experiment_number for record in ordered}
     try:
-        for record in ordered:
-            record.experiment_number = None
-        session.flush()
         for record, number in zip(ordered, numbers, strict=True):
             record.experiment_number = number
             audit(
@@ -543,7 +521,7 @@ def assign_experiment_numbers(
         session.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="实验编号已被其他记录占用，请刷新后重试",
+            detail="记录保存冲突，请刷新后重试",
         ) from error
     return [record_dict(require_record(session, record.id, include_values=True)) for record in ordered]
 
@@ -595,7 +573,7 @@ def validate_new_record(
         raw_value = (
             core_values.get(field.system_key or "", "")
             if field.is_core
-            else payload.values.get(field.id, "")
+            else new_record_field_value(field, payload.values)
         )
         _, field_issues = validate_field_value(field, raw_value)
         issues.extend(
@@ -607,26 +585,6 @@ def validate_new_record(
             }
             for issue in field_issues
         )
-    if payload.experiment_number:
-        existing_number = session.scalar(
-            select(ProjectRecord.id).where(
-                ProjectRecord.project_id == payload.project_id,
-                ProjectRecord.experiment_number == payload.experiment_number,
-            )
-        )
-        number_field = next(
-            (field for field in fields if field.system_key == "experiment_number"),
-            None,
-        )
-        if existing_number and number_field:
-            issues.append(
-                {
-                    "record_id": "new",
-                    "field_id": number_field.id,
-                    "severity": "error",
-                    "message": "实验编号已存在",
-                }
-            )
     return {"issues": issues}
 
 
@@ -648,15 +606,6 @@ def create_record(payload: RecordCreate, session: Session = Depends(get_session)
             "experiment_number": payload.experiment_number or "",
         },
     )
-    if payload.experiment_number:
-        existing = session.scalar(
-            select(ProjectRecord).where(
-                ProjectRecord.project_id == payload.project_id,
-                ProjectRecord.experiment_number == payload.experiment_number,
-            )
-        )
-        if existing:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="实验编号已存在")
     try:
         position = allocate_record_position(
             session,
@@ -684,6 +633,7 @@ def create_record(payload: RecordCreate, session: Session = Depends(get_session)
             record,
             payload.values,
             include_required_missing=True,
+            apply_defaults=True,
         )
         audit(
             session,
@@ -706,7 +656,7 @@ def create_record(payload: RecordCreate, session: Session = Depends(get_session)
         session.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="实验编号已被其他记录占用，请刷新后重试",
+            detail="记录保存冲突，请刷新后重试",
         ) from error
     return record_dict(require_record(session, record.id, include_values=True))
 
@@ -737,15 +687,6 @@ def update_record(
             payload.experiment_date.isoformat() if payload.experiment_date else ""
         )
     if "experiment_number" in payload.model_fields_set:
-        existing = session.scalar(
-            select(ProjectRecord).where(
-                ProjectRecord.project_id == record.project_id,
-                ProjectRecord.experiment_number == payload.experiment_number,
-                ProjectRecord.id != record.id,
-            )
-        ) if payload.experiment_number else None
-        if existing:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="实验编号已存在")
         core_changes["experiment_number"] = payload.experiment_number or ""
     normalized_core = validate_core_record_values(session, record.project_id, core_changes)
     if "pathology_number" in normalized_core:
@@ -788,7 +729,7 @@ def update_record(
         session.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="实验编号已被其他记录占用，请刷新后重试",
+            detail="记录保存冲突，请刷新后重试",
         ) from error
     return record_dict(require_record(session, record.id, include_values=True))
 

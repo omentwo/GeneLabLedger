@@ -128,15 +128,21 @@ function scheduleSummary(task: AutoExportTask): string {
   if (task.preset === "monthly") return `每月 ${task.month_day} 日 ${task.run_time}`;
   return `每天 ${task.run_time}`;
 }
+let taskLoadGeneration = 0;
+let taskSelectionGeneration = 0;
 
 async function loadTasks(preferredTaskId = selectedTaskId.value): Promise<void> {
-  tasks.value = await listAutoExportTasks();
+  const generation = ++taskLoadGeneration;
+  const loaded = await listAutoExportTasks();
+  if (generation !== taskLoadGeneration) return;
+  tasks.value = loaded;
   const target = tasks.value.find((task) => task.id === preferredTaskId);
   if (target) {
     await selectTask(target);
   } else if (tasks.value[0]) {
     await selectTask(tasks.value[0]);
   } else {
+    taskSelectionGeneration += 1;
     resetForm();
   }
 }
@@ -155,11 +161,15 @@ async function loadPage(): Promise<void> {
 }
 
 async function selectTask(task: AutoExportTask): Promise<void> {
+  const generation = ++taskSelectionGeneration;
   selectedTaskId.value = task.id;
   copyTaskToForm(task);
   try {
-    runs.value = await listAutoExportRuns(task.id);
+    const loaded = await listAutoExportRuns(task.id);
+    if (generation !== taskSelectionGeneration || selectedTaskId.value !== task.id) return;
+    runs.value = loaded;
   } catch (error) {
+    if (generation !== taskSelectionGeneration || selectedTaskId.value !== task.id) return;
     runs.value = [];
     ElMessage.error(error instanceof Error ? error.message : "执行历史读取失败");
   }
@@ -234,19 +244,23 @@ async function saveTask(): Promise<void> {
 }
 
 async function runTaskNow(): Promise<void> {
-  if (!selectedTask.value) {
+  const taskId = selectedTask.value?.id;
+  if (!taskId) {
     ElMessage.warning("请先保存或选择任务");
     return;
   }
   loading.value = true;
   try {
-    const run = await runAutoExportTask(selectedTask.value.id);
-    runs.value = await listAutoExportRuns(selectedTask.value.id);
-    await loadTasks(selectedTask.value.id);
+    const run = await runAutoExportTask(taskId);
+    const loadedRuns = await listAutoExportRuns(taskId);
+    if (selectedTaskId.value === taskId) {
+      runs.value = loadedRuns;
+      await loadTasks(taskId);
+    }
     ElMessage.success(`导出成功：${run.file_path ?? "已完成"}`);
   } catch (error) {
-    if (selectedTask.value) {
-      runs.value = await listAutoExportRuns(selectedTask.value.id).catch(() => []);
+    if (selectedTaskId.value === taskId) {
+      runs.value = await listAutoExportRuns(taskId).catch(() => []);
     }
     ElMessage.error(error instanceof Error ? error.message : "立即导出失败");
   } finally {

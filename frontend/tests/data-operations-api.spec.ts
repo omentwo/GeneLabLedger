@@ -64,6 +64,7 @@ describe("ledger data operation APIs", () => {
     expect(JSON.parse(String((fetchMock.mock.calls[1]![1] as RequestInit).body))).toEqual({
       project_id: "project-1",
       rows,
+      accept_warnings: false,
     });
   });
 

@@ -88,3 +88,88 @@ def test_cron_task_rejects_invalid_expression(
     payload.update({"schedule_type": "cron", "cron_expression": "not a cron"})
     response = client.post("/api/auto-export/tasks", json=payload)
     assert response.status_code == 422
+
+
+def test_sanitized_task_names_never_share_an_export_path(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+    tmp_path: Path,
+) -> None:
+    output_directory = tmp_path / "shared-exports"
+    first_payload = task_payload(seeded_projects["TB"]["id"], output_directory)
+    first_payload.update({"name": "批次:A", "retention_count": 10})
+    second_payload = task_payload(seeded_projects["TB"]["id"], output_directory)
+    second_payload.update({"name": "批次?A", "retention_count": 10})
+    first = client.post("/api/auto-export/tasks", json=first_payload).json()
+    second = client.post("/api/auto-export/tasks", json=second_payload).json()
+
+    first_run = client.post(f"/api/auto-export/tasks/{first['id']}/run")
+    second_run = client.post(f"/api/auto-export/tasks/{second['id']}/run")
+    assert first_run.status_code == 200, first_run.text
+    assert second_run.status_code == 200, second_run.text
+    first_path = Path(first_run.json()["file_path"])
+    second_path = Path(second_run.json()["file_path"])
+    assert first_path != second_path
+    assert first["id"][:8] in first_path.name
+    assert second["id"][:8] in second_path.name
+    assert zipfile.is_zipfile(first_path)
+    assert zipfile.is_zipfile(second_path)
+    assert not list(output_directory.glob(".*.tmp"))
+
+
+def test_normal_project_delete_disables_referencing_export_task(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+    tmp_path: Path,
+) -> None:
+    project = seeded_projects["TB"]
+    created = client.post(
+        "/api/auto-export/tasks",
+        json=task_payload(project["id"], tmp_path / "normal-delete"),
+    )
+    assert created.status_code == 201, created.text
+    task_id = created.json()["id"]
+
+    deleted = client.delete(f"/api/projects/{project['id']}")
+
+    assert deleted.status_code == 204, deleted.text
+    task = next(
+        item for item in client.get("/api/auto-export/tasks").json() if item["id"] == task_id
+    )
+    assert task["project_ids"] == [project["id"]]
+    assert task["enabled"] is False
+    assert task["next_run_at"] is None
+    assert "已自动停用" in task["last_message"]
+
+
+def test_force_project_delete_disables_referencing_export_task(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+    tmp_path: Path,
+) -> None:
+    project = seeded_projects["TB"]
+    record = client.post(
+        "/api/records",
+        json={"project_id": project["id"], "pathology_number": "FORCE-TASK-DELETE"},
+    )
+    assert record.status_code == 201, record.text
+    created = client.post(
+        "/api/auto-export/tasks",
+        json=task_payload(project["id"], tmp_path / "force-delete"),
+    )
+    assert created.status_code == 201, created.text
+    task_id = created.json()["id"]
+
+    deleted = client.post(
+        f"/api/projects/{project['id']}/force-delete",
+        json={"confirm_name": project["name"]},
+    )
+
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["updated_auto_export_tasks"] == 1
+    task = next(
+        item for item in client.get("/api/auto-export/tasks").json() if item["id"] == task_id
+    )
+    assert task["project_ids"] == [project["id"]]
+    assert task["enabled"] is False
+    assert task["next_run_at"] is None

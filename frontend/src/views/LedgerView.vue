@@ -251,6 +251,7 @@ const cellSaveStatusLabels: Record<CellSaveStatus | "idle", string> = {
 };
 const cellSaveStates = ref(new Map<string, CellSaveState>());
 const cellSaveVersions = new Map<string, number>();
+const cellSaveClearTimers = new Map<string, number>();
 const recordSaveQueues = new Map<string, Promise<unknown>>();
 const fieldErrors = ref<Record<string, string>>({});
 const managerVisible = ref(false);
@@ -578,6 +579,9 @@ const importHasErrors = computed(
   () =>
     Boolean(importPreview.value?.errors.length) ||
     Boolean(importPreview.value?.rows.some((row) => row.errors.length)),
+);
+const importWarningCount = computed(
+  () => importPreview.value?.rows.reduce((total, row) => total + row.warnings.length, 0) ?? 0,
 );
 
 function isDraft(record: LedgerRow): boolean {
@@ -1202,8 +1206,7 @@ async function finishGridCellEdit(commit = true, focusAfter = true): Promise<boo
 
     if (!commit) {
       setValue(data.record, data.field, snapshot.value, { markDirty: false });
-      cellSaveStates.value.delete(persistedKey(data.record.id, data.field.id));
-      cellSaveStates.value = new Map(cellSaveStates.value);
+      clearCellSaveState(persistedKey(data.record.id, data.field.id));
       clearFieldError(data.record, data.field);
     } else {
       const changedBeforeSave =
@@ -1212,10 +1215,12 @@ async function finishGridCellEdit(commit = true, focusAfter = true): Promise<boo
           (persistedValues.get(persistedKey(data.record.id, data.field.id)) ?? "");
       const draftPathologySave =
         isDraft(data.record) && data.field.system_key === "pathology_number";
+      const draftPathologyNeedsSave =
+        draftPathologySave && valueFor(data.record, data.field).trim().length > 0;
       const saved = await saveField(data.record, data.field);
       if (
         fieldErrorFor(data.record, data.field) ||
-        ((changedBeforeSave || draftPathologySave) && !saved)
+        ((changedBeforeSave || draftPathologyNeedsSave) && !saved)
       ) return false;
     }
 
@@ -2340,8 +2345,8 @@ function insertDraftRowsAt(
   anchorId: string,
   placement: LedgerDraftPlacement,
   count: number,
-): void {
-  if (!currentProject.value || loading.value) return;
+): boolean {
+  if (!currentProject.value || loading.value) return false;
   const groupId = `insert-${draftSequence + 1}`;
   const inserted = Array.from({ length: count }, (_, order) =>
     makeDraftRow({ anchorId, placement, groupId, order }),
@@ -2354,19 +2359,37 @@ function insertDraftRowsAt(
       (field) => field.system_key === "pathology_number",
     );
     if (rowIndex >= 0 && columnIndex >= 0) {
-      enterGridCellEdit({ rowIndex, columnIndex });
+      const position = { rowIndex, columnIndex };
+      selectGridCell(position);
+      void focusGridCell(position);
     }
   });
+  return true;
 }
 
-async function contextInsertRows(placement: LedgerDraftPlacement): Promise<void> {
+function notifyInsertedRows(count: number): void {
+  ElMessage.success(`已插入 ${count} 行，可按任意顺序填写；病理号填写后该行自动保存`);
+  if (ledgerSort.value || Object.values(ledgerFilters.value).some(Boolean)) {
+    ElMessage.info("当前视图有排序或筛选；记录保存后会继续按当前视图规则显示");
+  }
+}
+
+function contextInsertSingleRow(placement: LedgerDraftPlacement): void {
+  const row = contextMenuRow.value;
+  if (!row || isDraft(row)) return finishContextMenuAction();
+  const anchorId = row.id;
+  finishContextMenuAction();
+  if (insertDraftRowsAt(anchorId, placement, 1)) notifyInsertedRows(1);
+}
+
+async function contextInsertMultipleRows(placement: LedgerDraftPlacement): Promise<void> {
   const row = contextMenuRow.value;
   if (!row || isDraft(row)) return finishContextMenuAction();
   const anchorId = row.id;
   finishContextMenuAction();
   try {
     const { value } = await ElMessageBox.prompt(
-      "请输入要插入的行数（1–100）。新行填写病理号后会自动保存。",
+      "请输入要插入的行数（1–100）。可先填写任意字段，每行填写病理号后自动保存。",
       placement === "before" ? "在当前记录上方插入" : "在当前记录下方插入",
       {
         inputValue: "1",
@@ -2382,11 +2405,7 @@ async function contextInsertRows(placement: LedgerDraftPlacement): Promise<void>
       },
     );
     const count = Number(value.trim());
-    insertDraftRowsAt(anchorId, placement, count);
-    ElMessage.success(`已插入 ${count} 行，请从病理号开始录入`);
-    if (ledgerSort.value || Object.values(ledgerFilters.value).some(Boolean)) {
-      ElMessage.info("当前视图有排序或筛选；记录保存后会继续按当前视图规则显示");
-    }
+    if (insertDraftRowsAt(anchorId, placement, count)) notifyInsertedRows(count);
   } catch (error) {
     if (error === "cancel" || error === "close") return;
     ElMessage.error(error instanceof Error ? error.message : "插入行失败");
@@ -2686,7 +2705,11 @@ function makeDraftRow(
     locked: false,
     highlight_color: null,
     cell_highlight_colors: {},
-    values: {},
+    values: Object.fromEntries(
+      fields.value
+        .filter((field) => !field.is_core && field.default_value != null)
+        .map((field) => [field.id, field.default_value ?? ""]),
+    ),
     created_at: now,
     updated_at: now,
   };
@@ -2807,9 +2830,41 @@ function persistedKey(recordId: string, fieldId: string): string {
 }
 
 function setCellSaveState(recordId: string, fieldId: string, state: CellSaveState): void {
+  const key = persistedKey(recordId, fieldId);
+  const pendingTimer = cellSaveClearTimers.get(key);
+  if (pendingTimer !== undefined) {
+    window.clearTimeout(pendingTimer);
+    cellSaveClearTimers.delete(key);
+  }
   const next = new Map(cellSaveStates.value);
-  next.set(persistedKey(recordId, fieldId), state);
+  next.set(key, state);
   cellSaveStates.value = next;
+  if (state.status === "saved") {
+    const version = cellSaveVersions.get(key);
+    const timer = window.setTimeout(() => {
+      cellSaveClearTimers.delete(key);
+      if (cellSaveVersions.get(key) !== version) return;
+      if (cellSaveStates.value.get(key)?.status === "saved") clearCellSaveState(key);
+    }, 1500);
+    cellSaveClearTimers.set(key, timer);
+  }
+}
+
+function clearCellSaveState(key: string): void {
+  const pendingTimer = cellSaveClearTimers.get(key);
+  if (pendingTimer !== undefined) window.clearTimeout(pendingTimer);
+  cellSaveClearTimers.delete(key);
+  if (!cellSaveStates.value.has(key)) return;
+  const next = new Map(cellSaveStates.value);
+  next.delete(key);
+  cellSaveStates.value = next;
+}
+
+function clearAllCellSaveStates(): void {
+  cellSaveClearTimers.forEach((timer) => window.clearTimeout(timer));
+  cellSaveClearTimers.clear();
+  cellSaveStates.value = new Map();
+  cellSaveVersions.clear();
 }
 
 function cellSaveStateFor(record: LedgerRow, field: FieldDefinition): CellSaveState | null {
@@ -3625,7 +3680,7 @@ async function loadRecords(
     activeGridCell.value = null;
     clearGridCellSelection();
     fieldErrors.value = {};
-    cellSaveStates.value = new Map();
+    clearAllCellSaveStates();
     selectedRecords.value = [];
     if (!options.preserveSelection) {
       selectedRecordIds.value = new Set();
@@ -4330,12 +4385,17 @@ function resetQuickEntry(): void {
     state.columns.filter((column) => column.pinned).map((column) => column.field_id),
   );
   quickEntryFields.value.forEach((field) => {
+    const initialValue = field.system_key === "status"
+      ? "待实验"
+      : field.is_core
+        ? ""
+        : field.default_value ?? "";
     if (field.system_key === "pathology_number") {
       quickEntryValues[field.id] = "";
     } else if (!pinned.has(field.id)) {
-      quickEntryValues[field.id] = field.system_key === "status" ? "待实验" : "";
+      quickEntryValues[field.id] = initialValue;
     } else if (!(field.id in quickEntryValues)) {
-      quickEntryValues[field.id] = field.system_key === "status" ? "待实验" : "";
+      quickEntryValues[field.id] = initialValue;
     }
   });
 }
@@ -5017,10 +5077,21 @@ async function confirmWorkbookImport(): Promise<void> {
   const preview = importPreview.value;
   if (!preview || !preview.rows.length || importHasErrors.value) return;
   const projectId = activeProjectId.value;
-  const rows = preview.rows.map(({ action: _action, errors: _errors, ...row }) => row);
+  const rows = preview.rows.map(
+    ({
+      action: _action,
+      errors: _errors,
+      warnings: _warnings,
+      suggestions: _suggestions,
+      ...row
+    }) => row,
+  );
+  const warningText = importWarningCount.value
+    ? `其中有 ${importWarningCount.value} 条验证警告，继续即表示确认这些警告。`
+    : "";
   try {
     await ElMessageBox.confirm(
-      `将新建 ${preview.create_count} 条、更新 ${preview.update_count} 条记录。记录 UUID 是唯一匹配依据，确认导入？`,
+      `将新建 ${preview.create_count} 条、更新 ${preview.update_count} 条记录。${warningText}记录 UUID 是唯一匹配依据，确认导入？`,
       "确认导入 Excel",
       {
         confirmButtonText: "确认导入",
@@ -5050,7 +5121,7 @@ async function confirmWorkbookImport(): Promise<void> {
       const fetched = await Promise.all(missingBefore.map((recordId) => getRecord(recordId)));
       fetched.forEach((record) => beforeById.set(record.id, snapshotRecord(record)));
     }
-    const result = await commitWorkbookImport(projectId, rows);
+    const result = await commitWorkbookImport(projectId, rows, importWarningCount.value > 0);
     importDialogVisible.value = false;
     importFile.value = null;
     importPreview.value = null;
@@ -5368,11 +5439,9 @@ watch(activeProjectId, async (projectId, previousProjectId) => {
     activeViewState.value = null;
     editingGridCell.value = null;
     editingGridSnapshot.value = null;
-    activeGridCell.value = null;
-    clearGridCellSelection();
+    clearSelectionsAfterLedgerViewChange();
     draftRows.value = [];
     insertedGroupRegistry.clear();
-    selectedRecords.value = [];
     selectionStartDate.value = "";
     selectionEndDate.value = "";
     importDialogVisible.value = false;
@@ -5476,6 +5545,7 @@ onBeforeUnmount(() => {
   lastGridClipboard = null;
   bottomScrollTimers.forEach((timer) => window.clearTimeout(timer));
   bottomScrollTimers = [];
+  clearAllCellSaveStates();
 });
 </script>
 
@@ -6116,11 +6186,17 @@ onBeforeUnmount(() => {
         @click.stop
         @contextmenu.prevent
       >
-        <button type="button" role="menuitem" @click="contextInsertRows('before')">
-          在当前记录上方插入行…
+        <button type="button" role="menuitem" @click="contextInsertSingleRow('before')">
+          在当前记录上方插入一行
         </button>
-        <button type="button" role="menuitem" @click="contextInsertRows('after')">
-          在当前记录下方插入行…
+        <button type="button" role="menuitem" @click="contextInsertMultipleRows('before')">
+          在当前记录上方插入多行…
+        </button>
+        <button type="button" role="menuitem" @click="contextInsertSingleRow('after')">
+          在当前记录下方插入一行
+        </button>
+        <button type="button" role="menuitem" @click="contextInsertMultipleRows('after')">
+          在当前记录下方插入多行…
         </button>
         <div class="ledger-context-menu-separator" role="separator" />
         <button type="button" role="menuitem" @click="contextCopy">复制当前选区</button>
@@ -6179,7 +6255,7 @@ onBeforeUnmount(() => {
           :page-size="pageSize"
           :total="recordTotal"
           layout="total, prev, pager, next"
-          small
+          size="small"
           @current-change="changeLedgerPage"
         />
         <div class="ledger-zoom-control" aria-label="台账缩放">
@@ -6565,8 +6641,14 @@ onBeforeUnmount(() => {
         <el-table-column prop="experiment_number" label="实验编号" min-width="150" />
         <el-table-column label="校验" min-width="240">
           <template #default="{ row }">
-            <span v-if="!row.errors.length" class="valid-row-text">可导入</span>
-            <span v-else class="invalid-row-text">{{ row.errors.join("；") }}</span>
+            <span v-if="row.errors.length" class="invalid-row-text">{{ row.errors.join("；") }}</span>
+            <span v-else-if="row.warnings.length" class="warning-row-text">
+              警告：{{ row.warnings.join("；") }}
+            </span>
+            <span v-else-if="row.suggestions.length" class="suggestion-row-text">
+              提示：{{ row.suggestions.join("；") }}
+            </span>
+            <span v-else class="valid-row-text">可导入</span>
           </template>
         </el-table-column>
       </el-table>
@@ -6707,6 +6789,14 @@ onBeforeUnmount(() => {
 
 .invalid-row-text {
   color: #b42318;
+}
+
+.warning-row-text {
+  color: #b54708;
+}
+
+.suggestion-row-text {
+  color: #475467;
 }
 
 .bulk-delete-form {

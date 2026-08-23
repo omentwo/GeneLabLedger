@@ -12,12 +12,24 @@ def test_sidecar_requires_explicit_port_and_data_directory(
     captured: dict[str, object] = {}
     data_directory = tmp_path / "desktop-data"
 
-    def fake_run(app, **kwargs: object) -> None:
-        captured["settings"] = app.state.settings
-        captured["kwargs"] = kwargs
+    class FakeConfig:
+        def __init__(self, app, **kwargs: object) -> None:
+            captured["app"] = app
+            captured["settings"] = app.state.settings
+            captured["kwargs"] = kwargs
+
+    class FakeServer:
+        def __init__(self, config: FakeConfig) -> None:
+            captured["server"] = self
+            captured["config"] = config
+            self.should_exit = False
+
+        def run(self) -> None:
+            captured["ran"] = True
 
     monkeypatch.setenv("GENE_LEDGER_DESKTOP_MODE", "0")
-    monkeypatch.setattr(launcher.uvicorn, "run", fake_run)
+    monkeypatch.setattr(launcher.uvicorn, "Config", FakeConfig)
+    monkeypatch.setattr(launcher.uvicorn, "Server", FakeServer)
     launcher.main(
         [
             "--host",
@@ -39,3 +51,8 @@ def test_sidecar_requires_explicit_port_and_data_directory(
         "log_level": "warning",
         "access_log": False,
     }
+    assert captured["ran"] is True
+    app = captured["app"]
+    server = captured["server"]
+    app.state.request_shutdown()
+    assert server.should_exit is True

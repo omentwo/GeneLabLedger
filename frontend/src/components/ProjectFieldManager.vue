@@ -68,6 +68,7 @@ const newField = reactive<{
   optionsText: string;
   validation_mode: ValidationMode;
   validation_rules: FieldValidationRules;
+  default_value: string;
 }>({
   label: "",
   data_type: "text",
@@ -75,6 +76,7 @@ const newField = reactive<{
   optionsText: "",
   validation_mode: "suggestion",
   validation_rules: {},
+  default_value: "",
 });
 const validationDraft = reactive<{
   mode: ValidationMode;
@@ -316,6 +318,7 @@ async function saveField(field: FieldDefinition): Promise<void> {
         : {
             validation_mode: field.validation_mode,
             validation_rules: field.validation_rules,
+            default_value: field.default_value,
           }),
     });
     await reloadAndNotify();
@@ -358,6 +361,7 @@ function openAddField(): void {
     optionsText: "",
     validation_mode: "suggestion",
     validation_rules: {},
+    default_value: "",
   });
   fieldDialogVisible.value = true;
 }
@@ -376,6 +380,7 @@ async function addField(): Promise<void> {
       options: parseOptions(newField.optionsText),
       validation_mode: newField.validation_mode,
       validation_rules: newField.validation_rules,
+      default_value: newField.default_value.trim() || null,
     });
     fieldDialogVisible.value = false;
     await reloadAndNotify();
@@ -563,7 +568,7 @@ watch(
         <div class="field-heading">
           <div>
             <strong>当前项目表头</strong>
-            <p>修改后即时生效；上下移动用于调整显示和导出顺序，隐藏不会删除数据。</p>
+            <p>“新记录默认值”只用于以后新增的记录，不会改动已有数据。</p>
           </div>
           <div class="field-heading-actions">
             <el-button :icon="Document" @click="openTemplates">台账模板</el-button>
@@ -645,6 +650,18 @@ watch(
               </el-button>
             </template>
           </el-table-column>
+          <el-table-column label="新记录默认值" min-width="170">
+            <template #default="{ row }: { row: FieldDefinition }">
+              <span v-if="row.is_core">—</span>
+              <el-input
+                v-else
+                :model-value="row.default_value ?? ''"
+                clearable
+                placeholder="未设置"
+                @update:model-value="row.default_value = String($event || '') || null"
+              />
+            </template>
+          </el-table-column>
           <el-table-column label="操作" width="230" fixed="right">
             <template #default="{ row }: { row: FieldDefinition }">
               <el-button link type="primary" @click="saveField(row)">保存</el-button>
@@ -718,6 +735,14 @@ watch(
           <el-option label="警告（提交前确认）" value="warning" />
           <el-option label="严格（不符合时阻止）" value="strict" />
         </el-select>
+      </el-form-item>
+      <el-form-item label="新记录默认值（可选）">
+        <el-input
+          v-model="newField.default_value"
+          clearable
+          :placeholder="newField.data_type === 'date' ? '例如：2026-08-12' : '例如：20260812'"
+        />
+        <div class="form-help">只预填以后新增的记录；已有记录不会变化。</div>
       </el-form-item>
       <div class="two-column-form">
         <el-form-item label="必填">

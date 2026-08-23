@@ -33,13 +33,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         database_url=None,
         auto_create_schema=True,
     )
-    uvicorn.run(
-        create_app(settings=settings),
-        host=settings.host,
-        port=settings.port,
-        log_level="warning",
-        access_log=False,
+    desktop_app = create_app(settings=settings)
+    server = uvicorn.Server(
+        uvicorn.Config(
+            desktop_app,
+            host=settings.host,
+            port=settings.port,
+            log_level="warning",
+            access_log=False,
+        )
     )
+    desktop_app.state.request_shutdown = lambda: setattr(server, "should_exit", True)
+    server.run()
 
 
 if __name__ == "__main__":

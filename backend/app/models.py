@@ -132,6 +132,7 @@ class FieldDefinition(Base, TimestampMixin):
         String(24), default="suggestion", nullable=False
     )
     validation_rules: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    default_value: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="fields")
     options: Mapped[list[FieldOption]] = relationship(
@@ -167,7 +168,6 @@ class FieldOption(Base):
 class ProjectRecord(Base, TimestampMixin):
     __tablename__ = "project_records"
     __table_args__ = (
-        UniqueConstraint("project_id", "experiment_number", name="uq_record_project_experiment_number"),
         Index("ix_record_project_status", "project_id", "status"),
         Index("ix_record_project_position", "project_id", "position"),
     )

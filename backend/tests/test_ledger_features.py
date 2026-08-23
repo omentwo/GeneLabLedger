@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api import reports as reports_api
 from app.config import Settings
 from app.main import create_app
 
@@ -135,6 +136,82 @@ def test_ledger_templates_and_project_duplicate(feature_client: TestClient) -> N
         field for field in copied.json()["fields"] if field["label"] == "复制字段"
     )
     assert copied_records[0]["values"][copied_field["id"]] == "copy-value"
+
+
+def test_report_template_versions_use_distinct_immutable_files(
+    feature_client: TestClient,
+    tmp_path: Path,
+) -> None:
+    project = feature_client.get("/api/projects").json()[0]
+    uploaded = feature_client.post(
+        "/api/report-templates",
+        data={"project_id": project["id"], "name": "版本文件测试"},
+        files={
+            "file": (
+                "v1.docx",
+                minimal_docx(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    template = uploaded.json()
+    added = feature_client.post(
+        f"/api/report-templates/{template['id']}/versions",
+        files={
+            "file": (
+                "v2.docx",
+                minimal_docx(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert added.status_code == 201, added.text
+
+    template_directory = tmp_path / "data" / "templates" / template["id"]
+    files = sorted(template_directory.glob("*.docx"))
+    assert len(files) == 2
+    assert files[0].name != files[1].name
+    assert all(zipfile.is_zipfile(path) for path in files)
+    assert not list(template_directory.glob(".*.tmp"))
+
+
+def test_report_template_delete_reports_post_commit_cleanup_failure(
+    feature_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = feature_client.get("/api/projects").json()[0]
+    uploaded = feature_client.post(
+        "/api/report-templates",
+        data={"project_id": project["id"], "name": "删除清理失败测试"},
+        files={
+            "file": (
+                "locked.docx",
+                minimal_docx(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    template = uploaded.json()
+    template_directory = feature_client.app.state.settings.template_dir / template["id"]
+    assert template_directory.is_dir()
+
+    def fail_cleanup(_: Path) -> None:
+        raise PermissionError("document is still open")
+
+    monkeypatch.setattr(reports_api.shutil, "rmtree", fail_cleanup)
+    deleted = feature_client.delete(f"/api/report-templates/{template['id']}")
+
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["removed_template_directory"] is False
+    assert deleted.json()["cleanup_warnings"]
+    remaining = feature_client.get(
+        "/api/report-templates",
+        params={"project_id": project["id"]},
+    ).json()
+    assert template["id"] not in {item["id"] for item in remaining}
+    assert template_directory.is_dir()
 
 
 def test_force_delete_is_name_confirmed_and_scoped_to_one_ledger(feature_client: TestClient) -> None:

@@ -19,9 +19,10 @@ export function previewWorkbookImport(
 export function commitWorkbookImport(
   projectId: string,
   rows: WorkbookImportRow[],
+  acceptWarnings = false,
 ): Promise<{ created: number; updated: number; record_ids: string[] }> {
   return apiRequest("/imports/workbook/commit", {
     method: "POST",
-    body: jsonBody({ project_id: projectId, rows }),
+    body: jsonBody({ project_id: projectId, rows, accept_warnings: acceptWarnings }),
   });
 }

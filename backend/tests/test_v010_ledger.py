@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.database import Database
+from app.models import FieldDefinition
+from app.services import cell_batches
+from app.services.workbooks import build_xlsx
 
 
 def project_fields(project: dict) -> dict[str, dict]:
@@ -21,6 +27,7 @@ def create_custom_field(
     validation_mode: str = "suggestion",
     validation_rules: dict | None = None,
     options: list[str] | None = None,
+    default_value: str | None = None,
 ) -> dict:
     response = client.post(
         f"/api/projects/{project_id}/fields",
@@ -30,10 +37,166 @@ def create_custom_field(
             "validation_mode": validation_mode,
             "validation_rules": validation_rules or {},
             "options": options or [],
+            "default_value": default_value,
         },
     )
     assert response.status_code == 201, response.text
     return response.json()
+
+
+def test_field_defaults_only_apply_to_future_records_and_labels_are_unique(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    project_id = seeded_projects["TB"]["id"]
+    reagent_batch = create_custom_field(
+        client,
+        project_id,
+        label="实验试剂批号",
+    )
+    existing = create_record(client, project_id, "DEFAULT-OLD")
+
+    updated = client.patch(
+        f"/api/projects/fields/{reagent_batch['id']}",
+        json={"default_value": "20260812"},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["default_value"] == "20260812"
+
+    created = create_record(client, project_id, "DEFAULT-NEW")
+    assert created["values"][reagent_batch["id"]] == "20260812"
+    explicitly_blank = create_record(
+        client,
+        project_id,
+        "DEFAULT-BLANK",
+        values={reagent_batch["id"]: ""},
+    )
+    assert reagent_batch["id"] not in explicitly_blank["values"]
+    assert reagent_batch["id"] not in client.get(f"/api/records/{existing['id']}").json()["values"]
+
+    duplicate = client.post(
+        f"/api/projects/{project_id}/fields",
+        json={"label": "实验试剂批号", "data_type": "text"},
+    )
+    assert duplicate.status_code == 409
+    other = create_custom_field(client, project_id, label="其他字段")
+    renamed = client.patch(
+        f"/api/projects/fields/{other['id']}",
+        json={"label": "实验试剂批号"},
+    )
+    assert renamed.status_code == 409
+
+
+def test_field_labels_cannot_conflict_with_import_identifiers(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    project_id = seeded_projects["TB"]["id"]
+    for label in ("status", "experiment_number", "_record_id", "_project_id"):
+        rejected = client.post(
+            f"/api/projects/{project_id}/fields",
+            json={"label": label, "data_type": "text"},
+        )
+        assert rejected.status_code == 409, rejected.text
+
+    custom = create_custom_field(client, project_id, label="可重命名字段")
+    renamed = client.patch(
+        f"/api/projects/fields/{custom['id']}",
+        json={"label": "caseId"},
+    )
+    assert renamed.status_code == 409, renamed.text
+
+
+def test_workbook_preview_rejects_legacy_ambiguous_field_names(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    project_id = seeded_projects["TB"]["id"]
+    with client.app.state.database.session_factory() as session:
+        session.add(
+            FieldDefinition(
+                project_id=project_id,
+                key="custom_legacy_status",
+                label="status",
+                data_type="text",
+                sort_order=100,
+            )
+        )
+        session.commit()
+
+    workbook = build_xlsx([("TB", ["病理号", "状态", "status"], [["CASE-1", "待实验", "值"]])])
+    response = client.post(
+        "/api/imports/workbook/preview",
+        data={"project_id": project_id},
+        files={
+            "file": (
+                "ambiguous.xlsx",
+                workbook,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert response.status_code == 409, response.text
+    assert "status" in response.json()["detail"]
+
+
+def test_invalid_field_default_and_malformed_core_template_are_rejected(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    project_id = seeded_projects["TB"]["id"]
+    invalid_default = client.post(
+        f"/api/projects/{project_id}/fields",
+        json={
+            "label": "试剂类型",
+            "data_type": "select",
+            "options": ["A", "B"],
+            "default_value": "C",
+        },
+    )
+    assert invalid_default.status_code == 422
+
+    template_response = client.post(
+        "/api/ledger-templates",
+        json={"name": "核心字段保护模板", "source_project_id": project_id},
+    )
+    assert template_response.status_code == 201, template_response.text
+    template = template_response.json()
+    missing_core = [
+        field
+        for field in template["fields"]
+        if field["system_key"] != "experiment_number"
+    ]
+    rejected = client.patch(
+        f"/api/ledger-templates/{template['id']}",
+        json={"fields": missing_core},
+    )
+    assert rejected.status_code == 422
+
+    changed_core = [dict(field) for field in template["fields"]]
+    status_field = next(field for field in changed_core if field["system_key"] == "status")
+    status_field["data_type"] = "text"
+    rejected = client.patch(
+        f"/api/ledger-templates/{template['id']}",
+        json={"fields": changed_core},
+    )
+    assert rejected.status_code == 422
+
+    conflicting_names = [dict(field) for field in template["fields"]]
+    conflicting_names.append(
+        {
+            "key": "custom_template_status",
+            "label": "status",
+            "data_type": "text",
+            "sort_order": len(conflicting_names),
+        }
+    )
+    rejected = client.patch(
+        f"/api/ledger-templates/{template['id']}",
+        json={"fields": conflicting_names},
+    )
+    assert rejected.status_code == 422
 
 
 def create_record(
@@ -186,7 +349,64 @@ def test_warning_requires_confirmation_and_stale_preview_is_rejected(
     assert conflict.status_code == 409
 
 
-def test_new_record_preview_rejects_unknown_fields_and_duplicate_experiment_number(
+def test_cell_batch_preview_token_cannot_be_committed_concurrently(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_id = seeded_projects["TB"]["id"]
+    preview = client.post(
+        "/api/records/cell-batches/preview",
+        json={
+            "project_id": project_id,
+            "changes": [],
+            "new_records": [
+                {
+                    "client_id": "token-race",
+                    "pathology_number": "TOKEN-RACE-ONLY-ONCE",
+                }
+            ],
+        },
+    )
+    assert preview.status_code == 200, preview.text
+    token = preview.json()["token"]
+
+    entered = threading.Event()
+    release = threading.Event()
+    original = cell_batches._field_and_record_maps
+
+    def block_after_claim(*args: object, **kwargs: object) -> object:
+        entered.set()
+        if not release.wait(timeout=5):
+            raise TimeoutError("commit test did not release the claimed token")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cell_batches, "_field_and_record_maps", block_after_claim)
+    payload = {"token": token, "accept_warnings": False}
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(
+            client.post,
+            "/api/records/cell-batches/commit",
+            json=payload,
+        )
+        assert entered.wait(timeout=5)
+        duplicate = client.post("/api/records/cell-batches/commit", json=payload)
+        release.set()
+        first = first_future.result(timeout=5)
+
+    assert first.status_code == 200, first.text
+    assert duplicate.status_code == 409, duplicate.text
+    assert "正在提交" in duplicate.json()["detail"]
+    replay = client.post("/api/records/cell-batches/commit", json=payload)
+    assert replay.status_code == 410, replay.text
+    records = client.get(
+        "/api/records",
+        params={"project_id": project_id, "limit": 1000},
+    ).json()["items"]
+    assert [record["pathology_number"] for record in records].count("TOKEN-RACE-ONLY-ONCE") == 1
+
+
+def test_new_record_preview_rejects_unknown_fields_and_allows_duplicate_experiment_number(
     client: TestClient,
     seeded_projects: dict[str, dict],
 ) -> None:
@@ -220,10 +440,16 @@ def test_new_record_preview_rejects_unknown_fields_and_duplicate_experiment_numb
         },
     )
     assert duplicate.status_code == 200
-    assert any(
-        issue["severity"] == "error" and "实验编号" in issue["message"]
-        for issue in duplicate.json()["issues"]
+    assert not any("实验编号" in issue["message"] for issue in duplicate.json()["issues"])
+    created_duplicate = client.post(
+        "/api/records",
+        json={
+            "project_id": project_id,
+            "pathology_number": "PREVIEW-NUMBER-2",
+            "experiment_number": "EXP-PREVIEW-1",
+        },
     )
+    assert created_duplicate.status_code == 201, created_duplicate.text
 
 
 def test_mixed_cell_and_new_record_batch_is_atomic_and_undoable(
@@ -245,6 +471,10 @@ def test_mixed_cell_and_new_record_batch_is_atomic_and_undoable(
         "BATCH-OLD",
         values={custom["id"]: "旧值"},
     )
+    assert client.patch(
+        f"/api/records/{existing['id']}",
+        json={"experiment_number": "BATCH-DUPLICATE"},
+    ).status_code == 200
     locked = create_record(
         client,
         project_id,
@@ -277,9 +507,17 @@ def test_mixed_cell_and_new_record_batch_is_atomic_and_undoable(
                     "pathology_number": "BATCH-NEW",
                     "status": "待实验",
                     "experiment_date": "2026-08-12",
-                    "experiment_number": None,
+                    "experiment_number": "BATCH-DUPLICATE",
                     "values": {custom["id"]: "新增值"},
-                }
+                },
+                {
+                    "client_id": "draft-2",
+                    "pathology_number": "BATCH-NEW-2",
+                    "status": "待实验",
+                    "experiment_date": "2026-08-13",
+                    "experiment_number": "BATCH-DUPLICATE",
+                    "values": {custom["id"]: "新增值2"},
+                },
             ],
         },
     )
@@ -295,9 +533,9 @@ def test_mixed_cell_and_new_record_batch_is_atomic_and_undoable(
     )
     assert committed.status_code == 200, committed.text
     result = committed.json()
-    assert len(result["created_record_ids"]) == 1
+    assert len(result["created_record_ids"]) == 2
     assert len(result["before"]) == 1
-    assert len(result["after"]) == 2
+    assert len(result["after"]) == 3
     assert client.get(f"/api/records/{existing['id']}").json()["values"][custom["id"]] == "新值"
     assert client.get(f"/api/records/{locked['id']}").json()["values"][custom["id"]] == "锁定值"
 
@@ -312,7 +550,7 @@ def test_mixed_cell_and_new_record_batch_is_atomic_and_undoable(
         },
     )
     assert undo.status_code == 200, undo.text
-    assert result["created_record_ids"][0] in undo.json()["deleted_ids"]
+    assert set(result["created_record_ids"]).issubset(undo.json()["deleted_ids"])
     assert client.get(f"/api/records/{existing['id']}").json()["values"][custom["id"]] == "旧值"
 
     invalid = client.post(
@@ -606,3 +844,140 @@ def test_desktop_schema_upgrade_backfills_record_positions(tmp_path: Path) -> No
     assert "position" in columns
     assert positions == [("earlier", 1), ("later", 2), ("other", 1)]
     assert "ix_record_project_position" in indexes
+
+
+@pytest.mark.parametrize(
+    ("constraint_sql", "database_name"),
+    [
+        (
+            "CONSTRAINT uq_record_experiment_number UNIQUE (experiment_number), ",
+            "legacy-global-number.db",
+        ),
+        (
+            "CONSTRAINT uq_record_project_experiment_number "
+            "UNIQUE (project_id, experiment_number), ",
+            "legacy-project-number.db",
+        ),
+    ],
+)
+def test_experiment_number_upgrade_removes_uniqueness_and_preserves_foreign_keys(
+    tmp_path: Path,
+    constraint_sql: str,
+    database_name: str,
+) -> None:
+    database_path = tmp_path / database_name
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("CREATE TABLE projects (id VARCHAR(36) PRIMARY KEY)")
+        connection.execute(
+            "CREATE TABLE project_records ("
+            "id VARCHAR(36) PRIMARY KEY, "
+            "project_id VARCHAR(36) NOT NULL, "
+            "status VARCHAR(40) NOT NULL, "
+            "experiment_date DATE, "
+            "locked BOOLEAN NOT NULL, "
+            "created_at DATETIME NOT NULL, "
+            "updated_at DATETIME NOT NULL, "
+            "experiment_number VARCHAR(80), "
+            "report_generated BOOLEAN NOT NULL DEFAULT 0, "
+            "pathology_number VARCHAR(160) NOT NULL, "
+            f"{constraint_sql}"
+            "FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE RESTRICT"
+            ")"
+        )
+        connection.execute(
+            "CREATE TABLE record_values ("
+            "id VARCHAR(36) PRIMARY KEY, "
+            "record_id VARCHAR(36) NOT NULL, "
+            "value_text TEXT NOT NULL, "
+            "FOREIGN KEY(record_id) REFERENCES project_records(id) ON DELETE CASCADE"
+            ")"
+        )
+        connection.executemany("INSERT INTO projects (id) VALUES (?)", [("p1",), ("p2",)])
+        connection.execute(
+            "INSERT INTO project_records ("
+            "id, project_id, status, locked, created_at, updated_at, "
+            "experiment_number, pathology_number"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "r1",
+                "p1",
+                "待实验",
+                0,
+                "2026-08-01 00:00:00",
+                "2026-08-01 00:00:00",
+                "EXP-1",
+                "CASE-1",
+            ),
+        )
+        connection.execute(
+            "INSERT INTO record_values (id, record_id, value_text) VALUES (?, ?, ?)",
+            ("v1", "r1", "保留值"),
+        )
+        connection.commit()
+
+    database = Database(f"sqlite:///{database_path.as_posix()}")
+    try:
+        database._migrate_record_experiment_number_uniqueness()
+    finally:
+        database.dispose()
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(project_records)")}
+        assert {"position", "highlight_color", "cell_highlight_colors"}.issubset(columns)
+        assert connection.execute(
+            "SELECT id, project_id, experiment_number, pathology_number, position "
+            "FROM project_records"
+        ).fetchall() == [("r1", "p1", "EXP-1", "CASE-1", 1)]
+        assert connection.execute(
+            "SELECT id, record_id, value_text FROM record_values"
+        ).fetchall() == [("v1", "r1", "保留值")]
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        record_value_targets = {
+            row[2] for row in connection.execute("PRAGMA foreign_key_list(record_values)")
+        }
+        assert record_value_targets == {"project_records"}
+        connection.execute(
+            "INSERT INTO project_records ("
+            "id, project_id, position, status, pathology_number, experiment_number, "
+            "report_generated, locked, cell_highlight_colors, created_at, updated_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "r2",
+                "p2",
+                1,
+                "待实验",
+                "CASE-2",
+                "EXP-1",
+                0,
+                0,
+                "{}",
+                "2026-08-02 00:00:00",
+                "2026-08-02 00:00:00",
+            ),
+        )
+        connection.execute(
+            "INSERT INTO project_records ("
+            "id, project_id, position, status, pathology_number, experiment_number, "
+            "report_generated, locked, cell_highlight_colors, created_at, updated_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "r3",
+                "p1",
+                2,
+                "待实验",
+                "CASE-3",
+                "EXP-1",
+                0,
+                0,
+                "{}",
+                "2026-08-03 00:00:00",
+                "2026-08-03 00:00:00",
+            ),
+        )
+        connection.commit()
+        assert connection.execute(
+            "SELECT project_id, experiment_number FROM project_records "
+            "WHERE experiment_number = 'EXP-1' ORDER BY id"
+        ).fetchall() == [("p1", "EXP-1"), ("p2", "EXP-1"), ("p1", "EXP-1")]

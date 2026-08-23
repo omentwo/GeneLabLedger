@@ -38,6 +38,7 @@ export interface FieldDefinition {
   width: number;
   validation_mode?: ValidationMode;
   validation_rules?: FieldValidationRules;
+  default_value?: string | null;
   options: FieldOption[];
 }
 
@@ -75,6 +76,7 @@ export interface LedgerTemplateField {
   width: number;
   validation_mode?: ValidationMode;
   validation_rules?: FieldValidationRules;
+  default_value?: string | null;
   options: string[];
 }
 
@@ -306,6 +308,8 @@ export interface WorkbookImportRow {
 export interface WorkbookImportPreviewRow extends WorkbookImportRow {
   action: "create" | "update";
   errors: string[];
+  warnings: string[];
+  suggestions: string[];
 }
 
 export interface WorkbookImportPreview {
@@ -359,6 +363,12 @@ export interface ReportTemplate {
   name: string;
   versions: ReportTemplateVersion[];
   created_at: string;
+}
+
+export interface ReportTemplateDeleteResult {
+  template_id: string;
+  removed_template_directory: boolean;
+  cleanup_warnings: string[];
 }
 
 export interface Printer {

@@ -111,6 +111,8 @@ const sourceTypeLabels: Record<MappingSourceType, string> = {
   experiment_number: "实验编号",
   blank: "留空",
 };
+let recordRequestGeneration = 0;
+let templateRequestGeneration = 0;
 
 function placeholderText(value: string): string {
   return `{{${value}}}`;
@@ -137,7 +139,9 @@ function setActiveVersion(versionId: string): void {
 }
 
 async function loadRecordsForTemplate(): Promise<void> {
-  if (!activeTemplate.value) {
+  const template = activeTemplate.value;
+  const generation = ++recordRequestGeneration;
+  if (!template) {
     records.value = [];
     return;
   }
@@ -145,14 +149,16 @@ async function loadRecordsForTemplate(): Promise<void> {
   let offset = 0;
   while (true) {
     const page = await listRecords({
-      project_id: activeTemplate.value.project_id,
+      project_id: template.project_id,
       limit: 1000,
       offset,
     });
+    if (generation !== recordRequestGeneration || activeTemplateId.value !== template.id) return;
     loaded.push(...page.items);
     offset += page.items.length;
     if (offset >= page.total || page.items.length === 0) break;
   }
+  if (generation !== recordRequestGeneration || activeTemplateId.value !== template.id) return;
   records.value = loaded;
   selectedRecords.value = [];
   const queryRecords = Array.isArray(route.query.records)
@@ -169,6 +175,7 @@ async function loadRecordsForTemplate(): Promise<void> {
     showGenerated.value = true;
   }
   await nextTick();
+  if (generation !== recordRequestGeneration || activeTemplateId.value !== template.id) return;
   recordTableRef.value?.clearSelection();
   requested.forEach((record) => {
     recordTableRef.value?.toggleRowSelection(record, true);
@@ -240,7 +247,10 @@ async function savePrintEngine(): Promise<void> {
 }
 
 async function loadTemplates(preferredId = activeTemplateId.value): Promise<void> {
-  templates.value = await listReportTemplates();
+  const generation = ++templateRequestGeneration;
+  const loaded = await listReportTemplates();
+  if (generation !== templateRequestGeneration) return;
+  templates.value = loaded;
   const queryProject =
     typeof route.query.project === "string" ? route.query.project : "";
   const preferred =
@@ -249,6 +259,7 @@ async function loadTemplates(preferredId = activeTemplateId.value): Promise<void
     templates.value[0];
   if (preferred) await selectTemplate(preferred);
   else {
+    recordRequestGeneration += 1;
     activeTemplateId.value = "";
     activeVersionId.value = "";
     mappings.value = [];
@@ -462,9 +473,13 @@ async function removeTemplate(): Promise<void> {
         type: "warning",
       },
     );
-    await deleteReportTemplate(activeTemplate.value.id);
+    const result = await deleteReportTemplate(activeTemplate.value.id);
     await loadTemplates("");
-    ElMessage.success("报告模板已删除");
+    if (result.cleanup_warnings.length) {
+      ElMessage.warning(`报告模板已删除，但${result.cleanup_warnings.join("；")}`);
+    } else {
+      ElMessage.success("报告模板已删除");
+    }
   } catch (error) {
     if (error === "cancel" || error === "close") return;
     ElMessage.error(error instanceof Error ? error.message : "模板删除失败");

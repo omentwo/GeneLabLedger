@@ -13,11 +13,11 @@ from fastapi import (
     Form,
     HTTPException,
     Request,
-    Response,
     UploadFile,
     status,
 )
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.audit import audit
@@ -42,6 +42,7 @@ from app.schemas import (
     ReportPrintPreviewCreate,
     ReportPrintPreviewRead,
     ReportPrintRead,
+    ReportTemplateDeleteResponse,
     ReportTemplateRead,
     ReportTemplateVersionRead,
 )
@@ -55,6 +56,7 @@ from app.services.office_printing import (
     OfficePrintError,
     OfficePrintService,
 )
+from app.services.preview_files import cleanup_print_previews
 from app.services.serializers import template_dict, template_version_dict
 from app.timezones import ASIA_SHANGHAI
 
@@ -149,14 +151,19 @@ def store_template_version(
     settings: Settings,
     template: ReportTemplate,
     version_number: int,
-    original_filename: str,
+    storage_key: str,
     content: bytes,
 ) -> tuple[Path, list[str]]:
     placeholders = extract_placeholders(content)
     target_dir = settings.template_dir / template.id
     target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / f"v{version_number}.docx"
-    target_path.write_bytes(content)
+    target_path = target_dir / f"v{version_number}-{storage_key}.docx"
+    temporary_path = target_dir / f".{target_path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        temporary_path.write_bytes(content)
+        temporary_path.replace(target_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
     return target_path, placeholders
 
 
@@ -208,14 +215,16 @@ async def create_report_template(
     session.flush()
     target_path: Path | None = None
     try:
+        version_id = str(uuid.uuid4())
         target_path, placeholders = store_template_version(
             settings,
             template,
             1,
-            file.filename or "template.docx",
+            version_id,
             content,
         )
         version = ReportTemplateVersion(
+            id=version_id,
             template_id=template.id,
             version_number=1,
             original_filename=file.filename or "template.docx",
@@ -271,38 +280,55 @@ async def add_report_template_version(
         or 0
     )
     version_number = current_max + 1
-    target_path, placeholders = store_template_version(
-        settings,
-        template,
-        version_number,
-        file.filename or "template.docx",
-        content,
-    )
-    version = ReportTemplateVersion(
-        template_id=template.id,
-        version_number=version_number,
-        original_filename=file.filename or "template.docx",
-        storage_path=str(target_path.resolve()),
-        placeholders=placeholders,
-    )
-    session.add(version)
-    session.flush()
-    for placeholder in placeholders:
-        session.add(
-            ReportMapping(
-                template_version_id=version.id,
-                placeholder=placeholder,
-                source_type="unmapped",
-            )
+    version_id = str(uuid.uuid4())
+    target_path: Path | None = None
+    try:
+        target_path, placeholders = store_template_version(
+            settings,
+            template,
+            version_number,
+            version_id,
+            content,
         )
-    audit(
-        session,
-        "report_template.version.create",
-        "report_template_version",
-        version.id,
-        {"template_id": template.id, "version_number": version_number},
-    )
-    session.commit()
+        version = ReportTemplateVersion(
+            id=version_id,
+            template_id=template.id,
+            version_number=version_number,
+            original_filename=file.filename or "template.docx",
+            storage_path=str(target_path.resolve()),
+            placeholders=placeholders,
+        )
+        session.add(version)
+        session.flush()
+        for placeholder in placeholders:
+            session.add(
+                ReportMapping(
+                    template_version_id=version.id,
+                    placeholder=placeholder,
+                    source_type="unmapped",
+                )
+            )
+        audit(
+            session,
+            "report_template.version.create",
+            "report_template_version",
+            version.id,
+            {"template_id": template.id, "version_number": version_number},
+        )
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        if target_path:
+            target_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="模板版本已被其他请求占用，请重试",
+        ) from error
+    except Exception:
+        session.rollback()
+        if target_path:
+            target_path.unlink(missing_ok=True)
+        raise
     return template_version_dict(load_version(session, version.id))
 
 
@@ -513,6 +539,10 @@ def preview_report(
     version = load_version(session, version_id)
     settings = settings_from(request)
     preview_service = request.app.state.preview_service
+    cleanup_print_previews(
+        settings.report_work_dir,
+        max_age_seconds=settings.preview_ttl_seconds,
+    )
     preview_id = uuid.uuid4().hex
     work_root = settings.report_work_dir / f"report-preview-{preview_id}"
     preview_dir = settings.report_work_dir / "report-previews"
@@ -585,14 +615,31 @@ def native_preview_report(
     return result
 
 
-@router.delete("/report-templates/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/report-templates/{template_id}",
+    response_model=ReportTemplateDeleteResponse,
+)
 def delete_report_template(
     template_id: str,
     request: Request,
     session: Session = Depends(get_session),
-) -> Response:
+) -> ReportTemplateDeleteResponse:
     template = load_template(session, template_id)
-    template_directory = settings_from(request).template_dir / template.id
+    cleanup_warnings: list[str] = []
+    template_directory: Path | None = None
+    try:
+        template_root = settings_from(request).template_dir.resolve()
+        candidate = (template_root / template.id).resolve()
+        candidate.relative_to(template_root)
+    except ValueError:
+        cleanup_warnings.append("报告模板文件路径不在受控目录内，已保留文件")
+    except OSError:
+        cleanup_warnings.append("报告模板文件路径无法校验，已保留文件")
+    else:
+        if candidate == template_root:
+            cleanup_warnings.append("报告模板目录路径无效，已保留文件")
+        else:
+            template_directory = candidate
     audit(
         session,
         "report_template.delete",
@@ -602,6 +649,17 @@ def delete_report_template(
     )
     session.delete(template)
     session.commit()
-    if template_directory.is_dir():
-        shutil.rmtree(template_directory)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    removed_template_directory = False
+    if template_directory is not None and template_directory.is_dir():
+        try:
+            shutil.rmtree(template_directory)
+            removed_template_directory = True
+        except OSError:
+            cleanup_warnings.append("报告模板文件未能清理，请稍后手动检查")
+    elif template_directory is not None and template_directory.exists():
+        cleanup_warnings.append("报告模板文件路径不是受控目录，已保留文件")
+    return ReportTemplateDeleteResponse(
+        template_id=template.id,
+        removed_template_directory=removed_template_directory,
+        cleanup_warnings=cleanup_warnings,
+    )

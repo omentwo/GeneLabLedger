@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import json
+import os
+import secrets
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import String, cast, func, or_, select, text
 from sqlalchemy.orm import Session
 
@@ -65,6 +69,26 @@ AUDIT_ENTITY_SEARCH_LABELS = {
     "auto_export_task": "自动导出任务",
     "app_setting": "系统设置",
 }
+
+
+@router.post("/desktop/shutdown", include_in_schema=False, status_code=status.HTTP_202_ACCEPTED)
+async def request_desktop_shutdown(request: Request) -> Response:
+    expected_token = os.environ.get("GENE_LEDGER_SHUTDOWN_TOKEN", "")
+    if os.environ.get("GENE_LEDGER_DESKTOP_MODE") != "1" or not expected_token:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    client_host = request.client.host if request.client else ""
+    try:
+        is_loopback = ipaddress.ip_address(client_host).is_loopback
+    except ValueError:
+        is_loopback = False
+    supplied_token = request.headers.get("x-gene-ledger-shutdown-token", "")
+    if not is_loopback or not secrets.compare_digest(supplied_token, expected_token):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+    shutdown = getattr(request.app.state, "request_shutdown", None)
+    if not callable(shutdown):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
+    asyncio.get_running_loop().call_later(0.1, shutdown)
+    return Response(status_code=status.HTTP_202_ACCEPTED)
 
 
 @router.get("/health", response_model=HealthRead)

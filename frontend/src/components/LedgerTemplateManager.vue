@@ -40,6 +40,9 @@ function fieldsFromSource(): LedgerTemplateField[] {
       hidden: field.hidden,
       sort_order: field.sort_order,
       width: field.width,
+      validation_mode: field.validation_mode,
+      validation_rules: { ...(field.validation_rules ?? {}) },
+      default_value: field.default_value,
       options: field.options
         .slice()
         .sort((a, b) => a.sort_order - b.sort_order)
@@ -99,11 +102,15 @@ function addDraftField(): void {
     hidden: false,
     sort_order: index,
     width: 120,
+    validation_mode: "suggestion",
+    validation_rules: {},
+    default_value: null,
     options: [],
   });
 }
 
 function removeDraftField(index: number): void {
+  if (draftFields.value[index]?.is_core) return;
   draftFields.value.splice(index, 1);
   draftFields.value.forEach((field, fieldIndex) => {
     field.sort_order = fieldIndex;
@@ -117,6 +124,11 @@ async function saveTemplate(): Promise<void> {
   }
   if (!draftFields.value.length) {
     ElMessage.warning("模板至少需要一个表头字段");
+    return;
+  }
+  const labels = draftFields.value.map((field) => field.label.trim()).filter(Boolean);
+  if (labels.length !== draftFields.value.length || new Set(labels).size !== labels.length) {
+    ElMessage.warning("表头名称不能为空或重复");
     return;
   }
   loading.value = true;
@@ -207,7 +219,7 @@ watch(
     </template>
   </el-dialog>
 
-  <el-dialog v-model="dialogVisible" :title="editingTemplateId ? '编辑台账模板' : '新增台账模板'" width="520px" append-to-body>
+  <el-dialog v-model="dialogVisible" :title="editingTemplateId ? '编辑台账模板' : '新增台账模板'" width="760px" append-to-body>
     <el-form label-position="top">
       <el-form-item label="模板名称">
         <el-input v-model="form.name" maxlength="120" />
@@ -230,14 +242,21 @@ watch(
       <div class="template-field-editor">
         <div v-for="(field, index) in draftFields" :key="field.key" class="template-field-row">
           <el-input v-model="field.label" maxlength="120" placeholder="字段名称" />
-          <el-select v-model="field.data_type" style="width: 110px">
+          <el-select v-model="field.data_type" :disabled="field.is_core" style="width: 110px">
             <el-option label="文本" value="text" />
             <el-option label="数字" value="number" />
             <el-option label="日期" value="date" />
             <el-option label="选择" value="select" />
           </el-select>
           <el-input-number v-model="field.width" :min="58" :max="600" controls-position="right" />
-          <el-button link type="danger" @click="removeDraftField(index)">删除</el-button>
+          <el-input
+            :model-value="field.default_value ?? ''"
+            :disabled="field.is_core"
+            clearable
+            placeholder="新记录默认值"
+            @update:model-value="field.default_value = String($event || '') || null"
+          />
+          <el-button link type="danger" :disabled="field.is_core" @click="removeDraftField(index)">删除</el-button>
         </div>
         <el-button plain :icon="Plus" @click="addDraftField">添加字段</el-button>
       </div>
@@ -257,7 +276,7 @@ watch(
 .template-field-editor { display: grid; gap: 8px; max-height: 320px; overflow-y: auto; }
 .template-field-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(88px, 110px) minmax(96px, 120px) 48px;
+  grid-template-columns: minmax(0, 1fr) minmax(88px, 110px) minmax(96px, 120px) minmax(130px, 1fr) 48px;
   gap: 8px;
   align-items: center;
 }
@@ -268,7 +287,7 @@ watch(
 
 @media (max-width: 600px) {
   .template-field-row {
-    grid-template-columns: minmax(0, 1fr) 86px 92px 42px;
+    grid-template-columns: minmax(0, 1fr) 86px 92px minmax(110px, 1fr) 42px;
     gap: 6px;
   }
   .template-field-row :deep(.el-button) { width: 42px; }

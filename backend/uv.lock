@@ -103,7 +103,7 @@ wheels = [
 
 [[package]]
 name = "gene-lab-ledger-backend"
-version = "0.10.1"
+version = "0.10.2"
 source = { virtual = "." }
 dependencies = [
     { name = "alembic" },

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import threading
 import uuid
-from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
@@ -14,7 +13,11 @@ from sqlalchemy.orm import Session, selectinload
 from app.audit import audit
 from app.models import FieldDefinition, ProjectRecord, RecordValue
 from app.schemas import RecordBatchNewRecord, RecordCellChange
-from app.services.field_validation import FieldValueIssue, validate_field_value
+from app.services.field_validation import (
+    FieldValueIssue,
+    new_record_field_value,
+    validate_field_value,
+)
 from app.services.record_operations import snapshot_record
 from app.services.records import allocate_record_position, next_record_position
 from app.services.serializers import record_dict
@@ -56,12 +59,47 @@ class StoredCellBatch:
 
 _preview_lock = threading.Lock()
 _previews: dict[str, StoredCellBatch] = {}
+_claimed_previews: set[str] = set()
 
 
 def _cleanup_previews(now: datetime) -> None:
     for token, preview in list(_previews.items()):
         if preview.expires_at <= now:
             _previews.pop(token, None)
+            _claimed_previews.discard(token)
+
+
+def _claim_preview(token: str, *, accept_warnings: bool) -> StoredCellBatch:
+    now = datetime.now(UTC)
+    with _preview_lock:
+        _cleanup_previews(now)
+        preview = _previews.get(token)
+        if not preview:
+            raise HTTPException(status_code=status.HTTP_410_GONE, detail="预检查已过期，请重新预览")
+        if any(issue["severity"] == "error" for issue in preview.issues):
+            raise HTTPException(status_code=422, detail="存在严格验证错误，不能提交")
+        if not accept_warnings and any(
+            issue["severity"] == "warning" for issue in preview.issues
+        ):
+            raise HTTPException(status_code=409, detail="存在警告，请确认后继续")
+        if token in _claimed_previews:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="该预检查正在提交，请勿重复操作",
+            )
+        _claimed_previews.add(token)
+        return preview
+
+
+def _release_preview_claim(token: str) -> None:
+    with _preview_lock:
+        _claimed_previews.discard(token)
+
+
+def _consume_preview(token: str) -> None:
+    with _preview_lock:
+        _previews.pop(token, None)
+        _claimed_previews.discard(token)
 
 
 def _field_and_record_maps(
@@ -170,18 +208,6 @@ def _validate_new_records(
     if unknown_ids:
         raise HTTPException(status_code=422, detail="新增记录包含不属于当前项目的自定义表头")
 
-    numbers = [record.experiment_number for record in new_records if record.experiment_number]
-    duplicate_numbers = {
-        number for number, count in Counter(numbers).items() if count > 1
-    }
-    existing_numbers = set(
-        session.scalars(
-            select(ProjectRecord.experiment_number).where(
-                ProjectRecord.project_id == project_id,
-                ProjectRecord.experiment_number.in_(numbers),
-            )
-        )
-    ) if numbers else set()
     stored: list[StoredNewRecord] = []
     issues: list[dict[str, str]] = []
     for row in new_records:
@@ -199,21 +225,14 @@ def _validate_new_records(
             value, field_issues = validate_field_value(field, raw_value)
             normalized_core[system_key] = value
             issues.extend(_new_issue_dict(row.client_id, field, issue) for issue in field_issues)
-        number_field = core_by_key.get("experiment_number")
-        if number_field and normalized_core["experiment_number"] in duplicate_numbers | existing_numbers:
-            issues.append(
-                {
-                    "record_id": row.client_id,
-                    "field_id": number_field.id,
-                    "severity": "error",
-                    "message": "实验编号已存在",
-                }
-            )
         normalized_values: list[tuple[str, str]] = []
         for field in fields:
             if field.is_core:
                 continue
-            value, field_issues = validate_field_value(field, row.values.get(field.id, ""))
+            value, field_issues = validate_field_value(
+                field,
+                new_record_field_value(field, row.values),
+            )
             normalized_values.append((field.id, value))
             issues.extend(_new_issue_dict(row.client_id, field, issue) for issue in field_issues)
         stored.append(
@@ -338,24 +357,13 @@ def _apply_custom_values(
             row.value_text = text
 
 
-def commit_cell_batch(
+def _commit_claimed_cell_batch(
     session: Session,
     *,
-    token: str,
+    preview: StoredCellBatch,
     accept_warnings: bool,
     include_snapshots: bool = False,
 ) -> dict:
-    now = datetime.now(UTC)
-    with _preview_lock:
-        _cleanup_previews(now)
-        preview = _previews.get(token)
-    if not preview:
-        raise HTTPException(status_code=status.HTTP_410_GONE, detail="预检查已过期，请重新预览")
-    if any(issue["severity"] == "error" for issue in preview.issues):
-        raise HTTPException(status_code=422, detail="存在严格验证错误，不能提交")
-    if not accept_warnings and any(issue["severity"] == "warning" for issue in preview.issues):
-        raise HTTPException(status_code=409, detail="存在警告，请确认后继续")
-
     payload_changes = [
         RecordCellChange(
             record_id=change.record_id,
@@ -516,11 +524,12 @@ def commit_cell_batch(
             },
         )
         session.commit()
+        _consume_preview(preview.token)
     except IntegrityError as error:
         session.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="实验编号与现有记录冲突，请刷新后重试",
+            detail="批量保存冲突，请刷新后重试",
         ) from error
 
     all_record_ids = [*affected_record_ids, *(record.id for record in created_records)]
@@ -540,8 +549,6 @@ def commit_cell_batch(
         if include_snapshots
         else []
     )
-    with _preview_lock:
-        _previews.pop(token, None)
     return {
         "records": [record_dict(refreshed_by_id[record_id]) for record_id in all_record_ids],
         "skipped_locked": skipped_locked,
@@ -550,3 +557,22 @@ def commit_cell_batch(
         "before": before,
         "after": after,
     }
+
+
+def commit_cell_batch(
+    session: Session,
+    *,
+    token: str,
+    accept_warnings: bool,
+    include_snapshots: bool = False,
+) -> dict:
+    preview = _claim_preview(token, accept_warnings=accept_warnings)
+    try:
+        return _commit_claimed_cell_batch(
+            session,
+            preview=preview,
+            accept_warnings=accept_warnings,
+            include_snapshots=include_snapshots,
+        )
+    finally:
+        _release_preview_claim(token)

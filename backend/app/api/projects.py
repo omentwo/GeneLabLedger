@@ -13,7 +13,6 @@ from app.api.ledger_templates import apply_template_fields
 from app.audit import audit
 from app.database import get_session
 from app.models import (
-    AutoExportTask,
     FieldDefinition,
     FieldOption,
     LedgerTemplate,
@@ -42,9 +41,49 @@ from app.schemas import (
     ProjectUpdate,
 )
 from app.seed import add_core_fields
+from app.services.auto_exports import disable_tasks_for_deleted_project
+from app.services.field_names import RESERVED_WORKBOOK_HEADERS, field_import_identifiers
+from app.services.field_validation import validate_default_value
 from app.services.records import require_project
 
 router = APIRouter(prefix="/projects", tags=["项目与表头"])
+
+
+def _ensure_unique_field_label(
+    session: Session,
+    project_id: str,
+    label: str,
+    *,
+    exclude_field_id: str | None = None,
+) -> None:
+    normalized = label.strip()
+    if normalized in RESERVED_WORKBOOK_HEADERS:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="表头名称不能使用 Excel 导入保留字段",
+        )
+    fields = session.scalars(
+        select(FieldDefinition).where(FieldDefinition.project_id == project_id)
+    )
+    for field in fields:
+        if field.id == exclude_field_id:
+            continue
+        if normalized in field_import_identifiers(field):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="表头名称不能与其他表头名称或系统标识重复",
+            )
+
+
+def _validated_default(field: FieldDefinition, raw_value: str | None) -> str | None:
+    normalized, issues = validate_default_value(field, raw_value)
+    if issues:
+        messages = "；".join(dict.fromkeys(issue.message for issue in issues))
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"新记录默认值无效：{messages}",
+        )
+    return normalized
 
 
 def load_project(session: Session, project_id: str) -> Project:
@@ -334,6 +373,7 @@ def duplicate_project(
                 width=source_field.width,
                 validation_mode=source_field.validation_mode,
                 validation_rules=dict(source_field.validation_rules or {}),
+                default_value=source_field.default_value,
             )
             session.add(cloned_field)
             session.flush()
@@ -492,6 +532,7 @@ def delete_project(
             status_code=status.HTTP_409_CONFLICT,
             detail="项目已有台账记录或报告模板，不能直接删除",
         )
+    disable_tasks_for_deleted_project(session, project.id)
     audit(session, "project.delete", "project", project.id, {"name": project.name})
     session.delete(project)
     session.commit()
@@ -590,13 +631,7 @@ def force_delete_project(
             else:
                 template_directories.append(candidate)
 
-    updated_auto_export_tasks = 0
-    for task in session.scalars(select(AutoExportTask)):
-        project_ids = list(task.project_ids or [])
-        filtered_project_ids = [item for item in project_ids if item != project.id]
-        if filtered_project_ids != project_ids:
-            task.project_ids = filtered_project_ids
-            updated_auto_export_tasks += 1
+    updated_auto_export_tasks = disable_tasks_for_deleted_project(session, project.id)
 
     deleted_record_values = 0
     deleted_records = 0
@@ -718,6 +753,7 @@ def create_field(
     session: Session = Depends(get_session),
 ) -> FieldDefinition:
     require_project(session, project_id)
+    _ensure_unique_field_label(session, project_id, payload.label)
     max_order = (
         session.scalar(
             select(func.max(FieldDefinition.sort_order)).where(FieldDefinition.project_id == project_id)
@@ -735,11 +771,12 @@ def create_field(
         validation_mode=payload.validation_mode,
         validation_rules=payload.validation_rules.model_dump(mode="json", exclude_none=True),
     )
+    for index, value in enumerate(payload.options):
+        field.options.append(FieldOption(value=value, sort_order=index))
+    field.default_value = _validated_default(field, payload.default_value)
     try:
         session.add(field)
         session.flush()
-        for index, value in enumerate(payload.options):
-            session.add(FieldOption(field_id=field.id, value=value, sort_order=index))
         audit(
             session,
             "field.create",
@@ -778,8 +815,15 @@ def update_field(
         "hidden": field.hidden,
         "validation_mode": field.validation_mode,
         "validation_rules": dict(field.validation_rules or {}),
+        "default_value": field.default_value,
     }
     if payload.label is not None:
+        _ensure_unique_field_label(
+            session,
+            field.project_id,
+            payload.label,
+            exclude_field_id=field.id,
+        )
         field.label = payload.label
     if payload.data_type is not None:
         if field.is_core:
@@ -808,6 +852,15 @@ def update_field(
                 detail="核心字段的验证规则不能修改",
             )
         field.validation_rules = payload.validation_rules.model_dump(mode="json", exclude_none=True)
+    if "default_value" in payload.model_fields_set:
+        if field.is_core:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="核心字段不能设置新记录默认值",
+            )
+        field.default_value = payload.default_value
+    if not field.is_core:
+        field.default_value = _validated_default(field, field.default_value)
     audit(
         session,
         "field.update",
@@ -823,6 +876,7 @@ def update_field(
                 "hidden": field.hidden,
                 "validation_mode": field.validation_mode,
                 "validation_rules": dict(field.validation_rules or {}),
+                "default_value": field.default_value,
             },
         },
     )
@@ -857,6 +911,8 @@ def replace_field_options(
         session.flush()
         for index, value in enumerate(payload.options):
             field.options.append(FieldOption(value=value, sort_order=index))
+        if field.default_value is not None:
+            field.default_value = _validated_default(field, field.default_value)
         audit(
             session,
             "field.options.replace",

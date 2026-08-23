@@ -17,6 +17,8 @@ from app.schemas import (
     WorkbookImportPreviewRow,
     WorkbookImportResult,
 )
+from app.services.field_names import RESERVED_WORKBOOK_HEADERS, field_import_identifiers
+from app.services.field_validation import new_record_field_value, validate_field_value
 from app.services.records import next_record_position, replace_record_values, require_project
 from app.services.workbook_import import InvalidWorkbook, ParsedSheet, parse_xlsx
 
@@ -62,14 +64,54 @@ def _field_map(session: Session, project_id: str) -> dict[str, FieldDefinition]:
         session.scalars(
             select(FieldDefinition)
             .where(FieldDefinition.project_id == project_id)
+            .options(selectinload(FieldDefinition.options))
             .order_by(FieldDefinition.sort_order)
         )
     )
     result: dict[str, FieldDefinition] = {}
+    conflicts: set[str] = set()
     for field in fields:
-        result.setdefault(field.label.strip(), field)
-        result.setdefault(field.key.strip(), field)
+        for identifier in field_import_identifiers(field):
+            if identifier in RESERVED_WORKBOOK_HEADERS:
+                conflicts.add(identifier)
+            existing = result.get(identifier)
+            if existing is not None and existing.id != field.id:
+                conflicts.add(identifier)
+                continue
+            result[identifier] = field
+    if conflicts:
+        names = "、".join(sorted(conflicts))
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"项目表头存在导入命名冲突：{names}；请先重命名冲突表头",
+        )
     return result
+
+
+def _custom_value_issues(
+    fields: list[FieldDefinition],
+    values: dict[str, str],
+    *,
+    is_new: bool,
+) -> tuple[dict[str, str], dict[str, list[str]]]:
+    custom_fields = [field for field in fields if not field.is_core]
+    by_id = {field.id: field for field in custom_fields}
+    messages = {"error": [], "warning": [], "suggestion": []}
+    unknown = set(values) - set(by_id)
+    if unknown:
+        messages["error"].append(
+            f"存在不属于当前项目的字段：{', '.join(sorted(unknown))}"
+        )
+    normalized: dict[str, str] = {}
+    for field in custom_fields:
+        if not is_new and field.id not in values:
+            continue
+        raw_value = new_record_field_value(field, values) if is_new else values[field.id]
+        value, issues = validate_field_value(field, raw_value)
+        normalized[field.id] = value
+        for issue in issues:
+            messages[issue.severity].append(issue.message)
+    return normalized, messages
 
 
 def _preview_rows(
@@ -86,7 +128,7 @@ def _preview_rows(
     unknown_headers = [
         header
         for header in header_indexes
-        if header not in fields and header not in {"_record_id", "_project_id"}
+        if header not in fields and header not in RESERVED_WORKBOOK_HEADERS
     ]
     errors: list[str] = []
     if duplicate_headers:
@@ -94,6 +136,7 @@ def _preview_rows(
     if unknown_headers:
         errors.append(f"存在当前项目无法识别的表头：{', '.join(unknown_headers)}")
     rows: list[WorkbookImportPreviewRow] = []
+    project_fields = list({field.id: field for field in fields.values()}.values())
     for row_number, raw in enumerate(sheet.rows, start=2):
         if not any(value.strip() for value in raw):
             continue
@@ -104,13 +147,17 @@ def _preview_rows(
         )
         if source_project_id and source_project_id != project.id:
             row_errors.append("工作簿中的项目 UUID 与当前项目不一致")
-        record = session.get(ProjectRecord, record_id) if record_id else None
-        action = "update" if record else "create"
+        record = None
+        action = "update" if record_id else "create"
         if record_id:
             try:
                 uuid.UUID(record_id)
             except ValueError:
                 row_errors.append("记录 UUID 格式无效")
+            else:
+                record = session.get(ProjectRecord, record_id)
+                if not record:
+                    row_errors.append("记录 UUID 不存在")
         if record and record.project_id != project.id:
             row_errors.append("记录 UUID 属于其他项目")
         if record and record.locked:
@@ -139,6 +186,12 @@ def _preview_rows(
         if date_error:
             row_errors.append(date_error)
         experiment_number = core.get("experiment_number", "").strip() or None
+        normalized_values, value_issues = _custom_value_issues(
+            project_fields,
+            values,
+            is_new=action == "create",
+        )
+        row_errors.extend(value_issues["error"])
         rows.append(
             WorkbookImportPreviewRow(
                 row_number=row_number,
@@ -147,9 +200,11 @@ def _preview_rows(
                 status=record_status,
                 experiment_date=experiment_date,
                 experiment_number=experiment_number,
-                values=values,
+                values=normalized_values,
                 action=action,
                 errors=row_errors,
+                warnings=value_issues["warning"],
+                suggestions=value_issues["suggestion"],
             )
         )
     return rows, errors
@@ -196,6 +251,13 @@ def commit_workbook(
     session: Session = Depends(get_session),
 ) -> dict:
     require_project(session, payload.project_id)
+    fields = list(
+        session.scalars(
+            select(FieldDefinition)
+            .where(FieldDefinition.project_id == payload.project_id)
+            .options(selectinload(FieldDefinition.options))
+        )
+    )
     target_ids = [row.record_id for row in payload.rows if row.record_id]
     if len(target_ids) != len(set(target_ids)):
         raise HTTPException(
@@ -220,6 +282,11 @@ def commit_workbook(
                     detail=f"第 {row.row_number} 行记录 UUID 无效",
                 ) from error
         record = existing.get(row.record_id or "")
+        if row.record_id and not record:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"第 {row.row_number} 行记录 UUID 不存在",
+            )
         if record and record.project_id != payload.project_id:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -231,39 +298,40 @@ def commit_workbook(
                 detail=f"第 {row.row_number} 行记录已锁定",
             )
 
-    numbers = [row.experiment_number for row in payload.rows if row.experiment_number]
-    if len(numbers) != len(set(numbers)):
+    prepared_values: list[dict[str, str]] = []
+    validation_errors: list[str] = []
+    validation_warnings: list[str] = []
+    for row in payload.rows:
+        normalized, issues = _custom_value_issues(
+            fields,
+            row.values,
+            is_new=row.record_id is None,
+        )
+        prepared_values.append(normalized)
+        validation_errors.extend(
+            f"第 {row.row_number} 行：{message}" for message in issues["error"]
+        )
+        validation_warnings.extend(
+            f"第 {row.row_number} 行：{message}" for message in issues["warning"]
+        )
+    if validation_errors:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="；".join(dict.fromkeys(validation_errors)),
+        )
+    if validation_warnings and not payload.accept_warnings:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="导入内容中存在重复实验编号",
-        )
-    conflict_statement = select(ProjectRecord).where(
-        ProjectRecord.project_id == payload.project_id,
-        ProjectRecord.experiment_number.in_(numbers),
-    )
-    if target_ids:
-        conflict_statement = conflict_statement.where(ProjectRecord.id.not_in(target_ids))
-    outside_conflicts = list(session.scalars(conflict_statement))
-    if outside_conflicts:
-        detail = ", ".join(
-            f"{record.experiment_number}（{record.pathology_number}）"
-            for record in outside_conflicts
-        )
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"实验编号已被其他记录使用：{detail}",
+            detail="导入内容存在验证警告，请确认后继续："
+            + "；".join(dict.fromkeys(validation_warnings)),
         )
 
     try:
-        for record in existing.values():
-            record.experiment_number = None
-        session.flush()
-
         created = 0
         updated = 0
         record_ids: list[str] = []
         next_position = next_record_position(session, payload.project_id)
-        for row in payload.rows:
+        for row, normalized_values in zip(payload.rows, prepared_values, strict=True):
             record = existing.get(row.record_id or "")
             action = "update"
             if not record:
@@ -284,7 +352,13 @@ def commit_workbook(
             record.status = row.status
             record.experiment_date = row.experiment_date
             record.experiment_number = row.experiment_number or None
-            replace_record_values(session, record, row.values)
+            replace_record_values(
+                session,
+                record,
+                normalized_values,
+                include_required_missing=action == "create",
+                apply_defaults=action == "create",
+            )
             record_ids.append(record.id)
             audit(
                 session,

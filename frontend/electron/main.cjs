@@ -1,5 +1,6 @@
 const { app, BrowserWindow, Menu, dialog, ipcMain } = require("electron");
 const { execFile, spawn } = require("node:child_process");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const http = require("node:http");
@@ -15,6 +16,7 @@ const MAX_EXPORT_BYTES = 256 * 1024 * 1024;
 let mainWindow = null;
 let backendProcess = null;
 let backendUrl = "";
+let backendShutdownToken = "";
 let dataDirectory = "";
 let alwaysOnTop = false;
 let quitting = false;
@@ -135,6 +137,7 @@ async function startBackend() {
   const port = await findAvailablePort();
   const command = app.isPackaged ? packagedBackendCommand() : developmentBackendCommand();
   backendUrl = `http://127.0.0.1:${port}`;
+  backendShutdownToken = crypto.randomBytes(32).toString("hex");
   backendProcess = spawn(
     command.executable,
     [
@@ -148,6 +151,10 @@ async function startBackend() {
     ],
     {
       cwd: command.cwd,
+      env: {
+        ...process.env,
+        GENE_LEDGER_SHUTDOWN_TOKEN: backendShutdownToken,
+      },
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     },
@@ -341,6 +348,7 @@ function registerDesktopHandlers() {
     }
     fs.mkdirSync(selected, { recursive: true });
     const saved = writeDesktopSettings(selected, alwaysOnTop);
+    dataDirectory = saved;
     return { changed: true, directory: saved };
   });
 
@@ -384,56 +392,101 @@ function registerDesktopHandlers() {
   ipcMain.handle("gene-ledger:restart", (event) => {
     assertTrustedIpcSender(event);
     app.relaunch();
-    app.exit(0);
+    app.quit();
   });
 }
 
-function stopBackend() {
-  const processToStop = backendProcess;
-  backendProcess = null;
-  if (!processToStop) return Promise.resolve();
-
-  processToStop.removeAllListeners("exit");
+function requestBackendShutdown(url, token) {
+  if (!url || !token) return Promise.resolve(false);
   return new Promise((resolve) => {
-    let finished = false;
-    const finish = () => {
-      if (finished) return;
-      finished = true;
-      resolve();
+    let settled = false;
+    const finish = (accepted) => {
+      if (settled) return;
+      settled = true;
+      resolve(accepted);
     };
-    processToStop.once("exit", finish);
+    const request = http.request(
+      `${url}/api/desktop/shutdown`,
+      {
+        method: "POST",
+        headers: { "x-gene-ledger-shutdown-token": token },
+      },
+      (response) => {
+        response.resume();
+        finish(response.statusCode === 202);
+      },
+    );
+    request.setTimeout(1500, () => {
+      finish(false);
+      request.destroy();
+    });
+    request.once("error", () => finish(false));
+    request.end();
+  });
+}
 
-    if (processToStop.exitCode != null || processToStop.signalCode != null) {
-      finish();
-      return;
-    }
+function waitForProcessExit(processToStop, timeoutMilliseconds) {
+  if (processToStop.exitCode != null || processToStop.signalCode != null) {
+    return Promise.resolve(true);
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (exited) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      processToStop.removeListener("exit", onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMilliseconds);
+    processToStop.once("exit", onExit);
+  });
+}
 
-    if (process.platform === "win32" && processToStop.pid) {
+function forceStopBackend(processToStop) {
+  if (process.platform === "win32" && processToStop.pid) {
+    return new Promise((resolve) => {
       execFile(
         "taskkill",
         ["/PID", String(processToStop.pid), "/T", "/F"],
         { windowsHide: true },
-        (error) => {
-          if (error) {
-            try {
-              processToStop.kill();
-            } catch {
-              // The process may already have exited between taskkill and fallback.
-            }
-          }
-          if (processToStop.exitCode != null || processToStop.signalCode != null) finish();
-        },
+        () => resolve(),
       );
-    } else {
-      try {
-        processToStop.kill("SIGTERM");
-      } catch {
-        finish();
-      }
-    }
+    });
+  }
+  try {
+    processToStop.kill("SIGKILL");
+  } catch {
+    // The process may already have exited.
+  }
+  return Promise.resolve();
+}
 
-    setTimeout(finish, 5000);
-  });
+async function stopBackend() {
+  const processToStop = backendProcess;
+  const shutdownUrl = backendUrl;
+  const shutdownToken = backendShutdownToken;
+  backendProcess = null;
+  backendUrl = "";
+  backendShutdownToken = "";
+  if (!processToStop) return;
+
+  processToStop.removeAllListeners("exit");
+  if (processToStop.exitCode != null || processToStop.signalCode != null) return;
+
+  const accepted = await requestBackendShutdown(shutdownUrl, shutdownToken);
+  if (!accepted && process.platform !== "win32") {
+    try {
+      processToStop.kill("SIGTERM");
+    } catch {
+      return;
+    }
+  }
+  const exited = await waitForProcessExit(processToStop, accepted ? 7000 : 1500);
+  if (exited) return;
+  await forceStopBackend(processToStop);
+  await waitForProcessExit(processToStop, 2000);
 }
 
 function applyAlwaysOnTop(value) {

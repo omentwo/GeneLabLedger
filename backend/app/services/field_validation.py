@@ -105,3 +105,21 @@ def validate_field_value(
         issues.append(_issue(field, f"{field.label}未包含在备选项中"))
 
     return value, issues
+
+
+def validate_default_value(
+    field: FieldDefinition,
+    raw_value: object,
+) -> tuple[str | None, list[FieldValueIssue]]:
+    """Normalize a configured default without treating an unset default as required input."""
+    if raw_value is None or not str(raw_value).strip():
+        return None, []
+    value, issues = validate_field_value(field, raw_value)
+    return value or None, issues
+
+
+def new_record_field_value(field: FieldDefinition, values: dict[str, str]) -> object:
+    """Respect an explicitly supplied value and otherwise use the field default."""
+    if field.id in values:
+        return values[field.id]
+    return field.default_value or ""

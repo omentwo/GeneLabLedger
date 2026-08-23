@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { nativePreviewReport, printReports, replaceReportMappings } from "@/api/reports";
+import {
+  deleteReportTemplate,
+  nativePreviewReport,
+  printReports,
+  replaceReportMappings,
+} from "@/api/reports";
 
 describe("report placeholder mappings", () => {
   afterEach(() => {
@@ -113,5 +118,26 @@ describe("report placeholder mappings", () => {
       print_engine: "word",
       action: "open",
     });
+  });
+
+  it("returns template cleanup warnings after the database delete succeeds", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          template_id: "template-1",
+          removed_template_directory: false,
+          cleanup_warnings: ["报告模板文件未能清理，请稍后手动检查"],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await deleteReportTemplate("template-1");
+
+    const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/report-templates/template-1");
+    expect(options.method).toBe("DELETE");
+    expect(result.cleanup_warnings).toHaveLength(1);
   });
 });
