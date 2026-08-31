@@ -7,6 +7,7 @@
 ```text
 Electron 主进程
   ├─ 单实例与窗口生命周期
+  ├─ 主窗口与快速录入置顶辅助窗口
   ├─ 随机 loopback 端口
   ├─ 原生保存/选目录对话框
   ├─ 白名单 IPC 与发送者校验
@@ -47,7 +48,8 @@ Electron 负责桌面边界和文件对话框，Vue 前端只通过 HTTP API 和
 2. 首次启动通过原生目录选择框取得业务数据目录；取消选择则退出。
 3. 申请空闲的 `127.0.0.1` 端口，开发模式启动 `backend/desktop/launcher.py`，打包模式启动 `resources/backend/GeneLabLedgerBackend.exe`。
 4. 通过命令行传递 `--host`、`--port`、`--data-dir`，轮询 `/api/health`，最多等待 20 秒。
-5. 创建启用 `contextIsolation`、禁用 `nodeIntegration`、启用 `sandbox` 的 `BrowserWindow`，把后端地址和数据目录作为 preload 参数传入。
+5. 创建启用 `contextIsolation`、禁用 `nodeIntegration`、启用 `sandbox` 的主 `BrowserWindow`，把后端地址、数据目录和窗口类型作为 preload 参数传入。
+6. 主台账通过白名单 IPC 按需创建或复用快速录入 `BrowserWindow`。辅助窗使用独立 `/quick-entry` hash 路由、默认始终置顶、允许缩放，并把正常窗口的位置和大小持久化到 `desktop-settings.json`；它不使用 modal 或父子窗口关系，因此不会阻塞主窗口。
 
 桌面 launcher 显式设置 `auto_create_schema=True`，因此桌面首次运行可以直接创建当前 ORM 结构。`backend/app/config.py` 中的默认值是 `False`；直接以 `app.main:app` 运行的开发/服务进程应先执行 Alembic 迁移。
 
@@ -138,8 +140,8 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 
 ## 7. 安全边界与并发行为
 
-- BrowserWindow 使用 `contextIsolation=true`、`nodeIntegration=false`、`sandbox=true`；渲染进程只能使用 `preload.cjs` 暴露的保存工作簿、选择目录、切换数据目录和重启方法。
-- 主进程拒绝新窗口，生产导航只允许打包入口；每个 IPC handler 校验发送者必须是当前主窗口。
+- 主窗口和快速录入 BrowserWindow 均使用 `contextIsolation=true`、`nodeIntegration=false`、`sandbox=true`；渲染进程只能使用 `preload.cjs` 暴露的白名单能力。
+- 渲染器自行调用 `window.open` 仍会被拒绝，生产导航只允许打包入口及其 hash 路由。普通桌面 IPC 只接受主窗口发送者；打开快速录入只允许主窗口调用，返回主程序及变更通知只允许当前快速录入窗口调用。
 - 后端仅绑定 `127.0.0.1`，CORS 只允许 `null` 和本地 Vite origin。当前没有用户认证，文件系统和数据目录权限由 Windows 环境负责。
 - 自动导出同一任务使用运行中集合避免重复执行；批量单元格预览 token 在提交前原子认领，事务失败时释放、成功时消费；打印、导入、批删和编号回写均在服务层完成关键状态复核。
 
@@ -193,5 +195,7 @@ backend/desktop/launcher.py             桌面 sidecar 入口
 frontend/electron/main.cjs              Electron 生命周期与原生对话框
 frontend/electron/preload.cjs           IPC 白名单桥接
 frontend/src/router/index.ts            页面路由
+frontend/src/views/QuickEntryView.vue   独立快速录入、未出报告病理号列表与快捷修改
+frontend/src/utils/quickEntry.ts         快捷字段配置、值规范化和提交载荷
 frontend/src/views/                    各业务页面
 ```

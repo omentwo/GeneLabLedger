@@ -113,6 +113,7 @@ import type {
   RecordValidationIssue,
 } from "@/types/api";
 import { formatShanghaiDateTime } from "@/utils/datetime";
+import { desktopBridge } from "@/utils/desktop";
 import {
   applyLedgerTableView,
   getLedgerFieldValue,
@@ -256,10 +257,6 @@ const recordSaveQueues = new Map<string, Promise<unknown>>();
 const fieldErrors = ref<Record<string, string>>({});
 const managerVisible = ref(false);
 const templateManagerVisible = ref(false);
-const quickEntryVisible = ref(false);
-const quickEntrySaving = ref(false);
-const quickEntryValues = reactive<Record<string, string>>({});
-const quickEntryPathologyRef = ref<{ focus?: () => void } | null>(null);
 const viewPresets = ref<LedgerViewPreset[]>([]);
 const activeViewPresetId = ref("");
 const activeViewState = ref<LedgerViewState | null>(null);
@@ -472,6 +469,7 @@ let draftSequence = 0;
 let loadSequence = 0;
 let viewLoadSequence = 0;
 let recordsAbortController: AbortController | null = null;
+let removeQuickEntryChangedListener: (() => void) | undefined;
 const currentPage = ref(1);
 const pageSize = 200;
 const recordTotal = ref(0);
@@ -4379,174 +4377,47 @@ function updateViewColumn(
   refreshTableLayout();
 }
 
-function resetQuickEntry(): void {
-  const state = activeViewState.value ?? defaultViewState();
-  const pinned = new Set(
-    state.columns.filter((column) => column.pinned).map((column) => column.field_id),
-  );
-  quickEntryFields.value.forEach((field) => {
-    const initialValue = field.system_key === "status"
-      ? "待实验"
-      : field.is_core
-        ? ""
-        : field.default_value ?? "";
-    if (field.system_key === "pathology_number") {
-      quickEntryValues[field.id] = "";
-    } else if (!pinned.has(field.id)) {
-      quickEntryValues[field.id] = initialValue;
-    } else if (!(field.id in quickEntryValues)) {
-      quickEntryValues[field.id] = initialValue;
-    }
-  });
-}
-
-function openQuickEntry(): void {
-  resetQuickEntry();
-  quickEntryVisible.value = true;
-  void nextTick(() => quickEntryPathologyRef.value?.focus?.());
-}
-
-function updateQuickEntryValue(field: FieldDefinition, value: string): void {
-  if (pendingValidationAction && validationPanel.value?.label === "快速录入") {
-    dismissValidationPanel();
-  }
-  quickEntryValues[field.id] = value;
-}
-
-function toggleQuickEntryPinned(field: FieldDefinition): void {
-  if (field.system_key === "pathology_number") return;
-  const state = activeViewState.value ?? defaultViewState();
-  activeViewState.value = {
-    ...state,
-    columns: state.columns.map((column) =>
-      column.field_id === field.id ? { ...column, pinned: !column.pinned } : column,
-    ),
-  };
-}
-
-function isQuickEntryPinned(field: FieldDefinition): boolean {
-  return Boolean(
-    (activeViewState.value ?? defaultViewState()).columns.find(
-      (column) => column.field_id === field.id,
-    )?.pinned,
-  );
-}
-
-async function saveQuickEntryAndNext(): Promise<void> {
+async function openQuickEntry(): Promise<void> {
   const project = currentProject.value;
   if (!project) return;
-  const pathologyField = quickEntryFields.value.find(
-    (field) => field.system_key === "pathology_number",
+  const state = activeViewState.value ?? defaultViewState();
+  const visibleIds = new Set(
+    state.columns.filter((column) => !column.hidden).map((column) => column.field_id),
   );
-  const pathology = pathologyField ? (quickEntryValues[pathologyField.id] ?? "").trim() : "";
-  if (!pathology) {
-    ElMessage.warning("病理号不能为空");
-    void nextTick(() => quickEntryPathologyRef.value?.focus?.());
+  const selectedFieldIds = project.fields
+    .filter((field) => field.is_core || visibleIds.has(field.id))
+    .sort((left, right) => left.sort_order - right.sort_order)
+    .map((field) => field.id);
+  const pinnedFieldIds = state.columns
+    .filter((column) => column.pinned)
+    .map((column) => column.field_id);
+  const context = {
+    projectId: project.id,
+    selectedFieldIds,
+    pinnedFieldIds,
+  };
+  const bridge = desktopBridge();
+  if (bridge) {
+    try {
+      await bridge.openQuickEntry(context);
+    } catch (error) {
+      ElMessage.error(error instanceof Error ? error.message : "快速录入窗口打开失败");
+    }
     return;
   }
-  const statusField = quickEntryFields.value.find((field) => field.system_key === "status");
-  const dateField = quickEntryFields.value.find(
-    (field) => field.system_key === "experiment_date",
+  const target = router.resolve({
+    name: "quick-entry",
+    query: {
+      project: context.projectId,
+      fields: context.selectedFieldIds.join(","),
+      pinned: context.pinnedFieldIds.join(","),
+    },
+  }).href;
+  window.open(
+    target,
+    "gene-ledger-quick-entry",
+    "popup=yes,width=940,height=680,resizable=yes,scrollbars=no",
   );
-  const numberField = quickEntryFields.value.find(
-    (field) => field.system_key === "experiment_number",
-  );
-  quickEntrySaving.value = true;
-  try {
-    const customValues = Object.fromEntries(
-      quickEntryFields.value
-        .filter((field) => !field.is_core)
-        .map((field) => [field.id, (quickEntryValues[field.id] ?? "").trim()]),
-    );
-    const payload = {
-      project_id: project.id,
-      pathology_number: pathology,
-      status: ((statusField && quickEntryValues[statusField.id]) || "待实验") as RecordStatus,
-      experiment_date:
-        dateField && quickEntryValues[dateField.id]
-          ? normalizeDate(quickEntryValues[dateField.id] ?? "")
-          : null,
-      experiment_number: numberField ? quickEntryValues[numberField.id] || null : null,
-      values: customValues,
-    };
-    const validation = await validateNewRecord(payload);
-    const errors = validation.issues.filter((issue) => issue.severity === "error");
-    const warnings = validation.issues.filter((issue) => issue.severity === "warning");
-    if (errors.length || warnings.length) {
-      pendingValidationAction = errors.length
-        ? null
-        : () => commitQuickEntryRecord(payload, project.id);
-      validationPanel.value = {
-        token: "",
-        projectId: project.id,
-        label: "快速录入",
-        issues: validation.issues,
-        affectedCount: 1,
-        skippedLocked: 0,
-        cellKeys: [],
-        cellVersions: {},
-        canContinue: !errors.length,
-      };
-      return;
-    }
-    if (validation.issues.length) {
-      validationPanel.value = {
-        token: "",
-        projectId: project.id,
-        label: "快速录入提示",
-        issues: validation.issues,
-        affectedCount: 1,
-        skippedLocked: 0,
-        cellKeys: [],
-        cellVersions: {},
-        canContinue: false,
-      };
-    }
-    await commitQuickEntryRecord(payload, project.id);
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "快速录入保存失败");
-  } finally {
-    quickEntrySaving.value = false;
-  }
-}
-
-async function commitQuickEntryRecord(
-  payload: Parameters<typeof createRecord>[0],
-  projectId: string,
-): Promise<void> {
-    const created = await createRecord(payload);
-    if (currentPage.value === Math.max(1, Math.ceil((recordTotal.value + 1) / pageSize))) {
-      records.value.push(created);
-      rememberRecord(created);
-    }
-    recordTotal.value += 1;
-    pushHistory("快速新增台账记录", [], [created], projectId);
-    resetQuickEntry();
-    await nextTick();
-    quickEntryPathologyRef.value?.focus?.();
-    ElMessage.success("记录已保存，可继续录入下一条");
-}
-
-function handleQuickEntryKeydown(event: KeyboardEvent, field: FieldDefinition): void {
-  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-    event.preventDefault();
-    void saveQuickEntryAndNext();
-    return;
-  }
-  if (event.key !== "Enter" || event.shiftKey) return;
-  if (field.data_type === "text" && !field.is_core) return;
-  event.preventDefault();
-  const index = quickEntryFields.value.findIndex((item) => item.id === field.id);
-  const nextField = quickEntryFields.value[index + 1];
-  if (!nextField) {
-    void saveQuickEntryAndNext();
-    return;
-  }
-  const nextElement = document.querySelector<HTMLElement>(
-    `[data-quick-entry-field="${nextField.id}"] input, ` +
-      `[data-quick-entry-field="${nextField.id}"] textarea`,
-  );
-  nextElement?.focus();
 }
 
 function selectedRecordIdsForReplace(): string[] {
@@ -5379,24 +5250,6 @@ const selectedGridStats = computed(() => {
     saveStatus,
   };
 });
-const quickEntryFields = computed(() => {
-  const projectFields = currentProject.value?.fields ?? [];
-  const visibleIds = new Set(fields.value.map((field) => field.id));
-  const byId = new Map(projectFields.map((field) => [field.id, field]));
-  const orderedIds = (activeViewState.value?.columns ?? [])
-    .map((column) => column.field_id)
-    .filter((fieldId) => byId.has(fieldId));
-  projectFields
-    .slice()
-    .sort((left, right) => left.sort_order - right.sort_order)
-    .forEach((field) => {
-      if (!orderedIds.includes(field.id)) orderedIds.push(field.id);
-    });
-  return orderedIds.flatMap((fieldId) => {
-    const field = byId.get(fieldId);
-    return field && (field.is_core || visibleIds.has(field.id)) ? [field] : [];
-  });
-});
 const viewColumnRows = computed(() => {
   const projectFields = currentProject.value?.fields ?? [];
   const byId = new Map(projectFields.map((field) => [field.id, field]));
@@ -5520,6 +5373,17 @@ onMounted(() => {
   document.addEventListener("keydown", handleLedgerDocumentKeydown);
   document.addEventListener("scroll", handleLedgerDocumentScroll, true);
   window.addEventListener("resize", handleLedgerDocumentScroll);
+  const bridge = desktopBridge();
+  if (bridge?.windowKind === "main") {
+    removeQuickEntryChangedListener = bridge.onQuickEntryChanged((payload) => {
+      if (payload.projectId !== activeProjectId.value) return;
+      void loadRecords(payload.projectId, {
+        showLoading: false,
+        preserveHistory: true,
+        preserveSelection: true,
+      });
+    });
+  }
   void loadLedgerDisplaySettings();
   void loadPreviewEngineSetting();
   void loadPreviewCapabilities();
@@ -5533,6 +5397,8 @@ onBeforeUnmount(() => {
   document.removeEventListener("keydown", handleLedgerDocumentKeydown);
   document.removeEventListener("scroll", handleLedgerDocumentScroll, true);
   window.removeEventListener("resize", handleLedgerDocumentScroll);
+  removeQuickEntryChangedListener?.();
+  removeQuickEntryChangedListener = undefined;
   stopGridCellDrag(false);
   stopGridFillDrag();
   stopSelectionDrag();
@@ -6297,62 +6163,6 @@ onBeforeUnmount(() => {
     @select-project="selectProject"
     @open-templates="templateManagerVisible = true"
   />
-
-  <el-drawer
-    v-model="quickEntryVisible"
-    title="快速连续录入"
-    size="520px"
-    destroy-on-close
-    @open="resetQuickEntry"
-  >
-    <p class="dialog-note">保存成功后保留已固定字段，其余字段清空并重新聚焦病理号。</p>
-    <el-form label-position="top">
-      <el-form-item
-        v-for="field in quickEntryFields"
-        :key="field.id"
-        :label="field.label"
-      >
-        <div class="quick-entry-field" :data-quick-entry-field="field.id">
-          <EditableDateInput
-            v-if="field.data_type === 'date' || field.system_key === 'experiment_date'"
-            :model-value="quickEntryValues[field.id] ?? ''"
-            @update:model-value="updateQuickEntryValue(field, $event)"
-            @keydown="handleQuickEntryKeydown($event, field)"
-          />
-          <EditableChoiceInput
-            v-else-if="field.data_type === 'select' || field.options.length"
-            :model-value="quickEntryValues[field.id] ?? (field.system_key === 'status' ? '待实验' : '')"
-            :options="fieldOptions(field)"
-            @update:model-value="updateQuickEntryValue(field, $event)"
-            @keydown="handleQuickEntryKeydown($event, field)"
-          />
-          <el-input
-            v-else
-            :ref="field.system_key === 'pathology_number' ? 'quickEntryPathologyRef' : undefined"
-            :model-value="quickEntryValues[field.id] ?? ''"
-            :type="field.is_core ? 'text' : 'textarea'"
-            :autosize="field.is_core ? undefined : { minRows: 1, maxRows: 4 }"
-            @update:model-value="updateQuickEntryValue(field, String($event))"
-            @keydown="handleQuickEntryKeydown($event, field)"
-          />
-          <el-button
-            text
-            :type="isQuickEntryPinned(field) ? 'primary' : undefined"
-            :disabled="field.system_key === 'pathology_number'"
-            @click="toggleQuickEntryPinned(field)"
-          >
-            {{ isQuickEntryPinned(field) ? '已固定' : '固定' }}
-          </el-button>
-        </div>
-      </el-form-item>
-    </el-form>
-    <template #footer>
-      <el-button @click="quickEntryVisible = false">关闭</el-button>
-      <el-button type="primary" :loading="quickEntrySaving" @click="saveQuickEntryAndNext">
-        保存并下一条（Ctrl+Enter）
-      </el-button>
-    </template>
-  </el-drawer>
 
   <el-dialog v-model="viewColumnsVisible" title="当前视图的列设置" width="760px">
     <p class="dialog-note">这些调整只影响当前视图；点击“保存当前视图”或“另存为视图”后持久保存。</p>
@@ -7811,14 +7621,6 @@ onBeforeUnmount(() => {
   gap: 10px;
   color: #475467;
   font-size: 12px;
-}
-
-.quick-entry-field {
-  display: grid;
-  width: 100%;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 8px;
 }
 
 .two-column-dialog-form {

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, dialog, ipcMain } = require("electron");
+const { app, BrowserWindow, Menu, dialog, ipcMain, screen } = require("electron");
 const { execFile, spawn } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -12,14 +12,40 @@ const APP_TITLE = "基因检测台账";
 const CONFIG_FILENAME = "desktop-settings.json";
 const BACKEND_EXECUTABLE = "GeneLabLedgerBackend.exe";
 const MAX_EXPORT_BYTES = 256 * 1024 * 1024;
+const QUICK_ENTRY_MIN_WIDTH = 700;
+const QUICK_ENTRY_MIN_HEIGHT = 460;
+const QUICK_ENTRY_DEFAULT_WIDTH = 940;
+const QUICK_ENTRY_DEFAULT_HEIGHT = 680;
 
 let mainWindow = null;
+let quickEntryWindow = null;
+let quickEntryRendererReady = false;
+let quickEntryPendingContext = null;
 let backendProcess = null;
 let backendUrl = "";
 let backendShutdownToken = "";
 let dataDirectory = "";
 let alwaysOnTop = false;
+let quickEntryBounds = null;
+let quickEntryBoundsTimer = null;
 let quitting = false;
+
+function normalizeStoredBounds(value) {
+  if (!value || typeof value !== "object") return null;
+  const x = Number(value.x);
+  const y = Number(value.y);
+  const width = Number(value.width);
+  const height = Number(value.height);
+  if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+    return null;
+  }
+  return {
+    x: Math.round(x),
+    y: Math.round(y),
+    width: Math.round(width),
+    height: Math.round(height),
+  };
+}
 
 function settingsDirectory() {
   return path.join(app.getPath("userData"), "settings");
@@ -38,22 +64,35 @@ function readDesktopSettings() {
           ? path.resolve(parsed.dataDirectory)
           : "",
       alwaysOnTop: parsed.alwaysOnTop === true,
+      quickEntryBounds: normalizeStoredBounds(parsed.quickEntryBounds),
     };
   } catch (error) {
     if (error?.code !== "ENOENT") {
       console.error("桌面设置读取失败", error);
     }
   }
-  return { dataDirectory: "", alwaysOnTop: false };
+  return { dataDirectory: "", alwaysOnTop: false, quickEntryBounds: null };
 }
 
-function writeDesktopSettings(nextDirectory, nextAlwaysOnTop = alwaysOnTop) {
+function writeDesktopSettings(
+  nextDirectory,
+  nextAlwaysOnTop = alwaysOnTop,
+  nextQuickEntryBounds = quickEntryBounds,
+) {
   const directory = path.resolve(nextDirectory);
   fs.mkdirSync(settingsDirectory(), { recursive: true });
   const temporaryPath = `${settingsPath()}.tmp`;
   fs.writeFileSync(
     temporaryPath,
-    `${JSON.stringify({ dataDirectory: directory, alwaysOnTop: Boolean(nextAlwaysOnTop) }, null, 2)}\n`,
+    `${JSON.stringify(
+      {
+        dataDirectory: directory,
+        alwaysOnTop: Boolean(nextAlwaysOnTop),
+        quickEntryBounds: normalizeStoredBounds(nextQuickEntryBounds),
+      },
+      null,
+      2,
+    )}\n`,
     "utf8",
   );
   fs.renameSync(temporaryPath, settingsPath());
@@ -198,6 +237,195 @@ function assertTrustedIpcSender(event) {
   }
 }
 
+function assertQuickEntryIpcSender(event) {
+  if (
+    !quickEntryWindow ||
+    quickEntryWindow.isDestroyed() ||
+    event.sender.id !== quickEntryWindow.webContents.id
+  ) {
+    throw new Error("拒绝来自非快速录入窗口的桌面调用");
+  }
+}
+
+function normalizeIdList(value) {
+  if (!Array.isArray(value)) return [];
+  return [
+    ...new Set(
+      value
+        .filter((item) => typeof item === "string")
+        .map((item) => item.trim())
+        .filter((item) => item && item.length <= 160)
+        .slice(0, 200),
+    ),
+  ];
+}
+
+function normalizeQuickEntryContext(payload) {
+  return {
+    projectId:
+      typeof payload?.projectId === "string" ? payload.projectId.trim().slice(0, 160) : "",
+    selectedFieldIds: normalizeIdList(payload?.selectedFieldIds),
+    pinnedFieldIds: normalizeIdList(payload?.pinnedFieldIds),
+  };
+}
+
+function rendererRoutePath(context) {
+  const params = new URLSearchParams();
+  if (context.projectId) params.set("project", context.projectId);
+  if (context.selectedFieldIds.length) params.set("fields", context.selectedFieldIds.join(","));
+  if (context.pinnedFieldIds.length) params.set("pinned", context.pinnedFieldIds.join(","));
+  const query = params.toString();
+  return `/quick-entry${query ? `?${query}` : ""}`;
+}
+
+function configureRendererNavigation(targetWindow) {
+  targetWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  const packagedEntryUrl = pathToFileURL(path.join(__dirname, "../dist/index.html")).href;
+  const developmentUrl = process.env.VITE_DEV_SERVER_URL || "http://127.0.0.1:5173";
+  const guardNavigation = (event, url) => {
+    let allowed = false;
+    try {
+      allowed = app.isPackaged
+        ? url === packagedEntryUrl || url.startsWith(`${packagedEntryUrl}#`)
+        : new URL(url).origin === new URL(developmentUrl).origin;
+    } catch {
+      allowed = false;
+    }
+    if (!allowed) event.preventDefault();
+  };
+  targetWindow.webContents.on("will-navigate", guardNavigation);
+  targetWindow.webContents.on("will-redirect", guardNavigation);
+}
+
+function loadRendererWindow(targetWindow, routePath = "") {
+  if (app.isPackaged) {
+    const options = routePath ? { hash: routePath } : undefined;
+    return targetWindow.loadFile(path.join(__dirname, "../dist/index.html"), options);
+  }
+  const developmentUrl = (process.env.VITE_DEV_SERVER_URL || "http://127.0.0.1:5173").replace(
+    /\/$/,
+    "",
+  );
+  return targetWindow.loadURL(routePath ? `${developmentUrl}/#${routePath}` : developmentUrl);
+}
+
+function restoredQuickEntryBounds() {
+  const saved = normalizeStoredBounds(quickEntryBounds);
+  if (!saved) {
+    return { width: QUICK_ENTRY_DEFAULT_WIDTH, height: QUICK_ENTRY_DEFAULT_HEIGHT };
+  }
+  const workArea = screen.getDisplayMatching(saved).workArea;
+  const width = Math.min(
+    workArea.width,
+    Math.max(QUICK_ENTRY_MIN_WIDTH, saved.width),
+  );
+  const height = Math.min(
+    workArea.height,
+    Math.max(QUICK_ENTRY_MIN_HEIGHT, saved.height),
+  );
+  return {
+    width,
+    height,
+    x: Math.min(Math.max(saved.x, workArea.x), workArea.x + workArea.width - width),
+    y: Math.min(Math.max(saved.y, workArea.y), workArea.y + workArea.height - height),
+  };
+}
+
+function persistQuickEntryBounds() {
+  if (!quickEntryWindow || quickEntryWindow.isDestroyed()) return;
+  quickEntryBounds = normalizeStoredBounds(quickEntryWindow.getNormalBounds());
+  if (dataDirectory) writeDesktopSettings(dataDirectory, alwaysOnTop, quickEntryBounds);
+}
+
+function scheduleQuickEntryBoundsPersistence() {
+  if (quickEntryBoundsTimer) clearTimeout(quickEntryBoundsTimer);
+  quickEntryBoundsTimer = setTimeout(() => {
+    quickEntryBoundsTimer = null;
+    persistQuickEntryBounds();
+  }, 400);
+}
+
+function createQuickEntryWindow(context) {
+  const bounds = restoredQuickEntryBounds();
+  quickEntryRendererReady = false;
+  quickEntryPendingContext = null;
+  quickEntryWindow = new BrowserWindow({
+    title: "快速录入 · 基因检测台账",
+    ...bounds,
+    minWidth: QUICK_ENTRY_MIN_WIDTH,
+    minHeight: QUICK_ENTRY_MIN_HEIGHT,
+    resizable: true,
+    alwaysOnTop: true,
+    show: false,
+    autoHideMenuBar: true,
+    backgroundColor: "#f7f8fa",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      additionalArguments: [
+        `--gene-ledger-backend-url=${backendUrl}`,
+        `--gene-ledger-data-directory=${dataDirectory}`,
+        "--gene-ledger-window-kind=quick-entry",
+      ],
+    },
+  });
+  quickEntryWindow.setAlwaysOnTop(true, "floating");
+  configureRendererNavigation(quickEntryWindow);
+  quickEntryWindow.webContents.on("did-start-loading", () => {
+    quickEntryRendererReady = false;
+  });
+  quickEntryWindow.once("ready-to-show", () => {
+    if (!quickEntryWindow || quickEntryWindow.isDestroyed()) return;
+    quickEntryWindow.setAlwaysOnTop(true, "floating");
+    quickEntryWindow.show();
+    quickEntryWindow.moveTop();
+    quickEntryWindow.focus();
+  });
+  quickEntryWindow.on("move", scheduleQuickEntryBoundsPersistence);
+  quickEntryWindow.on("resize", scheduleQuickEntryBoundsPersistence);
+  quickEntryWindow.on("close", persistQuickEntryBounds);
+  quickEntryWindow.on("closed", () => {
+    if (quickEntryBoundsTimer) clearTimeout(quickEntryBoundsTimer);
+    quickEntryBoundsTimer = null;
+    quickEntryRendererReady = false;
+    quickEntryPendingContext = null;
+    quickEntryWindow = null;
+  });
+  void loadRendererWindow(quickEntryWindow, rendererRoutePath(context));
+}
+
+function showQuickEntryWindow(payload) {
+  const context = normalizeQuickEntryContext(payload);
+  if (!quickEntryWindow || quickEntryWindow.isDestroyed()) {
+    createQuickEntryWindow(context);
+    return;
+  }
+  quickEntryPendingContext = context;
+  if (quickEntryRendererReady) {
+    quickEntryWindow.webContents.send(
+      "gene-ledger:quick-entry-open-requested",
+      quickEntryPendingContext,
+    );
+    quickEntryPendingContext = null;
+  }
+  if (quickEntryWindow.isMinimized()) quickEntryWindow.restore();
+  quickEntryWindow.setAlwaysOnTop(true, "floating");
+  quickEntryWindow.show();
+  quickEntryWindow.moveTop();
+  quickEntryWindow.focus();
+}
+
+function focusMainWindowFromQuickEntry() {
+  if (quickEntryWindow && !quickEntryWindow.isDestroyed()) quickEntryWindow.hide();
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+  return true;
+}
+
 function windowState() {
   return {
     isMaximized: Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isMaximized()),
@@ -231,6 +459,7 @@ function createMainWindow() {
       additionalArguments: [
         `--gene-ledger-backend-url=${backendUrl}`,
         `--gene-ledger-data-directory=${dataDirectory}`,
+        "--gene-ledger-window-kind=main",
       ],
     },
   });
@@ -253,31 +482,12 @@ function createMainWindow() {
       app.quit();
     }
   });
-  mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  const packagedEntryUrl = pathToFileURL(path.join(__dirname, "../dist/index.html")).href;
-  const developmentUrl = process.env.VITE_DEV_SERVER_URL || "http://127.0.0.1:5173";
-  const guardNavigation = (event, url) => {
-    let allowed = false;
-    try {
-      allowed = app.isPackaged
-        ? url === packagedEntryUrl || url.startsWith(`${packagedEntryUrl}#`)
-        : new URL(url).origin === new URL(developmentUrl).origin;
-    } catch {
-      allowed = false;
-    }
-    if (!allowed) event.preventDefault();
-  };
-  mainWindow.webContents.on("will-navigate", guardNavigation);
-  mainWindow.webContents.on("will-redirect", guardNavigation);
+  configureRendererNavigation(mainWindow);
   mainWindow.on("closed", () => {
     mainWindow = null;
+    if (quickEntryWindow && !quickEntryWindow.isDestroyed()) quickEntryWindow.close();
   });
-
-  if (app.isPackaged) {
-    void mainWindow.loadFile(path.join(__dirname, "../dist/index.html"));
-  } else {
-    void mainWindow.loadURL(developmentUrl);
-  }
+  void loadRendererWindow(mainWindow);
 }
 
 function normalizeExportData(data) {
@@ -365,6 +575,45 @@ function registerDesktopHandlers() {
   ipcMain.handle("gene-ledger:get-window-state", (event) => {
     assertTrustedIpcSender(event);
     return windowState();
+  });
+
+  ipcMain.handle("gene-ledger:open-quick-entry", (event, payload) => {
+    assertTrustedIpcSender(event);
+    showQuickEntryWindow(payload);
+  });
+
+  ipcMain.handle("gene-ledger:focus-main-window", (event) => {
+    assertQuickEntryIpcSender(event);
+    return focusMainWindowFromQuickEntry();
+  });
+
+  ipcMain.handle("gene-ledger:quick-entry-ready", (event) => {
+    assertQuickEntryIpcSender(event);
+    quickEntryRendererReady = true;
+    if (quickEntryPendingContext && quickEntryWindow && !quickEntryWindow.isDestroyed()) {
+      quickEntryWindow.webContents.send(
+        "gene-ledger:quick-entry-open-requested",
+        quickEntryPendingContext,
+      );
+      quickEntryPendingContext = null;
+    }
+  });
+
+  ipcMain.handle("gene-ledger:quick-entry-changed", (event, payload) => {
+    assertQuickEntryIpcSender(event);
+    const projectId =
+      typeof payload?.projectId === "string" ? payload.projectId.trim().slice(0, 160) : "";
+    const recordId =
+      typeof payload?.recordId === "string" ? payload.recordId.trim().slice(0, 160) : "";
+    const action = payload?.action === "update" ? "update" : "create";
+    if (!projectId || !recordId) throw new Error("快速录入变更通知无效");
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("gene-ledger:quick-entry-changed", {
+        projectId,
+        recordId,
+        action,
+      });
+    }
   });
 
   ipcMain.handle("gene-ledger:minimize-window", (event) => {
@@ -520,7 +769,9 @@ if (!singleInstance) {
         app.quit();
         return;
       }
-      alwaysOnTop = readDesktopSettings().alwaysOnTop;
+      const desktopSettings = readDesktopSettings();
+      alwaysOnTop = desktopSettings.alwaysOnTop;
+      quickEntryBounds = desktopSettings.quickEntryBounds;
       registerDesktopHandlers();
       await startBackend();
       createMainWindow();

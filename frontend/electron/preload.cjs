@@ -8,6 +8,7 @@ function argumentValue(name) {
 
 contextBridge.exposeInMainWorld("geneLedgerDesktop", {
   isElectron: true,
+  windowKind: argumentValue("gene-ledger-window-kind") || "main",
   backendUrl: argumentValue("gene-ledger-backend-url"),
   dataDirectory: argumentValue("gene-ledger-data-directory"),
   saveWorkbook: (filename, data) =>
@@ -19,6 +20,21 @@ contextBridge.exposeInMainWorld("geneLedgerDesktop", {
   getAlwaysOnTop: () => ipcRenderer.invoke("gene-ledger:get-always-on-top"),
   setAlwaysOnTop: (value) => ipcRenderer.invoke("gene-ledger:set-always-on-top", Boolean(value)),
   getWindowState: () => ipcRenderer.invoke("gene-ledger:get-window-state"),
+  openQuickEntry: (context) => ipcRenderer.invoke("gene-ledger:open-quick-entry", context),
+  quickEntryReady: () => ipcRenderer.invoke("gene-ledger:quick-entry-ready"),
+  focusMainWindow: () => ipcRenderer.invoke("gene-ledger:focus-main-window"),
+  notifyQuickEntryChanged: (payload) =>
+    ipcRenderer.invoke("gene-ledger:quick-entry-changed", payload),
+  onQuickEntryOpenRequested: (listener) => {
+    const handler = (_event, context) => listener(context);
+    ipcRenderer.on("gene-ledger:quick-entry-open-requested", handler);
+    return () => ipcRenderer.removeListener("gene-ledger:quick-entry-open-requested", handler);
+  },
+  onQuickEntryChanged: (listener) => {
+    const handler = (_event, payload) => listener(payload);
+    ipcRenderer.on("gene-ledger:quick-entry-changed", handler);
+    return () => ipcRenderer.removeListener("gene-ledger:quick-entry-changed", handler);
+  },
   minimizeWindow: () => ipcRenderer.invoke("gene-ledger:minimize-window"),
   toggleWindowMaximize: () => ipcRenderer.invoke("gene-ledger:toggle-window-maximize"),
   closeWindow: () => ipcRenderer.invoke("gene-ledger:close-window"),

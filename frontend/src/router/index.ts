@@ -4,6 +4,12 @@ import AppLayout from "@/layouts/AppLayout.vue";
 
 const routes: RouteRecordRaw[] = [
   {
+    path: "/quick-entry",
+    name: "quick-entry",
+    component: () => import("@/views/QuickEntryView.vue"),
+    meta: { title: "快速录入" },
+  },
+  {
     path: "/",
     component: AppLayout,
     children: [
