@@ -69,7 +69,9 @@ class Database:
         from app import models  # noqa: F401
 
         self.backup_sqlite_before_schema_upgrade()
+        self._remove_ledger_view_presets()
         self._migrate_record_experiment_number_uniqueness()
+        self._migrate_record_block_number()
         self._migrate_v010_field_validation()
         self._migrate_record_positions()
         Base.metadata.create_all(self.engine)
@@ -124,15 +126,19 @@ class Database:
             "validation_rules",
         }.issubset(field_columns)
         needs_default_upgrade = bool(field_columns) and "default_value" not in field_columns
-        needs_v010_upgrade = needs_validation_upgrade or not view_exists
+        needs_v010_upgrade = needs_validation_upgrade
+        needs_view_removal = view_exists
         needs_position_upgrade = bool(record_columns) and "position" not in record_columns
+        needs_block_upgrade = bool(record_columns) and "block_number" not in record_columns
         needs_number_upgrade = any(
             "experiment_number" in columns for columns in record_unique_columns
         )
         needs_upgrade = (
             needs_v010_upgrade
+            or needs_view_removal
             or needs_default_upgrade
             or needs_position_upgrade
+            or needs_block_upgrade
             or needs_number_upgrade
         )
         if not needs_upgrade:
@@ -140,10 +146,14 @@ class Database:
         backup_dir = database_path.parent / "backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-        if needs_position_upgrade:
+        if needs_view_removal:
+            version = "view-removal"
+        elif needs_position_upgrade:
             version = "v0.10.1"
         elif needs_v010_upgrade:
             version = "v0.10.0"
+        elif needs_block_upgrade:
+            version = "v0.10.4"
         else:
             version = "v0.11.0"
         backup_path = backup_dir / f"ledger-before-{version}-{timestamp}.db"
@@ -152,6 +162,13 @@ class Database:
             backup_path = backup_dir / f"ledger-before-{version}-{timestamp}-{suffix}.db"
             suffix += 1
         shutil.copy2(database_path, backup_path)
+
+    def _remove_ledger_view_presets(self) -> None:
+        """Drop the retired named-view table in packaged desktop databases."""
+        if self.engine.dialect.name != "sqlite":
+            return
+        with self.engine.begin() as connection:
+            connection.exec_driver_sql("DROP TABLE IF EXISTS ledger_view_presets")
 
     def _migrate_v010_field_validation(self) -> None:
         """Keep packaged desktop upgrades compatible with ``create_all``."""
@@ -225,6 +242,29 @@ class Database:
                 "ON project_records (project_id, position)"
             )
 
+    def _migrate_record_block_number(self) -> None:
+        """Add the optional block number to installed SQLite databases."""
+        if self.engine.dialect.name != "sqlite":
+            return
+        with self.engine.begin() as connection:
+            table_exists = connection.exec_driver_sql(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_records'"
+            ).scalar()
+            if not table_exists:
+                return
+            columns = {
+                str(row[1])
+                for row in connection.exec_driver_sql("PRAGMA table_info(project_records)")
+            }
+            if "block_number" not in columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE project_records ADD COLUMN block_number VARCHAR(80)"
+                )
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_project_records_block_number "
+                "ON project_records (block_number)"
+            )
+
     def _migrate_record_experiment_number_uniqueness(self) -> None:
         """Remove legacy experiment-number uniqueness constraints in SQLite.
 
@@ -268,6 +308,7 @@ class Database:
                             status VARCHAR(40) NOT NULL,
                             experiment_date DATE,
                             pathology_number VARCHAR(160) NOT NULL,
+                            block_number VARCHAR(80),
                             experiment_number VARCHAR(80),
                             report_generated BOOLEAN DEFAULT 0 NOT NULL,
                             locked BOOLEAN NOT NULL,
@@ -287,6 +328,7 @@ class Database:
                         "status",
                         "experiment_date",
                         "pathology_number",
+                        "block_number",
                         "experiment_number",
                         "report_generated",
                         "locked",
@@ -302,6 +344,7 @@ class Database:
                         source("status", "'待实验'"),
                         source("experiment_date", "NULL"),
                         source("pathology_number", "''"),
+                        source("block_number", "NULL"),
                         source("experiment_number", "NULL"),
                         source("report_generated", "0"),
                         source("locked", "0"),
@@ -345,6 +388,10 @@ class Database:
                     connection.exec_driver_sql(
                         "CREATE INDEX ix_project_records_pathology_number "
                         "ON project_records (pathology_number)"
+                    )
+                    connection.exec_driver_sql(
+                        "CREATE INDEX ix_project_records_block_number "
+                        "ON project_records (block_number)"
                     )
                     foreign_key_errors = connection.exec_driver_sql(
                         "PRAGMA foreign_key_check"

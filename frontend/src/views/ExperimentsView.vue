@@ -17,7 +17,10 @@ import { assignExperimentNumbers, listRecords } from "@/api/records";
 import { getSetting, putSetting } from "@/api/system";
 import { useAppStore } from "@/stores/app";
 import type { ProjectRecord } from "@/types/api";
-import { comparePathologyNumbers } from "@/utils/pathologySort";
+import {
+  compareExperimentPathologyNumbers,
+  experimentPathologyNumber,
+} from "@/utils/experimentScheduling";
 import { exportWorkbook } from "@/utils/workbook";
 
 type QueueColumnSource =
@@ -89,7 +92,9 @@ const pendingCandidates = computed(() => {
     if (candidateProjectId.value && record.project_id !== candidateProjectId.value) return false;
     if (!keyword) return true;
     return [
+      experimentPathologyNumber(record),
       record.pathology_number,
+      record.block_number ?? "",
       record.experiment_number ?? "",
       record.project_name,
       ...Object.values(record.values),
@@ -128,7 +133,8 @@ function projectFieldValue(record: ProjectRecord, fieldLabel: string): string {
     (item) => item.label === fieldLabel.trim() || item.key === fieldLabel.trim(),
   );
   if (!field) return "";
-  if (field.system_key === "pathology_number") return record.pathology_number;
+  if (field.system_key === "pathology_number") return experimentPathologyNumber(record);
+  if (field.system_key === "block_number") return record.block_number ?? "";
   if (field.system_key === "experiment_date") return record.experiment_date ?? "";
   if (field.system_key === "experiment_number") return record.experiment_number ?? "";
   if (field.system_key === "status") return record.status;
@@ -152,7 +158,7 @@ function queueCellValue(record: ProjectRecord, column: QueueColumn, rowIndex: nu
   const source = inferSource(column);
   if (source === "sequence") return rowIndex + 1;
   if (source === "experiment_number") return previewNumber(rowIndex);
-  if (source === "pathology_number") return record.pathology_number;
+  if (source === "pathology_number") return experimentPathologyNumber(record);
   if (source === "project") return record.project_name;
   if (source === "diagnosis") return diagnosisFor(record);
   if (source.startsWith("field:")) return projectFieldValue(record, source.slice("field:".length));
@@ -161,7 +167,7 @@ function queueCellValue(record: ProjectRecord, column: QueueColumn, rowIndex: nu
 
 function candidateCellValue(record: ProjectRecord, column: QueueColumn): string {
   const source = inferSource(column);
-  if (source === "pathology_number") return record.pathology_number;
+  if (source === "pathology_number") return experimentPathologyNumber(record);
   if (source === "experiment_number") return record.experiment_number ?? "";
   if (source === "project") return record.project_name;
   if (source === "diagnosis") return diagnosisFor(record);
@@ -227,10 +233,10 @@ function applySort(): void {
     next.sort(
       (a, b) =>
         (projectOrder.get(a.project_id) ?? 9999) - (projectOrder.get(b.project_id) ?? 9999) ||
-        comparePathologyNumbers(a.pathology_number, b.pathology_number),
+        compareExperimentPathologyNumbers(a, b),
     );
   } else if (sortRule.value === "pathology") {
-    next.sort((a, b) => comparePathologyNumbers(a.pathology_number, b.pathology_number));
+    next.sort(compareExperimentPathologyNumbers);
   }
   queueItems.value = next;
   ElMessage.success(sortRule.value === "manual" ? "已保持当前手动顺序" : "编号顺序已更新");
@@ -281,7 +287,7 @@ async function applyNumbering(): Promise<void> {
 
 async function removeItem(item: ProjectRecord): Promise<void> {
   try {
-    await ElMessageBox.confirm(`确认移出 ${item.pathology_number}？`, "移出编号队列", {
+    await ElMessageBox.confirm(`确认移出 ${experimentPathologyNumber(item)}？`, "移出编号队列", {
       confirmButtonText: "移出",
       cancelButtonText: "取消",
       type: "warning",

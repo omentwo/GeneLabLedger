@@ -105,6 +105,7 @@ export function quickEntryFieldValue(
   field: FieldDefinition,
 ): string {
   if (field.system_key === "pathology_number") return record.pathology_number;
+  if (field.system_key === "block_number") return record.block_number ?? "";
   if (field.system_key === "experiment_date") return record.experiment_date ?? "";
   if (field.system_key === "experiment_number") return record.experiment_number ?? "";
   if (field.system_key === "status") return record.status;
@@ -168,6 +169,7 @@ export function buildQuickEntryCreatePayload(
   const pathologyField = fieldBySystemKey.get("pathology_number");
   if (!pathologyField) throw new Error("当前项目缺少病理号表头");
   const statusField = fieldBySystemKey.get("status");
+  const blockField = fieldBySystemKey.get("block_number");
   const dateField = fieldBySystemKey.get("experiment_date");
   const numberField = fieldBySystemKey.get("experiment_number");
   const statusValue = statusField && selected.has(statusField.id)
@@ -179,12 +181,16 @@ export function buildQuickEntryCreatePayload(
   const numberValue = numberField && selected.has(numberField.id)
     ? normalizeQuickEntryFieldValue(numberField, values[numberField.id] ?? "")
     : "";
+  const blockValue = blockField && selected.has(blockField.id)
+    ? normalizeQuickEntryFieldValue(blockField, values[blockField.id] ?? "")
+    : "";
   return {
     project_id: projectId,
     pathology_number: normalizeQuickEntryFieldValue(
       pathologyField,
       values[pathologyField.id] ?? "",
     ),
+    ...(blockField ? { block_number: blockValue || null } : {}),
     status: statusValue as RecordStatus,
     experiment_date: dateValue || null,
     experiment_number: numberValue || null,

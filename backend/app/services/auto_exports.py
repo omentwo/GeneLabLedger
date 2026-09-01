@@ -246,6 +246,8 @@ def _field_value(record: ProjectRecord, field: FieldDefinition, values: dict[str
         return record.experiment_date.isoformat() if record.experiment_date else ""
     if field.system_key == "pathology_number":
         return record.pathology_number
+    if field.system_key == "block_number":
+        return record.block_number or ""
     if field.system_key == "status":
         return record.status
     if field.system_key == "experiment_number":

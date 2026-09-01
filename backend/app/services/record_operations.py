@@ -27,6 +27,7 @@ def snapshot_record(record: ProjectRecord) -> dict:
         "project_id": record.project_id,
         "position": record.position,
         "pathology_number": record.pathology_number,
+        "block_number": record.block_number,
         "status": record.status,
         "experiment_date": record.experiment_date,
         "experiment_number": record.experiment_number,
@@ -49,6 +50,8 @@ def _snapshot_matches(record: ProjectRecord, snapshot: RecordOperationSnapshot) 
     if record.project_id != snapshot.project_id:
         return False
     if record.pathology_number != snapshot.pathology_number:
+        return False
+    if record.block_number != snapshot.block_number:
         return False
     if record.status != snapshot.status:
         return False
@@ -86,6 +89,7 @@ def _apply_snapshot(
     # excluded from conflict matching above.
     record.project_id = snapshot.project_id
     record.pathology_number = snapshot.pathology_number
+    record.block_number = snapshot.block_number
     record.status = snapshot.status
     record.experiment_date = snapshot.experiment_date
     record.experiment_number = snapshot.experiment_number
@@ -116,6 +120,7 @@ def _create_from_snapshot(
         project_id=snapshot.project_id,
         position=snapshot.position,
         pathology_number=snapshot.pathology_number,
+        block_number=snapshot.block_number,
         status=snapshot.status,
         experiment_date=snapshot.experiment_date,
         experiment_number=snapshot.experiment_number,

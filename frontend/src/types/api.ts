@@ -42,6 +42,11 @@ export interface FieldDefinition {
   options: FieldOption[];
 }
 
+export interface FieldBatchCreateResult {
+  retained: FieldDefinition[];
+  created: FieldDefinition[];
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -80,33 +85,9 @@ export interface LedgerTemplateField {
   options: string[];
 }
 
-export interface LedgerViewColumnState {
-  field_id: string;
-  width: number;
-  hidden: boolean;
-  pinned: boolean;
-}
-
-export interface LedgerViewSortState {
+export interface RecordSortState {
   field_id: string;
   direction: "asc" | "desc";
-}
-
-export interface LedgerViewState {
-  columns: LedgerViewColumnState[];
-  frozen_until_field_id: string | null;
-  sort: LedgerViewSortState | null;
-  filters: Record<string, Record<string, unknown>>;
-}
-
-export interface LedgerViewPreset {
-  id: string;
-  project_id: string;
-  name: string;
-  state: LedgerViewState;
-  is_default: boolean;
-  created_at: string;
-  updated_at: string;
 }
 
 export interface LedgerTemplate {
@@ -148,6 +129,7 @@ export interface ProjectRecord {
   project_name: string;
   position: number;
   pathology_number: string;
+  block_number?: string | null;
   status: RecordStatus;
   experiment_date: string | null;
   experiment_number: string | null;
@@ -170,6 +152,7 @@ export interface RecordList {
 export interface RecordCreateInput {
   project_id: string;
   pathology_number: string;
+  block_number?: string | null;
   status: RecordStatus;
   experiment_date: string | null;
   experiment_number?: string | null;
@@ -205,7 +188,7 @@ export interface RecordComplexQuery {
   experiment_date_to?: string | null;
   report_generated?: boolean | null;
   field_filters: RecordFieldFilter[];
-  sort?: LedgerViewSortState | null;
+  sort?: RecordSortState | null;
   limit: number;
   offset: number;
 }
@@ -225,6 +208,7 @@ export interface RecordCellChange {
 export interface RecordBatchNewRecord {
   client_id: string;
   pathology_number: string;
+  block_number?: string | null;
   status: RecordStatus;
   experiment_date: string | null;
   experiment_number: string | null;
@@ -273,6 +257,7 @@ export interface RecordReplacePreview {
 
 export interface RecordUpdateInput {
   pathology_number?: string;
+  block_number?: string | null;
   status?: RecordStatus;
   experiment_date?: string | null;
   experiment_number?: string | null;
@@ -299,6 +284,7 @@ export interface WorkbookImportRow {
   row_number: number;
   record_id: string | null;
   pathology_number: string;
+  block_number?: string | null;
   status: RecordStatus;
   experiment_date: string | null;
   experiment_number: string | null;

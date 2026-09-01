@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -77,7 +77,7 @@ def create_app(
 
     app = FastAPI(
         title=app_settings.app_name,
-        version="0.10.3",
+        version="0.11.0",
         lifespan=lifespan,
     )
     app.add_middleware(
@@ -102,6 +102,14 @@ def create_app(
     app.include_router(auto_exports.router, prefix="/api")
     app.include_router(imports.router, prefix="/api")
     app.include_router(exports.router, prefix="/api")
+
+    @app.api_route(
+        "/api/{full_path:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+        include_in_schema=False,
+    )
+    def missing_api_route(full_path: str) -> None:
+        raise HTTPException(status_code=404, detail=f"API route not found: /api/{full_path}")
 
     project_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
     modern_frontend_dir = project_dir / "frontend" / "dist"

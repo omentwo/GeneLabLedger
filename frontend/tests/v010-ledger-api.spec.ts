@@ -8,13 +8,7 @@ import {
   queryRecordIds,
   queryRecords,
 } from "@/api/records";
-import {
-  createLedgerViewPreset,
-  deleteLedgerViewPreset,
-  listLedgerViewPresets,
-  setDefaultLedgerViewPreset,
-  updateLedgerViewPreset,
-} from "@/api/projects";
+import { batchCreateFields } from "@/api/projects";
 
 function jsonResponse(payload: unknown): Response {
   return new Response(JSON.stringify(payload), {
@@ -126,31 +120,16 @@ describe("v0.10 ledger APIs", () => {
     });
   });
 
-  it("uses project-scoped named view CRUD endpoints", async () => {
-    const preset = {
-      id: "v1",
-      project_id: "p1",
-      name: "录入",
-      state: { columns: [], frozen_until_field_id: null, sort: null, filters: {} },
-      is_default: false,
-      created_at: "2026-08-12T00:00:00Z",
-      updated_at: "2026-08-12T00:00:00Z",
-    };
-    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse(preset)));
+  it("creates multiple headers through the project-scoped batch endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ retained: [], created: [] }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await listLedgerViewPresets("p1");
-    await createLedgerViewPreset("p1", { name: "录入", state: preset.state });
-    await updateLedgerViewPreset("v1", { name: "复核" });
-    await setDefaultLedgerViewPreset("v1");
-    await deleteLedgerViewPreset("v1");
+    await batchCreateFields("p1", ["蜡块号", "检测结果"]);
 
-    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
-      "/api/projects/p1/view-presets",
-      "/api/projects/p1/view-presets",
-      "/api/projects/view-presets/v1",
-      "/api/projects/view-presets/v1/default",
-      "/api/projects/view-presets/v1",
-    ]);
+    expect(fetchMock.mock.calls[0]![0]).toBe("/api/projects/p1/fields/batch");
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({ method: "POST" });
+    expect(JSON.parse(String((fetchMock.mock.calls[0]![1] as RequestInit).body))).toEqual({
+      labels: ["蜡块号", "检测结果"],
+    });
   });
 });

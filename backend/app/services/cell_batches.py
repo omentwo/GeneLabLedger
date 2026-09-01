@@ -37,6 +37,7 @@ class StoredCellChange:
 class StoredNewRecord:
     client_id: str
     pathology_number: str
+    block_number: str
     status: str
     experiment_date: str
     experiment_number: str
@@ -146,6 +147,8 @@ def _field_and_record_maps(
 def current_cell_value(record: ProjectRecord, field: FieldDefinition) -> str:
     if field.system_key == "pathology_number":
         return record.pathology_number
+    if field.system_key == "block_number":
+        return record.block_number or ""
     if field.system_key == "status":
         return record.status
     if field.system_key == "experiment_date":
@@ -213,6 +216,7 @@ def _validate_new_records(
     for row in new_records:
         raw_core = {
             "pathology_number": row.pathology_number,
+            "block_number": row.block_number or "",
             "status": row.status,
             "experiment_date": row.experiment_date.isoformat() if row.experiment_date else "",
             "experiment_number": row.experiment_number or "",
@@ -239,6 +243,7 @@ def _validate_new_records(
             StoredNewRecord(
                 client_id=row.client_id,
                 pathology_number=normalized_core["pathology_number"],
+                block_number=normalized_core["block_number"],
                 status=normalized_core["status"],
                 experiment_date=normalized_core["experiment_date"],
                 experiment_number=normalized_core["experiment_number"],
@@ -328,6 +333,8 @@ def preview_dict(preview: StoredCellBatch) -> dict:
 def _apply_core_value(record: ProjectRecord, field: FieldDefinition, value: str) -> None:
     if field.system_key == "pathology_number":
         record.pathology_number = value
+    elif field.system_key == "block_number":
+        record.block_number = value or None
     elif field.system_key == "status":
         record.status = value
     elif field.system_key == "experiment_date":
@@ -416,6 +423,7 @@ def _commit_claimed_cell_batch(
         RecordBatchNewRecord(
             client_id=row.client_id,
             pathology_number=row.pathology_number,
+            block_number=row.block_number or None,
             status=row.status,
             experiment_date=date.fromisoformat(row.experiment_date) if row.experiment_date else None,
             experiment_number=row.experiment_number or None,
@@ -496,6 +504,7 @@ def _commit_claimed_cell_batch(
                 project_id=preview.project_id,
                 position=position,
                 pathology_number=row.pathology_number,
+                block_number=row.block_number or None,
                 status=row.status,
                 experiment_date=date.fromisoformat(row.experiment_date) if row.experiment_date else None,
                 experiment_number=row.experiment_number or None,

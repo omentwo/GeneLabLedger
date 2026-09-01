@@ -10,6 +10,7 @@ def record_dict(record: ProjectRecord) -> dict:
         "project_name": record.project.name,
         "position": record.position,
         "pathology_number": record.pathology_number,
+        "block_number": record.block_number,
         "status": record.status,
         "experiment_date": record.experiment_date,
         "experiment_number": record.experiment_number,

@@ -5,6 +5,7 @@ import {
   CopyDocument,
   Delete,
   Document,
+  DocumentAdd,
   EditPen,
   Plus,
   Setting,
@@ -13,6 +14,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { computed, reactive, ref, watch } from "vue";
 
 import {
+  batchCreateFields,
   createField,
   createProject,
   duplicateProject,
@@ -27,6 +29,7 @@ import {
 } from "@/api/projects";
 import { ApiError } from "@/api/client";
 import { useAppStore } from "@/stores/app";
+import { previewBatchFieldLabels } from "@/utils/batchFields";
 import type {
   DataType,
   FieldDefinition,
@@ -56,6 +59,8 @@ const ledgerTemplates = ref<LedgerTemplate[]>([]);
 const workingFields = ref<FieldDefinition[]>([]);
 const saving = ref(false);
 const fieldDialogVisible = ref(false);
+const batchFieldDialogVisible = ref(false);
+const batchFieldText = ref("");
 const optionsDialogVisible = ref(false);
 const validationDialogVisible = ref(false);
 const editingOptionsField = ref<FieldDefinition | null>(null);
@@ -85,6 +90,9 @@ const validationDraft = reactive<{
 
 const currentProject = computed(() =>
   appStore.projects.find((project) => project.id === currentProjectId.value),
+);
+const batchFieldPreview = computed(() =>
+  previewBatchFieldLabels(batchFieldText.value, workingFields.value),
 );
 
 const dataTypeLabels: Record<DataType, string> = {
@@ -366,6 +374,45 @@ function openAddField(): void {
   fieldDialogVisible.value = true;
 }
 
+function openBatchFields(): void {
+  batchFieldText.value = "";
+  batchFieldDialogVisible.value = true;
+}
+
+async function addBatchFields(): Promise<void> {
+  const project = currentProject.value;
+  const preview = batchFieldPreview.value;
+  if (!project || !preview.labels.length) {
+    ElMessage.warning("请按每行一个名称录入表头");
+    return;
+  }
+  if (preview.hasErrors) {
+    ElMessage.warning("请先处理名单中的重复或冲突项");
+    return;
+  }
+  saving.value = true;
+  try {
+    const result = await batchCreateFields(project.id, preview.labels);
+    batchFieldDialogVisible.value = false;
+    await reloadAndNotify();
+    if (result.created.length) {
+      ElMessage.success(`已新增 ${result.created.length} 个表头，已有表头保持不变`);
+    } else {
+      ElMessage.info("名单中的表头均已存在，没有新增内容");
+    }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "快速录入表头失败");
+  } finally {
+    saving.value = false;
+  }
+}
+
+function batchFieldStatusType(status: string): "success" | "info" | "warning" | "danger" {
+  if (status === "new") return "success";
+  if (status === "existing" || status === "existing-core") return "info";
+  return status === "duplicate" ? "warning" : "danger";
+}
+
 async function addField(): Promise<void> {
   if (!currentProject.value || !newField.label.trim()) {
     ElMessage.warning("请输入表头名称");
@@ -572,6 +619,7 @@ watch(
           </div>
           <div class="field-heading-actions">
             <el-button :icon="Document" @click="openTemplates">台账模板</el-button>
+            <el-button :icon="DocumentAdd" @click="openBatchFields">快速录入表头</el-button>
             <el-button type="primary" :icon="Plus" @click="openAddField">添加表头</el-button>
           </div>
         </div>
@@ -802,6 +850,48 @@ watch(
     <template #footer>
       <el-button @click="fieldDialogVisible = false">取消</el-button>
       <el-button type="primary" :loading="saving" @click="addField">添加</el-button>
+    </template>
+  </el-dialog>
+
+  <el-dialog
+    v-model="batchFieldDialogVisible"
+    title="快速录入表头"
+    width="min(720px, 92vw)"
+    append-to-body
+  >
+    <el-input
+      v-model="batchFieldText"
+      type="textarea"
+      :rows="8"
+      placeholder="每行一个表头，可直接粘贴 Excel/WPS 中的一列，例如：&#10;日期&#10;病理号&#10;蜡块号&#10;检测结果&#10;备注"
+    />
+    <p class="form-help batch-field-help">
+      已有表头只会保留；新表头将按输入顺序追加。空行会自动忽略，一次最多 100 个。
+    </p>
+    <div v-if="batchFieldPreview.rows.length" class="batch-field-preview">
+      <div
+        v-for="row in batchFieldPreview.rows"
+        :key="`${row.index}-${row.label}`"
+        class="batch-field-preview-row"
+        :class="`is-${row.status}`"
+      >
+        <span class="batch-field-index">{{ row.index }}.</span>
+        <span class="batch-field-label">{{ row.label }}</span>
+        <el-tag :type="batchFieldStatusType(row.status)" effect="plain" size="small">
+          {{ row.message }}
+        </el-tag>
+      </div>
+    </div>
+    <template #footer>
+      <el-button @click="batchFieldDialogVisible = false">取消</el-button>
+      <el-button
+        type="primary"
+        :loading="saving"
+        :disabled="!batchFieldPreview.labels.length || batchFieldPreview.hasErrors"
+        @click="addBatchFields"
+      >
+        {{ batchFieldPreview.newCount ? `新增 ${batchFieldPreview.newCount} 个表头` : '确认名单' }}
+      </el-button>
     </template>
   </el-dialog>
 
@@ -1037,6 +1127,45 @@ watch(
 .options-editor {
   display: grid;
   gap: 8px;
+}
+
+.batch-field-help {
+  margin-bottom: 12px;
+}
+
+.batch-field-preview {
+  display: grid;
+  max-height: 300px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  overflow-y: auto;
+}
+
+.batch-field-preview-row {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.batch-field-preview-row + .batch-field-preview-row {
+  border-top: 1px solid var(--app-border);
+}
+
+.batch-field-preview-row.is-duplicate,
+.batch-field-preview-row.is-conflict {
+  background: #fff7ed;
+}
+
+.batch-field-index {
+  color: var(--app-muted);
+  text-align: right;
+}
+
+.batch-field-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .option-row {

@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import {
+  ArrowLeft,
+  ArrowRight,
   Brush,
   CopyDocument,
   Delete,
@@ -73,14 +75,7 @@ import EditableChoiceInput from "@/components/EditableChoiceInput.vue";
 import EditableDateInput from "@/components/EditableDateInput.vue";
 import LedgerTemplateManager from "@/components/LedgerTemplateManager.vue";
 import ProjectFieldManager from "@/components/ProjectFieldManager.vue";
-import {
-  createLedgerViewPreset,
-  deleteLedgerViewPreset,
-  listLedgerViewPresets,
-  setDefaultLedgerViewPreset,
-  updateField,
-  updateLedgerViewPreset,
-} from "@/api/projects";
+import { updateField } from "@/api/projects";
 import { useAppStore } from "@/stores/app";
 import {
   cloneLedgerRecord,
@@ -101,8 +96,6 @@ import type {
   NativePreviewTask,
   PreviewCapabilities,
   PrintEngine,
-  LedgerViewPreset,
-  LedgerViewState,
   RecordCellBatchCommitResult,
   RecordBatchNewRecord,
   RecordCellChange,
@@ -114,6 +107,26 @@ import type {
 } from "@/types/api";
 import { formatShanghaiDateTime } from "@/utils/datetime";
 import { desktopBridge } from "@/utils/desktop";
+import {
+  LEDGER_GRID_CLIPBOARD_MIME,
+  buildLedgerGridClipboardData,
+  expandLedgerSingleCellPaste,
+  parseLedgerGridClipboardPayload,
+  type LedgerGridClipboardCell as GridClipboardCell,
+  type LedgerGridClipboardPayload as GridClipboardPayload,
+} from "@/utils/ledgerClipboard";
+import {
+  LEDGER_LAYOUT_SETTINGS_KEY,
+  normalizeLedgerLayoutSettings,
+  resolveLedgerProjectLayout,
+  withLedgerProjectLayout,
+  type LedgerLayoutSettingsDocument,
+} from "@/utils/ledgerLayoutSettings";
+import {
+  LatestValuePersistence,
+  resolveLedgerCellCompletionAction,
+  resolveLedgerCellEditState,
+} from "@/utils/ledgerPersistence";
 import {
   applyLedgerTableView,
   getLedgerFieldValue,
@@ -145,6 +158,7 @@ const ledgerDisplaySettings = ref<LedgerDisplaySettings>({
 const selectionStartDate = ref("");
 const selectionEndDate = ref("");
 const ledgerTableCardRef = ref<HTMLElement | null>(null);
+const projectStripRef = ref<HTMLElement | null>(null);
 const tableRef = ref<{
   clearSelection: () => void;
   doLayout: () => void;
@@ -152,6 +166,8 @@ const tableRef = ref<{
   toggleAllSelection: () => void;
   toggleRowSelection: (row: LedgerRow, selected?: boolean) => void;
 } | null>(null);
+type AutosizeTextareaInstance = { resizeTextarea: () => void };
+const autosizeTextareaRefs = new Map<string, AutosizeTextareaInstance>();
 type GridCellPosition = { rowIndex: number; columnIndex: number };
 type GridCellRange = { anchor: GridCellPosition; focus: GridCellPosition };
 type NormalizedGridRange = {
@@ -162,8 +178,6 @@ type NormalizedGridRange = {
 };
 type GridCellEditSnapshot = { rowId: string; fieldId: string; value: string };
 type GridCellDragMode = "replace" | "shift" | "add";
-type GridClipboardCell = { rowOffset: number; columnOffset: number; value: string };
-type GridClipboardPayload = { version: 1; cells: GridClipboardCell[] };
 type GridPasteEntry = GridClipboardCell;
 type GridCellDragState = {
   pointerId: number;
@@ -253,15 +267,16 @@ const cellSaveStatusLabels: Record<CellSaveStatus | "idle", string> = {
 const cellSaveStates = ref(new Map<string, CellSaveState>());
 const cellSaveVersions = new Map<string, number>();
 const cellSaveClearTimers = new Map<string, number>();
+const cellSaveInFlightCounts = new Map<string, number>();
 const recordSaveQueues = new Map<string, Promise<unknown>>();
 const fieldErrors = ref<Record<string, string>>({});
 const managerVisible = ref(false);
 const templateManagerVisible = ref(false);
-const viewPresets = ref<LedgerViewPreset[]>([]);
-const activeViewPresetId = ref("");
-const activeViewState = ref<LedgerViewState | null>(null);
-const viewBusy = ref(false);
-const viewColumnsVisible = ref(false);
+const ledgerLayoutSettings = ref<LedgerLayoutSettingsDocument>(
+  normalizeLedgerLayoutSettings(null),
+);
+const columnWidthSaveQueues = new Map<string, LatestValuePersistence<number>>();
+const frozenUntilFieldId = ref<string | null>(null);
 const findReplaceVisible = ref(false);
 const findReplaceLoading = ref(false);
 const findReplacePreview = ref<RecordReplacePreview | null>(null);
@@ -467,7 +482,6 @@ const persistedValues = new Map<string, string>();
 const insertedGroupRegistry: LedgerInsertedGroupRegistry = new Map();
 let draftSequence = 0;
 let loadSequence = 0;
-let viewLoadSequence = 0;
 let recordsAbortController: AbortController | null = null;
 let removeQuickEntryChangedListener: (() => void) | undefined;
 const currentPage = ref(1);
@@ -477,6 +491,7 @@ const selectedRecordIds = ref(new Set<string>());
 const selectedRecordCache = new Map<string, ProjectRecord>();
 let ledgerInitialized = false;
 let projectLoadPromise: Promise<void> | null = null;
+let ledgerLayoutSaveQueue: Promise<void> = Promise.resolve();
 
 const currentProject = computed(() => appStore.projectById(activeProjectId.value));
 // Keep the table schema on the previous project while the next project's
@@ -485,32 +500,14 @@ const currentProject = computed(() => appStore.projectById(activeProjectId.value
 // response arrives.
 const tableProjectId = ref("");
 const tableProject = computed(() => appStore.projectById(tableProjectId.value));
-const fields = computed(() => {
-  const projectFields = (tableProject.value?.fields ?? []).slice();
-  const state = activeViewState.value;
-  if (!state) {
-    return projectFields
-      .filter((field) => !field.hidden)
-      .sort((a, b) => a.sort_order - b.sort_order);
-  }
-  const byId = new Map(projectFields.map((field) => [field.id, field]));
-  const result: FieldDefinition[] = [];
-  const seen = new Set<string>();
-  state.columns.forEach((column) => {
-    const field = byId.get(column.field_id);
-    if (!field || seen.has(field.id)) return;
-    seen.add(field.id);
-    if (column.hidden) return;
-    result.push({ ...field, width: column.width });
-  });
-  projectFields
-    .filter((field) => !seen.has(field.id) && !field.hidden)
-    .sort((a, b) => a.sort_order - b.sort_order)
-    .forEach((field) => result.push(field));
-  return result;
-});
+const fields = computed(() =>
+  (tableProject.value?.fields ?? [])
+    .filter((field) => !field.hidden)
+    .slice()
+    .sort((left, right) => left.sort_order - right.sort_order),
+);
 const frozenFieldIds = computed(() => {
-  const fieldId = activeViewState.value?.frozen_until_field_id;
+  const fieldId = frozenUntilFieldId.value;
   if (!fieldId) return new Set<string>();
   const end = fields.value.findIndex((field) => field.id === fieldId);
   return new Set(fields.value.slice(0, end + 1).map((field) => field.id));
@@ -733,6 +730,7 @@ function setLedgerSort(field: FieldDefinition, order: "ascending" | "descending"
   const anchorIdentity = captureGridIdentity(gridSelectionAnchor.value);
   const scrollPosition = captureLedgerTableScroll();
   ledgerSort.value = order ? { fieldId: field.id, order } : null;
+  void persistLedgerProjectLayout();
   closeColumnTools();
   currentPage.value = 1;
   if (!draftRows.value.length) {
@@ -775,6 +773,7 @@ function applyColumnFilter(): void {
     nextFilters[field.id] = filter;
   }
   ledgerFilters.value = nextFilters;
+  void persistLedgerProjectLayout();
   clearSelectionsAfterLedgerViewChange();
   closeColumnTools();
   currentPage.value = 1;
@@ -788,6 +787,7 @@ function clearColumnFilter(): void {
   const nextFilters = { ...ledgerFilters.value };
   delete nextFilters[field.id];
   ledgerFilters.value = nextFilters;
+  void persistLedgerProjectLayout();
   clearSelectionsAfterLedgerViewChange();
   closeColumnTools();
   currentPage.value = 1;
@@ -2025,43 +2025,6 @@ function handleGridKeydown(event: KeyboardEvent): void {
   void focusGridCell(nextCell);
 }
 
-const GRID_CLIPBOARD_MIME = "application/x-gene-lab-ledger-cells";
-
-function parseGridClipboardPayload(raw: string): GridClipboardPayload | null {
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return null;
-    const candidate = parsed as { version?: unknown; cells?: unknown };
-    if (candidate.version !== 1 || !Array.isArray(candidate.cells) || !candidate.cells.length) {
-      return null;
-    }
-    const cells: GridClipboardCell[] = [];
-    for (const item of candidate.cells) {
-      if (!item || typeof item !== "object") return null;
-      const cell = item as {
-        rowOffset?: unknown;
-        columnOffset?: unknown;
-        value?: unknown;
-      };
-      if (
-        !Number.isInteger(cell.rowOffset) ||
-        !Number.isInteger(cell.columnOffset) ||
-        typeof cell.value !== "string"
-      ) {
-        return null;
-      }
-      cells.push({
-        rowOffset: cell.rowOffset as number,
-        columnOffset: cell.columnOffset as number,
-        value: cell.value,
-      });
-    }
-    return { version: 1, cells };
-  } catch {
-    return null;
-  }
-}
-
 function gridClipboardSelection(eventCell: GridCellPosition | null): {
   positions: GridCellPosition[];
   active: GridCellPosition;
@@ -2083,37 +2046,11 @@ function buildGridClipboardData(selection: {
   positions: GridCellPosition[];
   active: GridCellPosition;
 }): { plainText: string; payload: GridClipboardPayload } {
-  const { positions, active } = selection;
-  const selectedKeys = new Set(positions.map(gridCellKey));
-  const rowStart = Math.min(...positions.map((position) => position.rowIndex));
-  const rowEnd = Math.max(...positions.map((position) => position.rowIndex));
-  const columnStart = Math.min(...positions.map((position) => position.columnIndex));
-  const columnEnd = Math.max(...positions.map((position) => position.columnIndex));
-  const matrix: string[] = [];
-  for (let rowIndex = rowStart; rowIndex <= rowEnd; rowIndex += 1) {
-    const row = tableRows.value[rowIndex];
-    if (!row) continue;
-    const values: string[] = [];
-    for (let columnIndex = columnStart; columnIndex <= columnEnd; columnIndex += 1) {
-      const field = fields.value[columnIndex];
-      const key = gridCellKey({ rowIndex, columnIndex });
-      values.push(field && selectedKeys.has(key) ? valueFor(row, field) : "");
-    }
-    matrix.push(values.join("\t"));
-  }
-  const payload: GridClipboardPayload = {
-    version: 1,
-    cells: positions.map((position) => {
+  return buildLedgerGridClipboardData(selection.positions, (position) => {
       const row = tableRows.value[position.rowIndex];
       const field = fields.value[position.columnIndex];
-      return {
-        rowOffset: position.rowIndex - active.rowIndex,
-        columnOffset: position.columnIndex - active.columnIndex,
-        value: row && field ? valueFor(row, field) : "",
-      };
-    }),
-  };
-  return { plainText: matrix.join("\n"), payload };
+      return row && field ? valueFor(row, field) : "";
+    });
 }
 
 function handleGridCopy(event: ClipboardEvent): void {
@@ -2131,7 +2068,7 @@ function handleGridCopy(event: ClipboardEvent): void {
   if (!clipboard) return;
   lastGridClipboard = { plainText, payload };
   try {
-    clipboard.setData(GRID_CLIPBOARD_MIME, JSON.stringify(payload));
+    clipboard.setData(LEDGER_GRID_CLIPBOARD_MIME, JSON.stringify(payload));
   } catch {
     // Browsers may reject custom clipboard MIME types; text/plain remains usable.
   }
@@ -2158,8 +2095,8 @@ async function copyGridSelectionToClipboard(
       try {
         const item = new ClipboardItem({
           "text/plain": new Blob([plainText], { type: "text/plain" }),
-          [GRID_CLIPBOARD_MIME]: new Blob([JSON.stringify(payload)], {
-            type: GRID_CLIPBOARD_MIME,
+          [LEDGER_GRID_CLIPBOARD_MIME]: new Blob([JSON.stringify(payload)], {
+            type: LEDGER_GRID_CLIPBOARD_MIME,
           }),
         });
         await clipboard.write([item]);
@@ -2186,20 +2123,52 @@ function handleGridPaste(event: ClipboardEvent): void {
   if (!clipboard) return;
   const text = clipboard.getData("text/plain");
   const customPayload =
-    parseGridClipboardPayload(clipboard.getData(GRID_CLIPBOARD_MIME)) ??
+    parseLedgerGridClipboardPayload(clipboard.getData(LEDGER_GRID_CLIPBOARD_MIME)) ??
     (lastGridClipboard?.plainText === text ? lastGridClipboard.payload : null);
   if (!customPayload && !text) return;
   event.preventDefault();
   event.stopPropagation();
-  const start = clampGridCell(destination);
+  let start = clampGridCell(destination);
+  let exactCells = customPayload?.cells;
+  let targetRange: GridCellRange | null = null;
+  let targetPositions: GridCellPosition[] | null = null;
+  const selectedRange = gridCellRange.value;
+  if (selectedRange && selectedGridCellKeys.value.size > 1) {
+    const positions = gridCellPositionsForRange(selectedRange);
+    const isCompleteRectangle =
+      positions.length === selectedGridCellKeys.value.size &&
+      positions.every((position) => selectedGridCellKeys.value.has(gridCellKey(position)));
+    const destinationSelected = selectedGridCellKeys.value.has(gridCellKey(start));
+    const normalizedText = text.replace(/\r/g, "").replace(/\n$/, "");
+    const plainSingleCell = !customPayload && !normalizedText.includes("\n") && !normalizedText.includes("\t")
+      ? normalizedText
+      : null;
+    const sourceCells = exactCells ?? (plainSingleCell !== null
+      ? [{ rowOffset: 0, columnOffset: 0, value: plainSingleCell }]
+      : null);
+    if (isCompleteRectangle && destinationSelected && sourceCells?.length === 1) {
+      const normalizedRange = normalizedGridRange(selectedRange);
+      start = {
+        rowIndex: normalizedRange.rowStart,
+        columnIndex: normalizedRange.columnStart,
+      };
+      targetRange = selectedRange;
+      targetPositions = positions;
+      exactCells = expandLedgerSingleCellPaste(
+        sourceCells,
+        normalizedRange.rowEnd - normalizedRange.rowStart + 1,
+        normalizedRange.columnEnd - normalizedRange.columnStart + 1,
+      );
+    }
+  }
   void pasteGrid(
     event,
     start.rowIndex,
     start.columnIndex,
-    customPayload?.cells,
+    exactCells,
   ).then((positions) => {
-    const targetPositions = positions.length ? positions : [start];
-    replaceGridCellSelection(targetPositions, start, start, null);
+    const selection = targetPositions ?? (positions.length ? positions : [start]);
+    replaceGridCellSelection(selection, start, start, targetRange);
     void focusGridCell(start);
   });
 }
@@ -2368,7 +2337,7 @@ function insertDraftRowsAt(
 function notifyInsertedRows(count: number): void {
   ElMessage.success(`已插入 ${count} 行，可按任意顺序填写；病理号填写后该行自动保存`);
   if (ledgerSort.value || Object.values(ledgerFilters.value).some(Boolean)) {
-    ElMessage.info("当前视图有排序或筛选；记录保存后会继续按当前视图规则显示");
+    ElMessage.info("当前台账有排序或筛选；记录保存后会继续按当前布局规则显示");
   }
 }
 
@@ -2696,6 +2665,7 @@ function makeDraftRow(
     project_name: currentProject.value?.name ?? "",
     position: 0,
     pathology_number: "",
+    block_number: null,
     status: "待实验",
     experiment_date: null,
     experiment_number: null,
@@ -2730,10 +2700,31 @@ function scrollTableToBottom(): void {
   });
 }
 
-function refreshTableLayout(): void {
-  void nextTick(() => {
-    tableRef.value?.doLayout();
+function autosizeTextareaKey(rowId: string, fieldId: string): string {
+  return `${rowId}:${fieldId}`;
+}
+
+function setAutosizeTextareaRef(instance: unknown, rowId: string, fieldId: string): void {
+  const key = autosizeTextareaKey(rowId, fieldId);
+  const candidate = instance as Partial<AutosizeTextareaInstance> | null;
+  if (candidate && typeof candidate.resizeTextarea === "function") {
+    autosizeTextareaRefs.set(key, candidate as AutosizeTextareaInstance);
+  } else {
+    autosizeTextareaRefs.delete(key);
+  }
+}
+
+async function remeasureVisibleTextareas(fieldId?: string): Promise<void> {
+  await nextTick();
+  autosizeTextareaRefs.forEach((instance, key) => {
+    if (!fieldId || key.endsWith(`:${fieldId}`)) instance.resizeTextarea();
   });
+  await nextTick();
+  tableRef.value?.doLayout();
+}
+
+function refreshTableLayout(): void {
+  void remeasureVisibleTextareas();
 }
 
 function appendDraftRow(scrollToBottom = true): void {
@@ -2751,6 +2742,7 @@ function fieldOptions(field: FieldDefinition): string[] {
 
 function valueFor(record: ProjectRecord, field: FieldDefinition): string {
   if (field.system_key === "pathology_number") return record.pathology_number;
+  if (field.system_key === "block_number") return record.block_number ?? "";
   if (field.system_key === "experiment_date") return record.experiment_date ?? "";
   if (field.system_key === "experiment_number") return record.experiment_number ?? "";
   if (field.system_key === "status") return record.status;
@@ -2773,6 +2765,7 @@ function globalMatchedValue(record: ProjectRecord): string {
   const candidates = [
     record.project_name,
     record.pathology_number,
+    record.block_number ?? "",
     record.experiment_number ?? "",
     ...Object.values(record.values),
   ];
@@ -2800,6 +2793,8 @@ function setValue(
 ): void {
   if (field.system_key === "pathology_number") {
     record.pathology_number = value;
+  } else if (field.system_key === "block_number") {
+    record.block_number = value || null;
   } else if (field.system_key === "experiment_date") {
     record.experiment_date = value || null;
   } else if (field.system_key === "experiment_number") {
@@ -2819,7 +2814,17 @@ function setValue(
     }
   }
   if ((options.markDirty ?? true) && !isDraft(record)) {
-    setCellSaveState(record.id, field.id, { status: "dirty" });
+    const key = persistedKey(record.id, field.id);
+    const editState = resolveLedgerCellEditState(
+      valueFor(record, field),
+      persistedValues.get(key) ?? "",
+      cellSaveInFlightCounts.get(key) ?? 0,
+    );
+    if (editState === "clear") {
+      clearCellSaveState(key);
+    } else {
+      setCellSaveState(record.id, field.id, { status: "dirty" });
+    }
   }
 }
 
@@ -2863,6 +2868,16 @@ function clearAllCellSaveStates(): void {
   cellSaveClearTimers.clear();
   cellSaveStates.value = new Map();
   cellSaveVersions.clear();
+}
+
+function beginCellSave(key: string): void {
+  cellSaveInFlightCounts.set(key, (cellSaveInFlightCounts.get(key) ?? 0) + 1);
+}
+
+function endCellSave(key: string): void {
+  const remaining = (cellSaveInFlightCounts.get(key) ?? 1) - 1;
+  if (remaining > 0) cellSaveInFlightCounts.set(key, remaining);
+  else cellSaveInFlightCounts.delete(key);
 }
 
 function cellSaveStateFor(record: LedgerRow, field: FieldDefinition): CellSaveState | null {
@@ -2940,6 +2955,9 @@ function payloadForField(
     if (!value) throw new Error("病理号不能为空");
     return { pathology_number: value };
   }
+  if (field.system_key === "block_number") {
+    return { block_number: value || null };
+  }
   if (field.system_key === "experiment_date") {
     const normalized = normalizeDate(value);
     record.experiment_date = normalized || null;
@@ -2999,6 +3017,35 @@ function replaceRecordPreservingPending(
   const selectedIndex = selectedRecords.value.findIndex((record) => record.id === updated.id);
   if (selectedIndex >= 0) selectedRecords.value.splice(selectedIndex, 1, merged);
   if (selectedRecordIds.value.has(updated.id)) selectedRecordCache.set(updated.id, merged);
+}
+
+function reconcileCellAfterCompletedSave(
+  recordId: string,
+  fieldId: string,
+  completedVersion: number,
+  recordHistory: boolean,
+): void {
+  const key = persistedKey(recordId, fieldId);
+  const currentRecord = records.value.find((item) => item.id === recordId);
+  const currentField = fields.value.find((item) => item.id === fieldId);
+  if (!currentRecord || !currentField || currentRecord.locked) return;
+  const currentValue = valueFor(currentRecord, currentField);
+  const action = resolveLedgerCellCompletionAction({
+    completedVersion,
+    currentVersion: cellSaveVersions.get(key),
+    currentValue,
+    persistedValue: persistedValues.get(key) ?? "",
+    inFlightCount: cellSaveInFlightCounts.get(key) ?? 0,
+  });
+  if (action === "none") return;
+  if (action === "pending") return;
+  if (action === "clear") {
+    clearFieldError(currentRecord, currentField);
+    clearCellSaveState(key);
+    return;
+  }
+  setCellSaveState(recordId, fieldId, { status: "dirty" });
+  void saveField(currentRecord, currentField, { recordHistory });
 }
 
 function handleTableSelectionChange(rows: ProjectRecord[]): void {
@@ -3196,6 +3243,7 @@ async function persistDraft(record: LedgerRow, notify = true): Promise<boolean> 
     const payload: RecordCreateInput = {
       project_id: projectId,
       pathology_number: pathologyNumber,
+      block_number: record.block_number?.trim() || null,
       status: record.status,
       experiment_date: experimentDate || null,
       experiment_number: record.experiment_number?.trim() || null,
@@ -3311,6 +3359,11 @@ async function saveField(
   const current = valueFor(record, field);
   if (current === initialBefore) {
     clearFieldError(record, field);
+    if ((cellSaveInFlightCounts.get(key) ?? 0) > 0) {
+      setCellSaveState(record.id, field.id, { status: "dirty" });
+    } else {
+      clearCellSaveState(key);
+    }
     return false;
   }
   try {
@@ -3336,6 +3389,7 @@ async function saveField(
 
   const version = (cellSaveVersions.get(key) ?? 0) + 1;
   cellSaveVersions.set(key, version);
+  beginCellSave(key);
   setCellSaveState(record.id, field.id, { status: "saving" });
   setSaving(record.id, true);
   try {
@@ -3405,6 +3459,8 @@ async function saveField(
     return false;
   } finally {
     setSaving(record.id, false);
+    endCellSave(key);
+    reconcileCellAfterCompletedSave(record.id, field.id, version, recordHistory);
   }
 }
 
@@ -3858,6 +3914,10 @@ function selectProject(projectId: string): void {
   activeProjectId.value = projectId;
 }
 
+function scrollProjectTabs(direction: -1 | 1): void {
+  projectStripRef.value?.scrollBy({ left: direction * 240, behavior: "smooth" });
+}
+
 function openGlobalSearchResult(record: ProjectRecord): void {
   focusRecordId.value = record.id;
   searchScope.value = "current";
@@ -4147,250 +4207,77 @@ async function clearSelectedHighlight(): Promise<void> {
 
 async function handleManagerChanged(): Promise<void> {
   await appStore.reloadProjects();
-  await loadViewPresets(activeProjectId.value);
+  applyLedgerProjectLayout(activeProjectId.value);
+  await persistLedgerProjectLayout(activeProjectId.value);
   await loadRecords();
 }
 
-function defaultViewState(): LedgerViewState {
-  const projectFields = (currentProject.value?.fields ?? []).slice().sort(
-    (left, right) => left.sort_order - right.sort_order,
+async function loadLedgerLayoutSettings(): Promise<void> {
+  try {
+    const result = await getSetting<unknown>(LEDGER_LAYOUT_SETTINGS_KEY);
+    ledgerLayoutSettings.value = normalizeLedgerLayoutSettings(result.value);
+  } catch (error) {
+    ElMessage.warning(error instanceof Error ? error.message : "台账布局设置读取失败");
+  }
+}
+
+function applyLedgerProjectLayout(projectId: string): void {
+  const project = appStore.projectById(projectId);
+  const layout = resolveLedgerProjectLayout(
+    ledgerLayoutSettings.value,
+    projectId,
+    project?.fields ?? [],
   );
-  return {
-    columns: projectFields.map((field) => ({
-      field_id: field.id,
-      width: field.width,
-      hidden: field.hidden,
-      pinned: field.system_key === "experiment_date" || field.system_key === "status",
-    })),
-    frozen_until_field_id: null,
-    sort: null,
-    filters: {},
-  };
+  ledgerSort.value = layout.sort;
+  ledgerFilters.value = layout.filters;
+  frozenUntilFieldId.value = layout.frozenUntilFieldId;
 }
 
-function currentViewState(): LedgerViewState {
-  const base = activeViewState.value ?? defaultViewState();
-  return {
-    columns: base.columns.map((column) => ({ ...column })),
-    frozen_until_field_id: base.frozen_until_field_id,
-    sort: ledgerSort.value
-      ? {
-          field_id: ledgerSort.value.fieldId,
-          direction: ledgerSort.value.order === "descending" ? "desc" : "asc",
-        }
-      : null,
-    filters: Object.fromEntries(
-      Object.entries(ledgerFilters.value).filter((entry) => Boolean(entry[1])),
-    ) as Record<string, Record<string, unknown>>,
-  };
-}
-
-function applyViewPreset(preset: LedgerViewPreset | null): void {
-  activeViewPresetId.value = preset?.id ?? "";
-  activeViewState.value = preset
-    ? {
-        columns: preset.state.columns.map((column) => ({ ...column })),
-        frozen_until_field_id: preset.state.frozen_until_field_id,
-        sort: preset.state.sort ? { ...preset.state.sort } : null,
-        filters: { ...preset.state.filters },
-      }
-    : defaultViewState();
-  ledgerSort.value = preset?.state.sort
-    ? {
-        fieldId: preset.state.sort.field_id,
-        order: preset.state.sort.direction === "desc" ? "descending" : "ascending",
-      }
-    : null;
-  ledgerFilters.value = { ...(preset?.state.filters ?? {}) } as LedgerFilterMap;
-  currentPage.value = 1;
-  activeGridCell.value = null;
-  clearGridCellSelection();
-  void loadRecords(activeProjectId.value, { preserveHistory: true });
-}
-
-function handleViewPresetChange(presetId: string | undefined): void {
-  applyViewPreset(viewPresets.value.find((item) => item.id === presetId) ?? null);
-}
-
-async function loadViewPresets(projectId: string): Promise<void> {
-  const requestSequence = ++viewLoadSequence;
-  if (!projectId) {
-    viewPresets.value = [];
-    activeViewPresetId.value = "";
-    activeViewState.value = null;
-    return;
-  }
-  try {
-    const presets = await listLedgerViewPresets(projectId);
-    if (requestSequence !== viewLoadSequence || projectId !== activeProjectId.value) return;
-    viewPresets.value = presets;
-    const selected =
-      presets.find((preset) => preset.id === activeViewPresetId.value) ??
-      presets.find((preset) => preset.is_default) ??
-      null;
-    activeViewPresetId.value = selected?.id ?? "";
-    activeViewState.value = selected?.state ?? defaultViewState();
-    ledgerSort.value = selected?.state.sort
-      ? {
-          fieldId: selected.state.sort.field_id,
-          order: selected.state.sort.direction === "desc" ? "descending" : "ascending",
-        }
-      : null;
-    ledgerFilters.value = { ...(selected?.state.filters ?? {}) } as LedgerFilterMap;
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "视图读取失败");
-  }
-}
-
-async function saveCurrentViewAs(): Promise<void> {
-  if (!activeProjectId.value) return;
-  try {
-    const { value } = await ElMessageBox.prompt("输入视图名称", "另存为命名视图", {
-      inputPlaceholder: "例如：报告录入视图",
-      inputValidator: (input) => (input.trim() ? true : "视图名称不能为空"),
+function persistLedgerProjectLayout(projectId = activeProjectId.value): Promise<void> {
+  if (!projectId) return Promise.resolve();
+  ledgerLayoutSettings.value = withLedgerProjectLayout(
+    ledgerLayoutSettings.value,
+    projectId,
+    {
+      sort: ledgerSort.value,
+      filters: ledgerFilters.value,
+      frozenUntilFieldId: frozenUntilFieldId.value,
+    },
+  );
+  const snapshot = ledgerLayoutSettings.value;
+  ledgerLayoutSaveQueue = ledgerLayoutSaveQueue
+    .then(async () => {
+      await putSetting(LEDGER_LAYOUT_SETTINGS_KEY, snapshot);
+    })
+    .catch((error) => {
+      ElMessage.warning(error instanceof Error ? error.message : "台账布局设置保存失败");
     });
-    viewBusy.value = true;
-    const preset = await createLedgerViewPreset(activeProjectId.value, {
-      name: value.trim(),
-      state: currentViewState(),
-    });
-    await loadViewPresets(activeProjectId.value);
-    applyViewPreset(preset);
-    ElMessage.success("命名视图已保存");
-  } catch (error) {
-    if (error !== "cancel" && error !== "close") {
-      ElMessage.error(error instanceof Error ? error.message : "视图保存失败");
-    }
-  } finally {
-    viewBusy.value = false;
-  }
-}
-
-async function overwriteCurrentView(): Promise<void> {
-  const preset = viewPresets.value.find((item) => item.id === activeViewPresetId.value);
-  if (!preset) {
-    await saveCurrentViewAs();
-    return;
-  }
-  viewBusy.value = true;
-  try {
-    const updated = await updateLedgerViewPreset(preset.id, { state: currentViewState() });
-    await loadViewPresets(activeProjectId.value);
-    activeViewPresetId.value = updated.id;
-    ElMessage.success("当前视图已更新");
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "视图更新失败");
-  } finally {
-    viewBusy.value = false;
-  }
-}
-
-async function renameCurrentView(): Promise<void> {
-  const preset = viewPresets.value.find((item) => item.id === activeViewPresetId.value);
-  if (!preset) return;
-  try {
-    const { value } = await ElMessageBox.prompt("输入新名称", "重命名视图", {
-      inputValue: preset.name,
-      inputValidator: (input) => (input.trim() ? true : "视图名称不能为空"),
-    });
-    await updateLedgerViewPreset(preset.id, { name: value.trim() });
-    await loadViewPresets(activeProjectId.value);
-  } catch (error) {
-    if (error !== "cancel" && error !== "close") {
-      ElMessage.error(error instanceof Error ? error.message : "视图重命名失败");
-    }
-  }
-}
-
-async function setCurrentViewDefault(): Promise<void> {
-  if (!activeViewPresetId.value) return;
-  await setDefaultLedgerViewPreset(activeViewPresetId.value);
-  await loadViewPresets(activeProjectId.value);
-  ElMessage.success("已设为默认视图");
-}
-
-async function removeCurrentView(): Promise<void> {
-  const preset = viewPresets.value.find((item) => item.id === activeViewPresetId.value);
-  if (!preset) return;
-  try {
-    await ElMessageBox.confirm(`确认删除视图“${preset.name}”？`, "删除命名视图", {
-      type: "warning",
-    });
-    await deleteLedgerViewPreset(preset.id);
-    await loadViewPresets(activeProjectId.value);
-    applyViewPreset(null);
-  } catch (error) {
-    if (error !== "cancel" && error !== "close") {
-      ElMessage.error(error instanceof Error ? error.message : "视图删除失败");
-    }
-  }
+  return ledgerLayoutSaveQueue;
 }
 
 function freezeThroughField(field: FieldDefinition): void {
-  const state = activeViewState.value ?? defaultViewState();
-  activeViewState.value = { ...state, frozen_until_field_id: field.id };
+  frozenUntilFieldId.value = field.id;
   closeColumnTools();
+  void persistLedgerProjectLayout();
   refreshTableLayout();
 }
 
 function clearFrozenFields(): void {
-  const state = activeViewState.value ?? defaultViewState();
-  activeViewState.value = { ...state, frozen_until_field_id: null };
-  refreshTableLayout();
-}
-
-function ensureActiveViewState(): LedgerViewState {
-  if (!activeViewState.value) activeViewState.value = defaultViewState();
-  return activeViewState.value;
-}
-
-function moveViewColumn(index: number, offset: -1 | 1): void {
-  const state = ensureActiveViewState();
-  const target = index + offset;
-  if (target < 0 || target >= state.columns.length) return;
-  const columns = state.columns.map((column) => ({ ...column }));
-  const [column] = columns.splice(index, 1);
-  if (!column) return;
-  columns.splice(target, 0, column);
-  activeViewState.value = { ...state, columns };
-  activeGridCell.value = null;
-  clearGridCellSelection();
-  refreshTableLayout();
-}
-
-function updateViewColumn(
-  fieldId: string,
-  property: "hidden" | "pinned",
-  value: boolean,
-): void {
-  const state = ensureActiveViewState();
-  const field = currentProject.value?.fields.find((item) => item.id === fieldId);
-  if (property === "pinned" && field?.system_key === "pathology_number") return;
-  activeViewState.value = {
-    ...state,
-    columns: state.columns.map((column) =>
-      column.field_id === fieldId ? { ...column, [property]: value } : column,
-    ),
-  };
-  activeGridCell.value = null;
-  clearGridCellSelection();
+  frozenUntilFieldId.value = null;
+  void persistLedgerProjectLayout();
   refreshTableLayout();
 }
 
 async function openQuickEntry(): Promise<void> {
   const project = currentProject.value;
   if (!project) return;
-  const state = activeViewState.value ?? defaultViewState();
-  const visibleIds = new Set(
-    state.columns.filter((column) => !column.hidden).map((column) => column.field_id),
-  );
   const selectedFieldIds = project.fields
-    .filter((field) => field.is_core || visibleIds.has(field.id))
+    .filter((field) => field.is_core || !field.hidden)
     .sort((left, right) => left.sort_order - right.sort_order)
     .map((field) => field.id);
-  const pinnedFieldIds = state.columns
-    .filter((column) => column.pinned)
-    .map((column) => column.field_id);
+  const pinnedFieldIds = project.fields
+    .filter((field) => field.system_key === "experiment_date" || field.system_key === "status")
+    .map((field) => field.id);
   const context = {
     projectId: project.id,
     selectedFieldIds,
@@ -4514,34 +4401,48 @@ async function commitFindReplace(): Promise<void> {
   }
 }
 
-async function handleHeaderResize(
+function fieldDefinitionById(fieldId: string): FieldDefinition | undefined {
+  for (const project of appStore.projects) {
+    const field = project.fields.find((item) => item.id === fieldId);
+    if (field) return field;
+  }
+  return undefined;
+}
+
+function applyFieldWidth(fieldId: string, width: number): void {
+  const field = fieldDefinitionById(fieldId);
+  if (field) field.width = width;
+}
+
+function handleHeaderResize(
   newWidth: number,
   _oldWidth: number,
   column: { columnKey?: string },
-): Promise<void> {
+): void {
   const fieldId = column.columnKey;
+  if (!fieldId) return;
   const field = fields.value.find((item) => item.id === fieldId);
-  if (!field || Math.round(newWidth) === field.width) return;
-  try {
-    if (activeViewState.value) {
-      const state = activeViewState.value;
-      activeViewState.value = {
-        ...state,
-        columns: state.columns.map((column) =>
-          column.field_id === field.id
-            ? { ...column, width: Math.round(newWidth) }
-            : column,
-        ),
-      };
-    } else {
-      await updateField(field.id, { width: Math.round(newWidth) });
-      await appStore.reloadProjects();
-    }
-    await nextTick();
-    tableRef.value?.doLayout();
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "列宽保存失败");
+  if (!field) return;
+  const width = Math.min(600, Math.max(58, Math.round(newWidth)));
+  let queue = columnWidthSaveQueues.get(fieldId);
+  if (!queue) {
+    queue = new LatestValuePersistence<number>({
+      initialValue: field.width,
+      save: async (requestedWidth) => (await updateField(fieldId, { width: requestedWidth })).width,
+      apply: (appliedWidth) => {
+        applyFieldWidth(fieldId, appliedWidth);
+        void remeasureVisibleTextareas(fieldId);
+      },
+      onLatestError: (error) => {
+        ElMessage.error(error instanceof Error ? error.message : "列宽保存失败");
+      },
+    });
+    columnWidthSaveQueues.set(fieldId, queue);
+  } else {
+    queue.syncCommittedValue(field.width);
   }
+  if (width === field.width) return;
+  queue.request(width);
 }
 
 async function pasteGrid(
@@ -4628,6 +4529,7 @@ async function pasteGrid(
     const batchNewRecords: RecordBatchNewRecord[] = committableDrafts.map(({ record }) => ({
       client_id: record.id,
       pathology_number: record.pathology_number.trim(),
+      block_number: record.block_number?.trim() || null,
       status: record.status,
       experiment_date: record.experiment_date ? normalizeDate(record.experiment_date) : null,
       experiment_number: record.experiment_number?.trim() || null,
@@ -5250,32 +5152,11 @@ const selectedGridStats = computed(() => {
     saveStatus,
   };
 });
-const viewColumnRows = computed(() => {
-  const projectFields = currentProject.value?.fields ?? [];
-  const byId = new Map(projectFields.map((field) => [field.id, field]));
-  const state = activeViewState.value ?? defaultViewState();
-  const rows = state.columns.flatMap((column) => {
-    const field = byId.get(column.field_id);
-    return field ? [{ field, column }] : [];
-  });
-  projectFields.forEach((field) => {
-    if (!rows.some((row) => row.field.id === field.id)) {
-      rows.push({
-        field,
-        column: {
-          field_id: field.id,
-          width: field.width,
-          hidden: field.hidden,
-          pinned: field.system_key === "experiment_date" || field.system_key === "status",
-        },
-      });
-    }
-  });
-  return rows;
-});
-
 watch(
   () => [
+    ledgerDisplaySettings.value.rowPaddingY,
+    ledgerDisplaySettings.value.editorWidthPercent,
+    ledgerDisplaySettings.value.editorHeightPercent,
     ledgerDisplaySettings.value.fontFamily,
     ledgerDisplaySettings.value.fontSizePx,
     ledgerDisplaySettings.value.zoomPercent,
@@ -5288,8 +5169,7 @@ watch(activeProjectId, async (projectId, previousProjectId) => {
   const load = (async () => {
     stopGridCellDrag(false);
     closeLedgerOverlays();
-    activeViewPresetId.value = "";
-    activeViewState.value = null;
+    applyLedgerProjectLayout(projectId);
     editingGridCell.value = null;
     editingGridSnapshot.value = null;
     clearSelectionsAfterLedgerViewChange();
@@ -5308,7 +5188,6 @@ watch(activeProjectId, async (projectId, previousProjectId) => {
     bulkDeletePreview.value = null;
     persistedValues.clear();
     void router.replace({ query: { ...route.query, project: projectId } });
-    await loadViewPresets(projectId);
     await loadRecords(projectId, { preserveHistory: true });
     await nextTick();
     refreshTableLayout();
@@ -5324,6 +5203,7 @@ watch(activeProjectId, async (projectId, previousProjectId) => {
 
 async function initializeLedger(): Promise<void> {
   await appStore.bootstrap();
+  await loadLedgerLayoutSettings();
   const queryProject =
     typeof route.query.project === "string" ? route.query.project : "";
   const initialProjectId = appStore.projects.some(
@@ -5341,7 +5221,7 @@ async function initializeLedger(): Promise<void> {
   appliedSearch.scope = "current";
   appliedSearch.projectIds = [];
   await router.replace({ query: { ...route.query, project: initialProjectId } });
-  await loadViewPresets(initialProjectId);
+  applyLedgerProjectLayout(initialProjectId);
   await loadRecords(initialProjectId);
   await nextTick();
   refreshTableLayout();
@@ -5411,25 +5291,15 @@ onBeforeUnmount(() => {
   lastGridClipboard = null;
   bottomScrollTimers.forEach((timer) => window.clearTimeout(timer));
   bottomScrollTimers = [];
+  autosizeTextareaRefs.clear();
+  columnWidthSaveQueues.clear();
+  cellSaveInFlightCounts.clear();
   clearAllCellSaveStates();
 });
 </script>
 
 <template>
-  <div class="page-stack">
-    <section class="project-strip">
-      <button
-        v-for="project in appStore.projects"
-        :key="project.id"
-        class="project-tab"
-        :class="{ active: project.id === activeProjectId }"
-        type="button"
-        @click="selectProject(project.id)"
-      >
-        <span>{{ project.name }}</span>
-      </button>
-    </section>
-
+  <div class="page-stack ledger-page" :class="{ 'global-search-mode': globalSearchActive }">
     <section class="page-card">
       <div class="page-card-body">
         <div class="ledger-toolbar">
@@ -5549,36 +5419,6 @@ onBeforeUnmount(() => {
             <el-button type="danger" plain :icon="Delete" @click="openBulkDeleteDialog">
               按日期批量删除
             </el-button>
-          </div>
-          <div v-if="!globalSearchActive" class="ledger-view-toolbar">
-            <el-select
-              :model-value="activeViewPresetId"
-              clearable
-              placeholder="系统默认视图"
-              :loading="viewBusy"
-              @change="handleViewPresetChange"
-            >
-              <el-option
-                v-for="preset in viewPresets"
-                :key="preset.id"
-                :label="`${preset.name}${preset.is_default ? '（默认）' : ''}`"
-                :value="preset.id"
-              />
-            </el-select>
-            <el-button @click="saveCurrentViewAs">另存为视图</el-button>
-            <el-button @click="overwriteCurrentView">保存当前视图</el-button>
-            <el-button @click="viewColumnsVisible = true">列顺序/隐藏/固定</el-button>
-            <el-dropdown :disabled="!activeViewPresetId">
-              <el-button>视图管理</el-button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item @click="renameCurrentView">重命名</el-dropdown-item>
-                  <el-dropdown-item @click="setCurrentViewDefault">设为默认</el-dropdown-item>
-                  <el-dropdown-item divided @click="removeCurrentView">删除视图</el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
-            <el-button @click="applyViewPreset(null)">恢复系统默认</el-button>
           </div>
           <div v-if="searchScope === 'selected'" class="ledger-search-advanced">
             <el-select
@@ -5864,6 +5704,7 @@ onBeforeUnmount(() => {
               />
               <el-input
                 v-else-if="!field.is_core"
+                :ref="(instance: unknown) => setAutosizeTextareaRef(instance, row.id, field.id)"
                 type="textarea"
                 :autosize="{ minRows: 1, maxRows: 5 }"
                 resize="none"
@@ -5987,7 +5828,7 @@ onBeforeUnmount(() => {
         </div>
         <div class="ledger-column-tools-sort">
           <el-button size="small" @click="freezeThroughField(columnToolsField)">冻结到此列</el-button>
-          <el-button size="small" :disabled="!activeViewState?.frozen_until_field_id" @click="clearFrozenFields">
+          <el-button size="small" :disabled="!frozenUntilFieldId" @click="clearFrozenFields">
             取消冻结
           </el-button>
         </div>
@@ -6105,47 +5946,77 @@ onBeforeUnmount(() => {
           {{ contextMenuRow?.locked ? '解锁当前记录' : '锁定当前记录' }}
         </button>
       </div>
-      <div class="ledger-zoom-footer">
-        <div v-if="selectedGridStats.selected" class="ledger-selection-stats">
-          <span>选中 {{ selectedGridStats.selected }}</span>
-          <span>非空 {{ selectedGridStats.nonEmpty }}</span>
-          <span v-if="selectedGridStats.numericCount">数字 {{ selectedGridStats.numericCount }}</span>
-          <span v-if="selectedGridStats.numericCount">合计 {{ selectedGridStats.sum }}</span>
-          <span v-if="selectedGridStats.average !== null">平均 {{ selectedGridStats.average.toFixed(2) }}</span>
-          <span v-if="selectedGridStats.min !== null">最小 {{ selectedGridStats.min }}</span>
-          <span v-if="selectedGridStats.max !== null">最大 {{ selectedGridStats.max }}</span>
-          <span>状态 {{ cellSaveStatusLabels[selectedGridStats.saveStatus] }}</span>
-        </div>
-        <el-pagination
-          v-model:current-page="currentPage"
-          :page-size="pageSize"
-          :total="recordTotal"
-          layout="total, prev, pager, next"
-          size="small"
-          @current-change="changeLedgerPage"
-        />
-        <div class="ledger-zoom-control" aria-label="台账缩放">
-          <el-button text :icon="Minus" :disabled="historyReplayLoading" @click="zoomOut" />
-          <el-slider
-            v-model="ledgerDisplaySettings.zoomPercent"
-            class="ledger-zoom-slider"
-            :min="LEDGER_ZOOM_MIN"
-            :max="LEDGER_ZOOM_MAX"
-            :step="LEDGER_ZOOM_STEP"
-            :disabled="historyReplayLoading"
-            :show-tooltip="false"
-            @change="persistZoomSetting"
+      <div class="ledger-bottom-bar">
+        <div class="project-tab-navigation" aria-label="项目标签滚动">
+          <el-button
+            text
+            :icon="ArrowLeft"
+            aria-label="向左滚动项目标签"
+            @click="scrollProjectTabs(-1)"
           />
+          <el-button
+            text
+            :icon="ArrowRight"
+            aria-label="向右滚动项目标签"
+            @click="scrollProjectTabs(1)"
+          />
+        </div>
+        <section ref="projectStripRef" class="project-strip" role="tablist" aria-label="检测项目">
           <button
+            v-for="project in appStore.projects"
+            :key="project.id"
+            class="project-tab"
+            :class="{ active: project.id === activeProjectId }"
             type="button"
-            class="ledger-zoom-value"
-            aria-label="重置台账缩放"
-            @click="resetZoom"
+            role="tab"
+            :aria-selected="project.id === activeProjectId"
+            @click="selectProject(project.id)"
           >
-            {{ ledgerDisplaySettings.zoomPercent }}%
+            <span>{{ project.name }}</span>
           </button>
-          <el-button text :icon="Plus" :disabled="historyReplayLoading" @click="zoomIn" />
-          <el-button text :disabled="historyReplayLoading" @click="resetZoom">重置</el-button>
+        </section>
+        <div class="ledger-zoom-footer">
+          <div v-if="selectedGridStats.selected" class="ledger-selection-stats">
+            <span>选中 {{ selectedGridStats.selected }}</span>
+            <span>非空 {{ selectedGridStats.nonEmpty }}</span>
+            <span v-if="selectedGridStats.numericCount">数字 {{ selectedGridStats.numericCount }}</span>
+            <span v-if="selectedGridStats.numericCount">合计 {{ selectedGridStats.sum }}</span>
+            <span v-if="selectedGridStats.average !== null">平均 {{ selectedGridStats.average.toFixed(2) }}</span>
+            <span v-if="selectedGridStats.min !== null">最小 {{ selectedGridStats.min }}</span>
+            <span v-if="selectedGridStats.max !== null">最大 {{ selectedGridStats.max }}</span>
+            <span>状态 {{ cellSaveStatusLabels[selectedGridStats.saveStatus] }}</span>
+          </div>
+          <el-pagination
+            v-model:current-page="currentPage"
+            :page-size="pageSize"
+            :total="recordTotal"
+            layout="total, prev, pager, next"
+            size="small"
+            @current-change="changeLedgerPage"
+          />
+          <div class="ledger-zoom-control" aria-label="台账缩放">
+            <el-button text :icon="Minus" :disabled="historyReplayLoading" @click="zoomOut" />
+            <el-slider
+              v-model="ledgerDisplaySettings.zoomPercent"
+              class="ledger-zoom-slider"
+              :min="LEDGER_ZOOM_MIN"
+              :max="LEDGER_ZOOM_MAX"
+              :step="LEDGER_ZOOM_STEP"
+              :disabled="historyReplayLoading"
+              :show-tooltip="false"
+              @change="persistZoomSetting"
+            />
+            <button
+              type="button"
+              class="ledger-zoom-value"
+              aria-label="重置台账缩放"
+              @click="resetZoom"
+            >
+              {{ ledgerDisplaySettings.zoomPercent }}%
+            </button>
+            <el-button text :icon="Plus" :disabled="historyReplayLoading" @click="zoomIn" />
+            <el-button text :disabled="historyReplayLoading" @click="resetZoom">重置</el-button>
+          </div>
         </div>
       </div>
     </section>
@@ -6163,44 +6034,6 @@ onBeforeUnmount(() => {
     @select-project="selectProject"
     @open-templates="templateManagerVisible = true"
   />
-
-  <el-dialog v-model="viewColumnsVisible" title="当前视图的列设置" width="760px">
-    <p class="dialog-note">这些调整只影响当前视图；点击“保存当前视图”或“另存为视图”后持久保存。</p>
-    <el-table :data="viewColumnRows" row-key="field.id" border max-height="520">
-      <el-table-column label="顺序" width="120" align="center">
-        <template #default="{ $index }">
-          <el-button link :disabled="$index === 0" @click="moveViewColumn($index, -1)">上移</el-button>
-          <el-button link :disabled="$index === viewColumnRows.length - 1" @click="moveViewColumn($index, 1)">下移</el-button>
-        </template>
-      </el-table-column>
-      <el-table-column label="表头" min-width="180">
-        <template #default="{ row }">{{ row.field.label }}</template>
-      </el-table-column>
-      <el-table-column label="显示" width="110" align="center">
-        <template #default="{ row }">
-          <el-switch
-            :model-value="!row.column.hidden"
-            @update:model-value="updateViewColumn(row.field.id, 'hidden', !$event)"
-          />
-        </template>
-      </el-table-column>
-      <el-table-column label="连续录入时保留" width="160" align="center">
-        <template #default="{ row }">
-          <el-switch
-            :model-value="row.column.pinned"
-            :disabled="row.field.system_key === 'pathology_number'"
-            @update:model-value="updateViewColumn(row.field.id, 'pinned', $event)"
-          />
-        </template>
-      </el-table-column>
-      <el-table-column label="列宽" width="100" align="center">
-        <template #default="{ row }">{{ row.column.width }}</template>
-      </el-table-column>
-    </el-table>
-    <template #footer>
-      <el-button @click="viewColumnsVisible = false">完成</el-button>
-    </template>
-  </el-dialog>
 
   <el-dialog v-model="findReplaceVisible" title="查找替换" width="660px">
     <el-form label-position="top">
@@ -6446,6 +6279,7 @@ onBeforeUnmount(() => {
           </template>
         </el-table-column>
         <el-table-column prop="pathology_number" label="病理号" min-width="160" />
+        <el-table-column prop="block_number" label="蜡块号" min-width="110" />
         <el-table-column prop="status" label="状态" width="90" />
         <el-table-column prop="experiment_date" label="实验日期" width="120" />
         <el-table-column prop="experiment_number" label="实验编号" min-width="150" />
@@ -6714,52 +6548,58 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
-.project-strip {
-  position: sticky;
-  top: 0;
-  z-index: 10;
+.ledger-page {
   display: flex;
-  align-items: stretch;
+  height: calc(100dvh - 68px);
+  min-height: 0;
+  flex-direction: column;
   gap: 8px;
-  padding: 4px 4px 10px;
-  border: 1px solid var(--app-border);
-  border-radius: 12px;
-  background: rgb(255 255 255 / 82%);
-  box-shadow: 0 5px 16px rgb(16 24 40 / 6%);
-  backdrop-filter: blur(12px);
+  overflow: hidden;
+}
+
+.ledger-page.global-search-mode {
+  overflow: auto;
+}
+
+.ledger-page > .page-card:not(.ledger-table-card),
+.ledger-page > .selection-bar {
+  flex: 0 0 auto;
+}
+
+.project-strip {
+  display: flex;
+  min-width: 80px;
+  flex: 1 1 auto;
+  align-self: stretch;
+  align-items: flex-end;
+  gap: 2px;
+  border: 0;
+  background: transparent;
   overflow-x: auto;
-  scrollbar-color: #98a2b3 #eef2f6;
-  scrollbar-width: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
 }
 
 .project-strip::-webkit-scrollbar {
-  height: 10px;
-}
-
-.project-strip::-webkit-scrollbar-track {
-  border-radius: 999px;
-  background: #eef2f6;
-}
-
-.project-strip::-webkit-scrollbar-thumb {
-  border: 2px solid #eef2f6;
-  border-radius: 999px;
-  background: #98a2b3;
+  display: none;
 }
 
 .project-tab {
   display: flex;
-  min-width: 150px;
-  min-height: 42px;
+  min-width: 96px;
+  max-width: 180px;
+  min-height: 30px;
   align-items: center;
   justify-content: center;
   border: 1px solid var(--app-border);
-  border-radius: 10px;
+  border-bottom-color: #cfd4dc;
+  border-radius: 7px 7px 0 0;
   color: #344054;
-  background: #fff;
-  padding: 8px 12px;
+  background: #f2f4f7;
+  padding: 5px 12px;
   text-align: center;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .project-tab:hover {
@@ -6768,9 +6608,10 @@ onBeforeUnmount(() => {
 
 .project-tab.active {
   border-color: var(--app-primary);
+  border-bottom-color: #fff;
   color: #0958d9;
-  background: var(--app-primary-soft);
-  box-shadow: 0 0 0 1px var(--app-primary);
+  background: #fff;
+  box-shadow: inset 0 2px 0 var(--app-primary);
 }
 
 .project-tab span {
@@ -6814,8 +6655,14 @@ onBeforeUnmount(() => {
 }
 
 .ledger-operation-group {
-  flex-wrap: wrap;
-  justify-content: flex-end;
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.ledger-operation-group > * {
+  flex: 0 0 auto;
 }
 
 .ledger-preview-scope {
@@ -7048,7 +6895,7 @@ onBeforeUnmount(() => {
 
 @media (max-width: 900px) {
   .ledger-filter-group {
-    flex-wrap: wrap;
+    overflow-x: auto;
   }
 
   .ledger-filter-group > :deep(.el-input):not(.date-filter) {
@@ -7076,19 +6923,23 @@ onBeforeUnmount(() => {
 
 .selection-bar {
   display: flex;
-  min-height: 48px;
+  min-height: 44px;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 8px;
   border: 1px solid #d6e4ff;
   border-radius: 10px;
   background: #f3f8ff;
-  padding: 8px 12px;
+  overflow-x: auto;
+  padding: 6px 10px;
+  scrollbar-width: thin;
 }
 
 .selection-bar strong {
+  flex: 0 0 auto;
   margin-right: 4px;
   font-size: 13px;
+  white-space: nowrap;
 }
 
 .selection-quick-actions {
@@ -7122,7 +6973,8 @@ onBeforeUnmount(() => {
 
 .ledger-table-card {
   display: flex;
-  height: calc(100vh - 300px);
+  min-height: 0;
+  flex: 1 1 0;
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
@@ -7151,11 +7003,40 @@ onBeforeUnmount(() => {
   font-size: inherit;
 }
 
+.ledger-bottom-bar {
+  display: flex;
+  min-width: 0;
+  min-height: 38px;
+  flex: 0 0 38px;
+  align-items: flex-end;
+  gap: 4px;
+  border-top: 1px solid var(--app-border);
+  background: #f8fafc;
+  padding: 5px 6px 0;
+}
+
+.project-tab-navigation {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  padding-bottom: 2px;
+}
+
+.project-tab-navigation > :deep(.el-button) {
+  width: 26px;
+  height: 26px;
+  margin-left: 0;
+  padding: 0;
+}
+
 .ledger-zoom-footer {
   display: flex;
+  min-width: 0;
   flex: 0 0 auto;
+  align-items: center;
   justify-content: flex-end;
-  padding-top: 4px;
+  gap: 8px;
+  padding-bottom: 2px;
 }
 
 .ledger-zoom-control {
@@ -7430,6 +7311,7 @@ onBeforeUnmount(() => {
   box-sizing: border-box;
   display: block;
   min-height: var(--ledger-editor-height, 32px) !important;
+  overflow-y: auto !important;
   overflow-wrap: anywhere;
   word-break: break-all;
   line-height: 20px;
@@ -7576,18 +7458,6 @@ onBeforeUnmount(() => {
 :deep(.ledger-table-card .el-table__body-wrapper .el-scrollbar__thumb) {
   border-radius: 999px;
   background: #98a2b3;
-}
-
-.ledger-view-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.ledger-view-toolbar > .el-select {
-  width: 210px;
 }
 
 .cell-save-state {

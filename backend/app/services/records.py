@@ -226,6 +226,7 @@ def assign_record_to_project(
         project_id=target_project_id,
         position=next_record_position(session, target_project_id),
         pathology_number=source_record.pathology_number,
+        block_number=source_record.block_number,
         status="待实验",
     )
     session.add(target)

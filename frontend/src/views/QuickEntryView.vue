@@ -851,7 +851,7 @@ onBeforeUnmount(() => {
       </p>
       <div class="field-dialog-toolbar">
         <el-button size="small" @click="selectAllFields">全部选择</el-button>
-        <el-button size="small" @click="restoreRecommendedFields">恢复当前视图推荐</el-button>
+        <el-button size="small" @click="restoreRecommendedFields">恢复项目推荐</el-button>
       </div>
       <div class="field-selector">
         <div class="field-selector-head">

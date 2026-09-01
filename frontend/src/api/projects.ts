@@ -1,11 +1,10 @@
 import { apiRequest, jsonBody } from "@/api/client";
 import type {
   DataType,
+  FieldBatchCreateResult,
   FieldDefinition,
   FieldValidationRules,
   LedgerTemplate,
-  LedgerViewPreset,
-  LedgerViewState,
   Project,
   ProjectForceDeleteResult,
   ValidationMode,
@@ -106,6 +105,16 @@ export function createField(
   });
 }
 
+export function batchCreateFields(
+  projectId: string,
+  labels: string[],
+): Promise<FieldBatchCreateResult> {
+  return apiRequest<FieldBatchCreateResult>(`/projects/${projectId}/fields/batch`, {
+    method: "POST",
+    body: jsonBody({ labels }),
+  });
+}
+
 export function updateField(
   fieldId: string,
   payload: {
@@ -147,38 +156,4 @@ export function reorderFields(
 
 export function deleteField(fieldId: string): Promise<void> {
   return apiRequest<void>(`/projects/fields/${fieldId}`, { method: "DELETE" });
-}
-
-export function listLedgerViewPresets(projectId: string): Promise<LedgerViewPreset[]> {
-  return apiRequest<LedgerViewPreset[]>(`/projects/${projectId}/view-presets`);
-}
-
-export function createLedgerViewPreset(
-  projectId: string,
-  payload: { name: string; state: LedgerViewState; is_default?: boolean },
-): Promise<LedgerViewPreset> {
-  return apiRequest<LedgerViewPreset>(`/projects/${projectId}/view-presets`, {
-    method: "POST",
-    body: jsonBody(payload),
-  });
-}
-
-export function updateLedgerViewPreset(
-  presetId: string,
-  payload: { name?: string; state?: LedgerViewState; is_default?: boolean },
-): Promise<LedgerViewPreset> {
-  return apiRequest<LedgerViewPreset>(`/projects/view-presets/${presetId}`, {
-    method: "PATCH",
-    body: jsonBody(payload),
-  });
-}
-
-export function setDefaultLedgerViewPreset(presetId: string): Promise<LedgerViewPreset> {
-  return apiRequest<LedgerViewPreset>(`/projects/view-presets/${presetId}/default`, {
-    method: "POST",
-  });
-}
-
-export function deleteLedgerViewPreset(presetId: string): Promise<void> {
-  return apiRequest<void>(`/projects/view-presets/${presetId}`, { method: "DELETE" });
 }

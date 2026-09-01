@@ -35,6 +35,8 @@ def _display_value(record: ProjectRecord, field: FieldDefinition, values: dict[s
         return record.experiment_date.isoformat() if record.experiment_date else ""
     if field.system_key == "pathology_number":
         return record.pathology_number
+    if field.system_key == "block_number":
+        return record.block_number or ""
     if field.system_key == "experiment_number":
         return record.experiment_number or ""
     if field.system_key == "status":
@@ -60,6 +62,7 @@ def _search_filters(project_id: str, payload: LedgerPrintPreviewCreate) -> list[
         filters.append(
             or_(
                 ProjectRecord.pathology_number.like(term),
+                ProjectRecord.block_number.like(term),
                 ProjectRecord.experiment_number.like(term),
                 value_match,
             )

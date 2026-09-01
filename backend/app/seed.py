@@ -24,11 +24,19 @@ CORE_FIELDS = (
         "width": 120,
     },
     {
+        "key": "blockNo",
+        "label": "蜡块号",
+        "data_type": "text",
+        "system_key": "block_number",
+        "sort_order": 2,
+        "width": 110,
+    },
+    {
         "key": "experimentNo",
         "label": "实验编号",
         "data_type": "text",
         "system_key": "experiment_number",
-        "sort_order": 2,
+        "sort_order": 3,
         "width": 145,
     },
     {
@@ -36,7 +44,7 @@ CORE_FIELDS = (
         "label": "状态",
         "data_type": "select",
         "system_key": "status",
-        "sort_order": 3,
+        "sort_order": 4,
         "width": 120,
     },
 )

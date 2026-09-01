@@ -57,6 +57,7 @@ def test_seed_health_and_json_settings(
         assert [field["label"] for field in project["fields"]] == [
             "日期",
             "病理号",
+            "蜡块号",
             "实验编号",
             "状态",
         ]
@@ -188,6 +189,48 @@ def test_experiment_numbering_only_updates_numbers_and_remains_editable(
         json={"record_ids": [completed["id"]], "prefix": "CUSTOM"},
     )
     assert rejected.status_code == 409
+
+
+def test_block_number_is_independent_and_numbering_keeps_canonical_pathology(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    tb_id = seeded_projects["TB"]["id"]
+    created = client.post(
+        "/api/records",
+        json={
+            "project_id": tb_id,
+            "pathology_number": "26-34856",
+            "block_number": "1",
+        },
+    )
+    assert created.status_code == 201, created.text
+    record = created.json()
+    assert record["pathology_number"] == "26-34856"
+    assert record["block_number"] == "1"
+
+    numbered = client.post(
+        "/api/records/experiment-numbers",
+        json={"record_ids": [record["id"]], "prefix": "20260901"},
+    )
+    assert numbered.status_code == 200, numbered.text
+    assert numbered.json()[0]["experiment_number"] == "20260901-1"
+    assert numbered.json()[0]["pathology_number"] == "26-34856"
+    assert numbered.json()[0]["block_number"] == "1"
+
+    found = client.get(
+        "/api/records",
+        params={"project_id": tb_id, "search": "26-34856", "limit": 1000},
+    )
+    assert found.status_code == 200, found.text
+    assert [item["id"] for item in found.json()["items"]] == [record["id"]]
+
+    cleared = client.patch(
+        f"/api/records/{record['id']}",
+        json={"block_number": None},
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["block_number"] is None
 
 
 def test_records_follow_ledger_position_and_custom_fields_are_independent(

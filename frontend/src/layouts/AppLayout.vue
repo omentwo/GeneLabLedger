@@ -272,8 +272,10 @@ onBeforeUnmount(() => {
   --app-sidebar-collapsed-width: 72px;
   --app-sidebar-current-width: var(--app-sidebar-expanded-width);
   display: flex;
-  min-height: 100vh;
+  height: 100vh;
+  min-height: 0;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .app-shell.sidebar-collapsed {
@@ -375,10 +377,16 @@ onBeforeUnmount(() => {
 
 .app-content {
   display: grid;
-  min-height: calc(100vh - 36px);
-  flex: 1 0 auto;
+  min-height: 0;
+  flex: 1 1 auto;
   grid-template-columns: var(--app-sidebar-current-width) minmax(0, 1fr);
+  overflow: hidden;
   transition: grid-template-columns 180ms ease;
+}
+
+.app-content > main {
+  min-height: 0;
+  overflow: auto;
 }
 
 .app-sidebar {

@@ -107,6 +107,7 @@ def record_filters(
             or_(
                 ProjectRecord.project.has(Project.name.like(term)),
                 ProjectRecord.pathology_number.like(term),
+                ProjectRecord.block_number.like(term),
                 ProjectRecord.experiment_number.like(term),
                 value_match,
             )
@@ -172,6 +173,8 @@ def list_records(
 def _query_field_expression(field: FieldDefinition):
     if field.system_key == "pathology_number":
         return ProjectRecord.pathology_number
+    if field.system_key == "block_number":
+        return ProjectRecord.block_number
     if field.system_key == "status":
         return ProjectRecord.status
     if field.system_key == "experiment_date":
@@ -565,6 +568,7 @@ def validate_new_record(
     issues = []
     core_values = {
         "pathology_number": payload.pathology_number,
+        "block_number": payload.block_number or "",
         "status": payload.status,
         "experiment_date": payload.experiment_date.isoformat() if payload.experiment_date else "",
         "experiment_number": payload.experiment_number or "",
@@ -601,6 +605,7 @@ def create_record(payload: RecordCreate, session: Session = Depends(get_session)
         payload.project_id,
         {
             "pathology_number": payload.pathology_number,
+            "block_number": payload.block_number or "",
             "status": payload.status,
             "experiment_date": payload.experiment_date.isoformat() if payload.experiment_date else "",
             "experiment_number": payload.experiment_number or "",
@@ -617,6 +622,7 @@ def create_record(payload: RecordCreate, session: Session = Depends(get_session)
             project_id=payload.project_id,
             position=position,
             pathology_number=normalized_core["pathology_number"],
+            block_number=normalized_core["block_number"] or None,
             status=normalized_core["status"],
             experiment_date=(
                 date.fromisoformat(normalized_core["experiment_date"])
@@ -643,6 +649,7 @@ def create_record(payload: RecordCreate, session: Session = Depends(get_session)
             {
                 "project_id": record.project_id,
                 "pathology_number": record.pathology_number,
+                "block_number": record.block_number,
                 "status": record.status,
                 "experiment_number": record.experiment_number,
                 "highlight_color": record.highlight_color,
@@ -672,6 +679,7 @@ def update_record(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="记录已锁定，不能修改")
     before = {
         "pathology_number": record.pathology_number,
+        "block_number": record.block_number,
         "status": record.status,
         "experiment_date": record.experiment_date.isoformat() if record.experiment_date else None,
         "experiment_number": record.experiment_number,
@@ -680,6 +688,8 @@ def update_record(
     core_changes: dict[str, object] = {}
     if payload.pathology_number is not None:
         core_changes["pathology_number"] = payload.pathology_number
+    if "block_number" in payload.model_fields_set:
+        core_changes["block_number"] = payload.block_number or ""
     if payload.status is not None:
         core_changes["status"] = payload.status
     if "experiment_date" in payload.model_fields_set:
@@ -691,6 +701,8 @@ def update_record(
     normalized_core = validate_core_record_values(session, record.project_id, core_changes)
     if "pathology_number" in normalized_core:
         record.pathology_number = normalized_core["pathology_number"]
+    if "block_number" in normalized_core:
+        record.block_number = normalized_core["block_number"] or None
     if "status" in normalized_core:
         record.status = normalized_core["status"]
     if "experiment_date" in normalized_core:
@@ -715,6 +727,7 @@ def update_record(
                 "before": before,
                 "after": {
                     "pathology_number": record.pathology_number,
+                    "block_number": record.block_number,
                     "status": record.status,
                     "experiment_date": (
                         record.experiment_date.isoformat() if record.experiment_date else None

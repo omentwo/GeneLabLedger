@@ -413,6 +413,8 @@ def resolve_mapping_values(
                 continue
             if field.system_key == "pathology_number":
                 replacements[mapping.placeholder] = record.pathology_number
+            elif field.system_key == "block_number":
+                replacements[mapping.placeholder] = record.block_number or ""
             elif field.system_key == "status":
                 replacements[mapping.placeholder] = record.status
             elif field.system_key == "experiment_date":

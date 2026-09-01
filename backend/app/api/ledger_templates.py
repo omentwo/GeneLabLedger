@@ -33,6 +33,22 @@ def _clean_fields(values: list[LedgerTemplateField]) -> list[dict[str, Any]]:
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="A ledger template must contain at least one field.",
         )
+    # Saved templates from versions before 蜡块号 became a fixed core field do
+    # not contain it. Upgrade those templates in memory so they remain usable.
+    if not any(field.system_key == "block_number" for field in values):
+        block_definition = CORE_FIELD_BY_SYSTEM_KEY["block_number"]
+        values = [
+            *values,
+            LedgerTemplateField(
+                key=str(block_definition["key"]),
+                label=str(block_definition["label"]),
+                data_type=str(block_definition["data_type"]),
+                system_key="block_number",
+                is_core=True,
+                sort_order=int(block_definition["sort_order"]),
+                width=int(block_definition["width"]),
+            ),
+        ]
     seen_keys: set[str] = set()
     seen_labels: set[str] = set()
     seen_system_keys: set[str] = set()

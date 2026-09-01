@@ -51,7 +51,7 @@ def validate_field_value(
         except ValueError:
             return value, [FieldValueIssue("error", "日期必须使用有效的 YYYY-MM-DD 格式")]
         return parsed.isoformat(), []
-    if system_key == "experiment_number":
+    if system_key in {"block_number", "experiment_number"}:
         return value, []
 
     rules = dict(field.validation_rules or {})

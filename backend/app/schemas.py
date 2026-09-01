@@ -135,6 +135,32 @@ class FieldCreate(BaseModel):
         return cleaned or None
 
 
+class FieldBatchCreate(BaseModel):
+    labels: list[str] = Field(min_length=1, max_length=100)
+
+    @field_validator("labels")
+    @classmethod
+    def clean_labels(cls, values: list[str]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            cleaned = value.strip()
+            if not cleaned:
+                raise ValueError("表头名称不能为空")
+            if len(cleaned) > 120:
+                raise ValueError(f"表头名称不能超过 120 个字符：{cleaned[:20]}")
+            if cleaned in seen:
+                raise ValueError(f"表头名称重复：{cleaned}")
+            seen.add(cleaned)
+            result.append(cleaned)
+        return result
+
+
+class FieldBatchCreateResponse(BaseModel):
+    retained: list[FieldRead] = Field(default_factory=list)
+    created: list[FieldRead] = Field(default_factory=list)
+
+
 class FieldUpdate(BaseModel):
     label: str | None = Field(default=None, min_length=1, max_length=120)
     data_type: DataType | None = None
@@ -242,59 +268,6 @@ class ProjectForceDeleteResponse(BaseModel):
     cleanup_warnings: list[str] = Field(default_factory=list)
 
 
-class LedgerViewColumnState(BaseModel):
-    field_id: str = Field(min_length=1, max_length=36)
-    width: int = Field(default=120, ge=58, le=600)
-    hidden: bool = False
-    pinned: bool = False
-
-
-class LedgerViewSortState(BaseModel):
-    field_id: str = Field(min_length=1, max_length=36)
-    direction: Literal["asc", "desc"] = "asc"
-
-
-class LedgerViewState(BaseModel):
-    columns: list[LedgerViewColumnState] = Field(default_factory=list, max_length=500)
-    frozen_until_field_id: str | None = Field(default=None, max_length=36)
-    sort: LedgerViewSortState | None = None
-    filters: dict[str, dict[str, object]] = Field(default_factory=dict)
-
-
-class LedgerViewPresetCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
-    state: LedgerViewState = Field(default_factory=LedgerViewState)
-    is_default: bool = False
-
-    @field_validator("name")
-    @classmethod
-    def clean_name(cls, value: str) -> str:
-        return value.strip()
-
-
-class LedgerViewPresetUpdate(BaseModel):
-    name: str | None = Field(default=None, min_length=1, max_length=120)
-    state: LedgerViewState | None = None
-    is_default: bool | None = None
-
-    @field_validator("name")
-    @classmethod
-    def clean_optional_name(cls, value: str | None) -> str | None:
-        return value.strip() if value is not None else None
-
-
-class LedgerViewPresetRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: str
-    project_id: str
-    name: str
-    state: LedgerViewState
-    is_default: bool
-    created_at: datetime
-    updated_at: datetime
-
-
 class LedgerTemplateField(BaseModel):
     key: str = Field(min_length=1, max_length=120)
     label: str = Field(min_length=1, max_length=120)
@@ -378,6 +351,7 @@ class LedgerTemplateRead(BaseModel):
 class RecordCreate(BaseModel):
     project_id: str
     pathology_number: str = Field(min_length=1, max_length=160)
+    block_number: str | None = Field(default=None, max_length=80)
     status: RecordStatus = "待实验"
     experiment_date: date | None = None
     experiment_number: str | None = Field(default=None, max_length=80)
@@ -391,7 +365,7 @@ class RecordCreate(BaseModel):
     def clean_pathology_number(cls, value: str) -> str:
         return value.strip()
 
-    @field_validator("experiment_number")
+    @field_validator("block_number", "experiment_number")
     @classmethod
     def clean_experiment_number(cls, value: str | None) -> str | None:
         return value.strip() if value is not None and value.strip() else None
@@ -410,6 +384,7 @@ class RecordCreate(BaseModel):
 
 class RecordUpdate(BaseModel):
     pathology_number: str | None = Field(default=None, min_length=1, max_length=160)
+    block_number: str | None = Field(default=None, max_length=80)
     status: RecordStatus | None = None
     experiment_date: date | None = None
     experiment_number: str | None = Field(default=None, max_length=80)
@@ -421,7 +396,7 @@ class RecordUpdate(BaseModel):
     def clean_optional_pathology_number(cls, value: str | None) -> str | None:
         return value.strip() if value is not None else None
 
-    @field_validator("experiment_number")
+    @field_validator("block_number", "experiment_number")
     @classmethod
     def clean_optional_experiment_number(cls, value: str | None) -> str | None:
         return value.strip() if value is not None and value.strip() else None
@@ -497,6 +472,7 @@ class RecordRead(BaseModel):
     project_name: str
     position: int
     pathology_number: str
+    block_number: str | None
     status: str
     experiment_date: date | None
     experiment_number: str | None
@@ -516,6 +492,7 @@ class RecordOperationSnapshot(BaseModel):
     project_id: str = Field(min_length=1, max_length=36)
     position: int = Field(ge=1)
     pathology_number: str = Field(min_length=1, max_length=160)
+    block_number: str | None = Field(default=None, max_length=80)
     status: RecordStatus
     experiment_date: date | None = None
     experiment_number: str | None = Field(default=None, max_length=80)
@@ -532,7 +509,7 @@ class RecordOperationSnapshot(BaseModel):
     def clean_snapshot_pathology_number(cls, value: str) -> str:
         return value.strip()
 
-    @field_validator("experiment_number")
+    @field_validator("block_number", "experiment_number")
     @classmethod
     def clean_snapshot_experiment_number(cls, value: str | None) -> str | None:
         return value.strip() if value is not None and value.strip() else None
@@ -645,6 +622,7 @@ class RecordCellChange(BaseModel):
 class RecordBatchNewRecord(BaseModel):
     client_id: str = Field(min_length=1, max_length=100)
     pathology_number: str = Field(min_length=1, max_length=160)
+    block_number: str | None = Field(default=None, max_length=80)
     status: RecordStatus = "待实验"
     experiment_date: date | None = None
     experiment_number: str | None = Field(default=None, max_length=80)
@@ -954,6 +932,7 @@ class WorkbookImportRow(BaseModel):
     row_number: int = Field(ge=2)
     record_id: str | None = None
     pathology_number: str = Field(min_length=1, max_length=160)
+    block_number: str | None = Field(default=None, max_length=80)
     status: RecordStatus = "待实验"
     experiment_date: date | None = None
     experiment_number: str | None = Field(default=None, max_length=80)
@@ -967,7 +946,7 @@ class WorkbookImportRow(BaseModel):
             raise ValueError("病理号不能为空")
         return value
 
-    @field_validator("experiment_number")
+    @field_validator("block_number", "experiment_number")
     @classmethod
     def clean_experiment_number(cls, value: str | None) -> str | None:
         if value is None:

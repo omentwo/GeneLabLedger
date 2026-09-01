@@ -176,6 +176,7 @@ def _preview_rows(
                 values[field.id] = value
 
         pathology_number = core.get("pathology_number", "").strip()
+        block_number = core.get("block_number", "").strip() or None
         if not pathology_number:
             row_errors.append("病理号不能为空")
         record_status = core.get("status", "待实验").strip() or "待实验"
@@ -197,6 +198,7 @@ def _preview_rows(
                 row_number=row_number,
                 record_id=record_id,
                 pathology_number=pathology_number or "（缺失）",
+                block_number=block_number,
                 status=record_status,
                 experiment_date=experiment_date,
                 experiment_number=experiment_number,
@@ -340,6 +342,7 @@ def commit_workbook(
                     project_id=payload.project_id,
                     position=next_position,
                     pathology_number=row.pathology_number,
+                    block_number=row.block_number,
                 )
                 next_position += 1
                 session.add(record)
@@ -349,6 +352,7 @@ def commit_workbook(
             else:
                 updated += 1
             record.pathology_number = row.pathology_number
+            record.block_number = row.block_number
             record.status = row.status
             record.experiment_date = row.experiment_date
             record.experiment_number = row.experiment_number or None
