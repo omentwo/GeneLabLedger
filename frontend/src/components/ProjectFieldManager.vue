@@ -318,7 +318,7 @@ async function saveField(field: FieldDefinition): Promise<void> {
   try {
     await updateField(field.id, {
       label,
-      data_type: field.data_type,
+      ...(field.is_core ? {} : { data_type: field.data_type }),
       width: Number(field.width),
       hidden: field.hidden,
       ...(field.is_core

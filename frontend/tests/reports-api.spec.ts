@@ -55,6 +55,47 @@ describe("report placeholder mappings", () => {
     });
   });
 
+  it("sends the combined pathology-number mapping without a field id", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "version-1",
+          version_number: 1,
+          original_filename: "TB.docx",
+          placeholders: ["case_no"],
+          mappings: [],
+          created_at: "2026-07-30T00:00:00",
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await replaceReportMappings("version-1", [
+      {
+        placeholder: "case_no",
+        source_type: "pathology_with_block",
+        field_id: null,
+        fixed_value: null,
+      },
+    ]);
+
+    const [, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(options.body))).toEqual({
+      mappings: [
+        {
+          placeholder: "case_no",
+          source_type: "pathology_with_block",
+          field_id: null,
+          fixed_value: null,
+        },
+      ],
+    });
+  });
+
   it("sends the selected Office print engine with a batch print request", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(

@@ -4206,9 +4206,17 @@ async function clearSelectedHighlight(): Promise<void> {
 }
 
 async function handleManagerChanged(): Promise<void> {
+  const changedProjectId = activeProjectId.value;
   await appStore.reloadProjects();
-  applyLedgerProjectLayout(activeProjectId.value);
-  await persistLedgerProjectLayout(activeProjectId.value);
+  const bridge = desktopBridge();
+  if (bridge?.windowKind === "main" && changedProjectId) {
+    void bridge
+      .notifyQuickEntryFieldsChanged({ projectId: changedProjectId })
+      .catch((error) => console.error("快速录入表头刷新通知失败", error));
+  }
+  const currentProjectId = activeProjectId.value;
+  applyLedgerProjectLayout(currentProjectId);
+  await persistLedgerProjectLayout(currentProjectId);
   await loadRecords();
 }
 
@@ -5045,6 +5053,12 @@ async function removeRecord(record: ProjectRecord): Promise<void> {
     );
     const before = snapshotRecord(record);
     await deleteRecord(record.id);
+    tableRef.value?.toggleRowSelection(record, false);
+    selectedRecords.value = selectedRecords.value.filter((item) => item.id !== record.id);
+    const nextSelectedRecordIds = new Set(selectedRecordIds.value);
+    nextSelectedRecordIds.delete(record.id);
+    selectedRecordIds.value = nextSelectedRecordIds;
+    selectedRecordCache.delete(record.id);
     records.value = records.value.filter((item) => item.id !== record.id);
     recordTotal.value = Math.max(0, recordTotal.value - 1);
     activeGridCell.value = null;

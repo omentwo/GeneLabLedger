@@ -933,17 +933,22 @@ def test_direct_print_uses_temporary_docx_and_document_download_is_removed(
     seeded_projects: dict[str, dict],
 ) -> None:
     tb = seeded_projects["TB"]
-    pathology_field = next(
-        field for field in tb["fields"] if field["system_key"] == "pathology_number"
-    )
     record = client.post(
         "/api/records",
-        json={"project_id": tb["id"], "pathology_number": "REPORT-001"},
+        json={
+            "project_id": tb["id"],
+            "pathology_number": "REPORT-001",
+            "block_number": " 2 ",
+        },
     ).json()
     assert client.patch(
         f"/api/records/{record['id']}",
         json={"experiment_number": "RPT-1"},
     ).status_code == 200
+    record_without_block = client.post(
+        "/api/records",
+        json={"project_id": tb["id"], "pathology_number": "REPORT-002"},
+    ).json()
 
     uploaded = client.post(
         "/api/report-templates",
@@ -958,8 +963,9 @@ def test_direct_print_uses_temporary_docx_and_document_download_is_removed(
             "mappings": [
                 {
                     "placeholder": "case_no",
-                    "source_type": "field",
-                    "field_id": pathology_field["id"],
+                    "source_type": "pathology_with_block",
+                    "field_id": "ignored-field",
+                    "fixed_value": "ignored-value",
                 },
                 {
                     "placeholder": "experiment_no",
@@ -969,25 +975,35 @@ def test_direct_print_uses_temporary_docx_and_document_download_is_removed(
         },
     )
     assert mapped.status_code == 200
+    combined_mapping = next(
+        item for item in mapped.json()["mappings"] if item["placeholder"] == "case_no"
+    )
+    assert combined_mapping["field_id"] is None
+    assert combined_mapping["fixed_value"] is None
 
     printed = client.post(
         "/api/reports/print",
         json={
             "template_version_id": version["id"],
             "printer_name": "测试打印机",
-            "items": [{"project_record_id": record["id"]}],
+            "items": [
+                {"project_record_id": record["id"]},
+                {"project_record_id": record_without_block["id"]},
+            ],
             "print_engine": "auto",
         },
     )
     assert printed.status_code == 200
     assert printed.json() == {
         "printer_name": "测试打印机",
-        "printed_count": 1,
+        "printed_count": 2,
         "print_engine": "word",
     }
     printer = client.app.state.printer_service
-    assert "REPORT-001" in printer.printed_document_xml[0]
+    assert "REPORT-001-2" in printer.printed_document_xml[0]
     assert "RPT-1" in printer.printed_document_xml[0]
+    assert "REPORT-002" in printer.printed_document_xml[1]
+    assert "REPORT-002-" not in printer.printed_document_xml[1]
     assert list(client.app.state.settings.report_work_dir.iterdir()) == []
     assert "/api/reports/documents" not in client.get("/openapi.json").json()["paths"]
 

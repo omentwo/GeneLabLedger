@@ -87,6 +87,34 @@ def test_field_defaults_only_apply_to_future_records_and_labels_are_unique(
     assert renamed.status_code == 409
 
 
+def test_core_field_visibility_can_change_without_allowing_a_type_change(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    pathology = project_fields(seeded_projects["TB"])["pathology_number"]
+
+    hidden = client.patch(
+        f"/api/projects/fields/{pathology['id']}",
+        json={"data_type": pathology["data_type"], "hidden": True},
+    )
+    assert hidden.status_code == 200, hidden.text
+    assert hidden.json()["hidden"] is True
+    assert hidden.json()["data_type"] == pathology["data_type"]
+
+    shown = client.patch(
+        f"/api/projects/fields/{pathology['id']}",
+        json={"hidden": False},
+    )
+    assert shown.status_code == 200, shown.text
+    assert shown.json()["hidden"] is False
+
+    rejected = client.patch(
+        f"/api/projects/fields/{pathology['id']}",
+        json={"data_type": "number"},
+    )
+    assert rejected.status_code == 409
+
+
 def test_field_labels_cannot_conflict_with_import_identifiers(
     client: TestClient,
     seeded_projects: dict[str, dict],

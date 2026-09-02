@@ -106,6 +106,7 @@ const createFileLabel = computed(
 const sourceTypeLabels: Record<MappingSourceType, string> = {
   unmapped: "暂不映射",
   field: "台账表头",
+  pathology_with_block: "组合病理号",
   fixed: "固定文字",
   current_date: "当前日期",
   experiment_number: "实验编号",
@@ -498,7 +499,7 @@ onMounted(() => {
         <strong>占位符由您自由映射</strong>
         <p>
           Word 中的任意 <code v-text="placeholderText('placeholder')" />
-          都可对应当前项目的任意台账表头、固定文字、当前日期或实验编号，不依赖显示名称。
+          都可对应当前项目的任意台账表头、组合病理号、固定文字、当前日期或实验编号，不依赖显示名称。
         </p>
       </div>
       <el-tag effect="plain">由本机 Office 直接打印</el-tag>

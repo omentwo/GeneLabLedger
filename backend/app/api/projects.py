@@ -709,12 +709,13 @@ def update_field(
         )
         field.label = payload.label
     if payload.data_type is not None:
-        if field.is_core:
+        if field.is_core and payload.data_type != field.data_type:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="核心字段不能修改数据类型",
             )
-        field.data_type = payload.data_type
+        if not field.is_core:
+            field.data_type = payload.data_type
     if payload.sort_order is not None:
         field.sort_order = payload.sort_order
     if payload.width is not None:

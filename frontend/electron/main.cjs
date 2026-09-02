@@ -616,6 +616,20 @@ function registerDesktopHandlers() {
     }
   });
 
+  ipcMain.handle("gene-ledger:quick-entry-fields-changed", (event, payload) => {
+    assertTrustedIpcSender(event);
+    const projectId =
+      typeof payload?.projectId === "string" ? payload.projectId.trim().slice(0, 160) : "";
+    if (!projectId) throw new Error("快速录入表头变更通知无效");
+    if (
+      quickEntryRendererReady &&
+      quickEntryWindow &&
+      !quickEntryWindow.isDestroyed()
+    ) {
+      quickEntryWindow.webContents.send("gene-ledger:quick-entry-fields-changed", { projectId });
+    }
+  });
+
   ipcMain.handle("gene-ledger:minimize-window", (event) => {
     assertTrustedIpcSender(event);
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize();

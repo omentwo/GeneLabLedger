@@ -406,6 +406,12 @@ def resolve_mapping_values(
             replacements[mapping.placeholder] = current_date
         elif mapping.source_type == "experiment_number":
             replacements[mapping.placeholder] = record.experiment_number or ""
+        elif mapping.source_type == "pathology_with_block":
+            pathology_number = record.pathology_number.strip()
+            block_number = (record.block_number or "").strip()
+            replacements[mapping.placeholder] = (
+                f"{pathology_number}-{block_number}" if block_number else pathology_number
+            )
         elif mapping.source_type == "field":
             field = mapping.field
             if not field:

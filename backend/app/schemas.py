@@ -43,6 +43,7 @@ def normalize_cell_highlight_colors(value: dict[str, str] | None) -> dict[str, s
 MappingSourceType = Literal[
     "unmapped",
     "field",
+    "pathology_with_block",
     "fixed",
     "current_date",
     "experiment_number",

@@ -19,11 +19,15 @@ export interface GeneLedgerDesktopBridge {
   quickEntryReady: () => Promise<void>;
   focusMainWindow: () => Promise<boolean>;
   notifyQuickEntryChanged: (payload: QuickEntryChangedPayload) => Promise<void>;
+  notifyQuickEntryFieldsChanged: (payload: QuickEntryFieldsChangedPayload) => Promise<void>;
   onQuickEntryOpenRequested: (
     listener: (context: QuickEntryOpenContext) => void,
   ) => () => void;
   onQuickEntryChanged: (
     listener: (payload: QuickEntryChangedPayload) => void,
+  ) => () => void;
+  onQuickEntryFieldsChanged: (
+    listener: (payload: QuickEntryFieldsChangedPayload) => void,
   ) => () => void;
   minimizeWindow: () => Promise<void>;
   toggleWindowMaximize: () => Promise<boolean>;
@@ -44,6 +48,10 @@ export interface QuickEntryChangedPayload {
   projectId: string;
   recordId: string;
   action: "create" | "update";
+}
+
+export interface QuickEntryFieldsChangedPayload {
+  projectId: string;
 }
 
 declare global {

@@ -1,4 +1,8 @@
 <script setup lang="ts">
+interface ChoiceSuggestion {
+  value: string;
+}
+
 const props = withDefaults(
   defineProps<{
     modelValue: string;
@@ -22,31 +26,55 @@ function commit(value: string): void {
   emit("update:modelValue", value);
   emit("change", value);
 }
+
+function update(value: string | number): void {
+  emit("update:modelValue", String(value ?? ""));
+}
+
+function suggestions(
+  query: string,
+  callback: (items: ChoiceSuggestion[]) => void,
+): void {
+  const keyword = query.trim().toLocaleLowerCase();
+  callback(
+    props.options
+      .filter((option) => !keyword || option.toLocaleLowerCase().includes(keyword))
+      .map((value) => ({ value })),
+  );
+}
+
+function selectSuggestion(item: ChoiceSuggestion): void {
+  commit(item.value);
+}
 </script>
 
 <template>
   <el-input
     v-if="readonly"
+    class="editable-choice-input"
     :model-value="modelValue"
     readonly
     @paste="emit('paste', $event)"
   />
-  <el-select
+  <el-autocomplete
     v-else
+    class="editable-choice-input"
     :model-value="modelValue"
-    filterable
-    allow-create
-    default-first-option
+    :fetch-suggestions="suggestions"
+    :debounce="0"
+    value-key="value"
     clearable
     :placeholder="placeholder"
+    @update:model-value="update"
     @change="commit(String($event ?? ''))"
+    @select="selectSuggestion"
     @paste="emit('paste', $event)"
-  >
-    <el-option
-      v-for="option in props.options"
-      :key="option"
-      :label="option"
-      :value="option"
-    />
-  </el-select>
+  />
 </template>
+
+<style scoped>
+.editable-choice-input {
+  width: 100%;
+  max-width: 100%;
+}
+</style>

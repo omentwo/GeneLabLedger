@@ -25,6 +25,8 @@ contextBridge.exposeInMainWorld("geneLedgerDesktop", {
   focusMainWindow: () => ipcRenderer.invoke("gene-ledger:focus-main-window"),
   notifyQuickEntryChanged: (payload) =>
     ipcRenderer.invoke("gene-ledger:quick-entry-changed", payload),
+  notifyQuickEntryFieldsChanged: (payload) =>
+    ipcRenderer.invoke("gene-ledger:quick-entry-fields-changed", payload),
   onQuickEntryOpenRequested: (listener) => {
     const handler = (_event, context) => listener(context);
     ipcRenderer.on("gene-ledger:quick-entry-open-requested", handler);
@@ -34,6 +36,11 @@ contextBridge.exposeInMainWorld("geneLedgerDesktop", {
     const handler = (_event, payload) => listener(payload);
     ipcRenderer.on("gene-ledger:quick-entry-changed", handler);
     return () => ipcRenderer.removeListener("gene-ledger:quick-entry-changed", handler);
+  },
+  onQuickEntryFieldsChanged: (listener) => {
+    const handler = (_event, payload) => listener(payload);
+    ipcRenderer.on("gene-ledger:quick-entry-fields-changed", handler);
+    return () => ipcRenderer.removeListener("gene-ledger:quick-entry-fields-changed", handler);
   },
   minimizeWindow: () => ipcRenderer.invoke("gene-ledger:minimize-window"),
   toggleWindowMaximize: () => ipcRenderer.invoke("gene-ledger:toggle-window-maximize"),

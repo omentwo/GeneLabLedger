@@ -69,6 +69,9 @@ const contextDefaults = new Map<string, QuickEntryFieldDefaults>();
 let recordsLoadSequence = 0;
 let refreshTimer: number | undefined;
 let removeOpenRequestListener: (() => void) | undefined;
+let removeFieldsChangedListener: (() => void) | undefined;
+const pendingProjectRefreshIds = new Set<string>();
+let projectRefreshPromise: Promise<void> | null = null;
 
 function queryIdList(value: unknown): string[] {
   const joined = Array.isArray(value) ? value.join(",") : typeof value === "string" ? value : "";
@@ -124,10 +127,19 @@ function focusPathology(): void {
   );
   if (!pathologyField) return;
   void nextTick(() => {
-    document
-      .querySelector<HTMLElement>(`[data-entry-field="${pathologyField.id}"] input`)
-      ?.focus();
+    const input = document.querySelector<HTMLElement>(
+      `[data-entry-field="${pathologyField.id}"] input`,
+    );
+    input?.focus();
+    input?.scrollIntoView({ block: "center" });
   });
+}
+
+async function scrollRecordIntoView(recordId: string): Promise<void> {
+  await nextTick();
+  const item = [...document.querySelectorAll<HTMLElement>(".record-list-item")]
+    .find((element) => element.dataset.recordId === recordId);
+  item?.scrollIntoView({ block: "nearest" });
 }
 
 function valuesForRecord(record: ProjectRecord): Record<string, string> {
@@ -197,9 +209,13 @@ async function confirmDiscardChanges(action: string): Promise<boolean> {
 
 async function selectRecord(record: ProjectRecord): Promise<void> {
   if (saving.value) return;
-  if (activeRecord.value?.id === record.id) return;
+  if (activeRecord.value?.id === record.id) {
+    focusPathology();
+    return;
+  }
   if (!(await confirmDiscardChanges("切换病理号"))) return;
   loadRecordIntoForm(record);
+  focusPathology();
 }
 
 async function startCreate(): Promise<void> {
@@ -283,6 +299,72 @@ async function loadUnreportedRecords(projectId: string): Promise<void> {
   }
 }
 
+function reconcileValuesAfterFieldRefresh(previousFields: FieldDefinition[]): void {
+  const nextFieldIds = new Set(projectFields.value.map((field) => field.id));
+  const removedDirtyFields = previousFields.filter(
+    (field) =>
+      !nextFieldIds.has(field.id) &&
+      (entryValues[field.id] ?? "") !== (baselineValues[field.id] ?? ""),
+  );
+  const previousValues = { ...entryValues };
+  const previousBaselines = { ...baselineValues };
+  const nextValues: Record<string, string> = {};
+  const nextBaselines: Record<string, string> = {};
+  projectFields.value.forEach((field) => {
+    const fallback = activeRecord.value
+      ? quickEntryFieldValue(activeRecord.value, field)
+      : quickEntryDefaultValue(field);
+    nextValues[field.id] = Object.hasOwn(previousValues, field.id)
+      ? previousValues[field.id] ?? ""
+      : fallback;
+    nextBaselines[field.id] = Object.hasOwn(previousBaselines, field.id)
+      ? previousBaselines[field.id] ?? ""
+      : fallback;
+  });
+  replaceValues(entryValues, nextValues);
+  replaceValues(baselineValues, nextBaselines);
+  if (removedDirtyFields.length) {
+    ElMessage.warning(
+      `表头“${removedDirtyFields.map((field) => field.label).join("、")}”已被删除，其未保存内容无法继续提交`,
+    );
+  }
+}
+
+async function refreshProjectData(projectId: string): Promise<void> {
+  if (!projectId) return;
+  pendingProjectRefreshIds.add(projectId);
+  if (projectRefreshPromise) {
+    try {
+      await projectRefreshPromise;
+    } catch {
+      // The owner of the shared refresh reports the error once.
+    }
+    return;
+  }
+  const refresh = (async () => {
+    while (pendingProjectRefreshIds.size) {
+      const requestedProjectIds = new Set(pendingProjectRefreshIds);
+      pendingProjectRefreshIds.clear();
+      const currentActiveProjectId = activeProjectId.value;
+      const refreshActiveProject = requestedProjectIds.has(currentActiveProjectId);
+      const previousFields = refreshActiveProject ? projectFields.value.slice() : [];
+      await appStore.reloadProjects();
+      if (!refreshActiveProject || currentActiveProjectId !== activeProjectId.value) continue;
+      fieldSettings.value = resolveFieldSettings(currentActiveProjectId);
+      reconcileValuesAfterFieldRefresh(previousFields);
+      await loadUnreportedRecords(currentActiveProjectId);
+    }
+  })();
+  projectRefreshPromise = refresh;
+  try {
+    await refresh;
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "快速录入数据刷新失败");
+  } finally {
+    if (projectRefreshPromise === refresh) projectRefreshPromise = null;
+  }
+}
+
 async function activateProject(
   projectId: string,
   defaults?: QuickEntryFieldDefaults,
@@ -322,9 +404,10 @@ async function handleOpenRequest(context: QuickEntryOpenContext): Promise<void> 
     });
   }
   if (!context.projectId || context.projectId === activeProjectId.value) {
-    if (activeProjectId.value) await loadUnreportedRecords(activeProjectId.value);
+    if (activeProjectId.value) await refreshProjectData(activeProjectId.value);
     return;
   }
+  await refreshProjectData(context.projectId);
   await activateProject(context.projectId, {
     selectedFieldIds: context.selectedFieldIds,
     pinnedFieldIds: context.pinnedFieldIds,
@@ -480,8 +563,10 @@ async function saveNewRecord(): Promise<void> {
     ...unreportedRecords.value,
     created,
   ]);
+  recordSearch.value = "";
   notifyMain(created.id, "create");
   resetCreateForm(true);
+  await scrollRecordIntoView(created.id);
   ElMessage.success("记录已保存，可继续录入下一条");
 }
 
@@ -556,6 +641,7 @@ function restoreEntry(): void {
 }
 
 function handleEntryKeydown(event: KeyboardEvent, field: FieldDefinition): void {
+  if (event.isComposing) return;
   if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
     event.preventDefault();
     void saveEntry();
@@ -611,6 +697,10 @@ async function initialize(): Promise<void> {
 }
 
 function refreshOnFocus(): void {
+  if (activeProjectId.value) void refreshProjectData(activeProjectId.value);
+}
+
+function refreshRecordsPeriodically(): void {
   if (activeProjectId.value) void loadUnreportedRecords(activeProjectId.value);
 }
 
@@ -619,9 +709,12 @@ onMounted(() => {
     removeOpenRequestListener = bridge.onQuickEntryOpenRequested((context) => {
       void handleOpenRequest(context);
     });
+    removeFieldsChangedListener = bridge.onQuickEntryFieldsChanged((payload) => {
+      void refreshProjectData(payload.projectId);
+    });
   }
   window.addEventListener("focus", refreshOnFocus);
-  refreshTimer = window.setInterval(refreshOnFocus, 30_000);
+  refreshTimer = window.setInterval(refreshRecordsPeriodically, 30_000);
   void initialize().finally(() => {
     if (bridge?.windowKind === "quick-entry") {
       void bridge.quickEntryReady().catch((error) => {
@@ -635,6 +728,8 @@ onBeforeUnmount(() => {
   recordsLoadSequence += 1;
   removeOpenRequestListener?.();
   removeOpenRequestListener = undefined;
+  removeFieldsChangedListener?.();
+  removeFieldsChangedListener = undefined;
   window.removeEventListener("focus", refreshOnFocus);
   if (refreshTimer !== undefined) window.clearInterval(refreshTimer);
 });
@@ -714,6 +809,7 @@ onBeforeUnmount(() => {
             :key="record.id"
             type="button"
             class="record-list-item"
+            :data-record-id="record.id"
             :class="{ active: activeRecord?.id === record.id }"
             :disabled="saving"
             @click="selectRecord(record)"
@@ -776,7 +872,7 @@ onBeforeUnmount(() => {
         />
 
         <el-scrollbar class="entry-form-scroll">
-          <el-form class="entry-form" label-position="top">
+          <el-form class="entry-form" label-position="top" size="small">
             <el-form-item v-for="field in entryFields" :key="field.id">
               <template #label>
                 <span class="entry-field-label">
@@ -811,7 +907,7 @@ onBeforeUnmount(() => {
                   :model-value="entryValues[field.id] ?? ''"
                   :readonly="formReadonly"
                   :type="field.is_core ? 'text' : 'textarea'"
-                  :autosize="field.is_core ? undefined : { minRows: 2, maxRows: 6 }"
+                  :autosize="field.is_core ? undefined : { minRows: 1, maxRows: 4 }"
                   @update:model-value="setEntryValue(field, String($event))"
                   @keydown="handleEntryKeydown($event, field)"
                 />
@@ -1100,6 +1196,7 @@ onBeforeUnmount(() => {
 .entry-pane {
   display: flex;
   flex-direction: column;
+  container: quick-entry-form / inline-size;
 }
 
 .entry-pane-header {
@@ -1166,20 +1263,39 @@ onBeforeUnmount(() => {
 }
 
 .entry-form {
-  width: min(760px, 100%);
-  padding: 16px 18px 26px;
+  box-sizing: border-box;
+  display: grid;
+  width: 100%;
+  max-width: 920px;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 10px 16px;
+  margin-inline: auto;
+  padding: 12px 16px 20px;
 }
 
 .entry-form :deep(.el-form-item) {
-  margin-bottom: 16px;
+  width: 100%;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.entry-form :deep(.el-form-item__label) {
+  height: auto;
+  min-width: 0;
+  padding-bottom: 4px;
+  line-height: 18px;
 }
 
 .entry-field-label {
   display: inline-flex;
+  min-width: 0;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 7px;
+  gap: 3px 6px;
   color: #344054;
   font-weight: 600;
+  line-height: 18px;
 }
 
 .required-mark,
@@ -1202,6 +1318,16 @@ onBeforeUnmount(() => {
 
 .entry-field {
   width: 100%;
+  min-width: 0;
+}
+
+.entry-field :deep(.el-input),
+.entry-field :deep(.el-textarea),
+.entry-field :deep(.el-select),
+.entry-field :deep(.el-autocomplete),
+.entry-field :deep(.editable-date-input) {
+  width: 100%;
+  min-width: 0;
 }
 
 .entry-footer {
@@ -1297,6 +1423,12 @@ onBeforeUnmount(() => {
   font-size: 10px;
 }
 
+@container quick-entry-form (min-width: 620px) {
+  .entry-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 820px) {
   .quick-entry-header {
     gap: 9px;
@@ -1348,11 +1480,8 @@ onBeforeUnmount(() => {
   }
 
   .entry-form {
-    padding-block: 10px 18px;
-  }
-
-  .entry-form :deep(.el-form-item) {
-    margin-bottom: 11px;
+    gap: 8px 14px;
+    padding-block: 8px 14px;
   }
 }
 </style>

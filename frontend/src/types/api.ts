@@ -14,6 +14,7 @@ export interface FieldValidationRules {
 export type MappingSourceType =
   | "unmapped"
   | "field"
+  | "pathology_with_block"
   | "fixed"
   | "current_date"
   | "experiment_number"
