@@ -351,6 +351,51 @@ def test_ledger_native_preview_task_uses_generated_snapshot(feature_client: Test
     assert status_response.json()["job_id"] == payload["job_id"]
 
 
+def test_ledger_current_project_preview_excludes_other_projects(
+    feature_client: TestClient,
+) -> None:
+    projects = feature_client.get("/api/projects").json()
+    current_project = projects[0]
+    other_project = projects[1]
+    for pathology_number in ("CURRENT-ONE", "CURRENT-TWO"):
+        created = feature_client.post(
+            "/api/records",
+            json={
+                "project_id": current_project["id"],
+                "pathology_number": pathology_number,
+            },
+        )
+        assert created.status_code == 201, created.text
+    other = feature_client.post(
+        "/api/records",
+        json={
+            "project_id": other_project["id"],
+            "pathology_number": "OTHER-PROJECT",
+        },
+    )
+    assert other.status_code == 201, other.text
+
+    print_preview = feature_client.post(
+        f"/api/ledgers/{current_project['id']}/print-preview",
+        json={"scope": "project", "search": "OTHER-PROJECT"},
+    )
+    assert print_preview.status_code == 200, print_preview.text
+    print_payload = print_preview.json()
+    assert print_payload["scope"] == "project"
+    visible_fields = [field for field in current_project["fields"] if not field["hidden"]]
+    assert print_payload["selected_cell_count"] == 2 * len(visible_fields)
+
+    native_preview = feature_client.post(
+        f"/api/ledgers/{current_project['id']}/native-preview",
+        json={"scope": "project", "action": "open", "print_engine": "wps"},
+    )
+    assert native_preview.status_code == 200, native_preview.text
+    native_payload = native_preview.json()
+    assert native_payload["scope"] == "project"
+    assert native_payload["action"] == "open"
+    assert native_payload["print_engine"] == "wps"
+
+
 def test_report_native_preview_task_uses_rendered_docx(feature_client: TestClient) -> None:
     project = feature_client.get("/api/projects").json()[0]
     record = feature_client.post(

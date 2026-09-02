@@ -70,6 +70,14 @@ def _search_filters(project_id: str, payload: LedgerPrintPreviewCreate) -> list[
     return filters
 
 
+def _preview_filters(project_id: str, payload: LedgerPrintPreviewCreate) -> list[Any]:
+    if payload.scope == "all":
+        return []
+    if payload.scope == "project":
+        return [ProjectRecord.project_id == project_id]
+    return _search_filters(project_id, payload)
+
+
 def _safe_filename(value: str) -> str:
     cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value).strip(" ._")
     return (cleaned or "ledger")[:100]
@@ -89,7 +97,7 @@ def _build_ledger_source(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="The ledger has no printable fields."
         )
-    filters = [] if payload.scope == "all" else _search_filters(project.id, payload)
+    filters = _preview_filters(project.id, payload)
     base_query = (
         select(ProjectRecord)
         .where(*filters)
@@ -195,7 +203,7 @@ def create_ledger_print_preview(
             status_code=status.HTTP_409_CONFLICT, detail="The ledger has no printable fields."
         )
 
-    filters = [] if payload.scope == "all" else _search_filters(ledger_id, payload)
+    filters = _preview_filters(ledger_id, payload)
     base_query = (
         select(ProjectRecord)
         .where(*filters)

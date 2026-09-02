@@ -120,7 +120,7 @@ export interface NativePreviewTask {
   document_type: "xlsx" | "docx";
   filename: string;
   error: string | null;
-  scope?: "selection" | "filtered" | "all" | null;
+  scope?: "selection" | "project" | "filtered" | "all" | null;
 }
 
 export interface ProjectRecord {

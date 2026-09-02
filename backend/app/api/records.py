@@ -489,12 +489,6 @@ def assign_experiment_numbers(
             detail=f"部分台账记录不存在：{', '.join(missing)}",
         )
     ordered = [by_id[record_id] for record_id in record_ids]
-    project_ids = {record.project_id for record in ordered}
-    if len(project_ids) != 1:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Experiment numbers can only be assigned within one ledger.",
-        )
     locked = [record.pathology_number for record in ordered if record.locked]
     if locked:
         raise HTTPException(

@@ -14,7 +14,7 @@ export function createLedgerNativePreview(
   ledgerId: string,
   payload: {
     action: NativePreviewAction;
-    scope: "selection" | "filtered" | "all";
+    scope: "selection" | "project" | "filtered" | "all";
     cells?: Array<{ record_id: string; field_id: string }>;
     search?: string;
     status?: string;

@@ -94,7 +94,7 @@ AppSetting
 SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除和更新通过外键、唯一约束及服务层校验共同保证一致性。核心业务规则包括：
 
 - 锁定记录不能修改、导入覆盖或删除；锁定/解锁操作本身可审计。
-- 实验编号允许重复；批量编排只校验记录存在、未锁定且仍为“待实验”，再在一个事务中写回编号。
+- 实验编号允许重复；批量编排允许记录来自多个项目，只校验记录存在、未锁定且仍为“待实验”，再按请求顺序在一个事务中写回编号。
 - 实验编排中的组合病理号由前端按 `pathology_number[-block_number]` 临时派生，只用于编排显示、排序和 Excel 导出；后端仍按记录 UUID 回写实验编号，不改台账病理号。
 - Excel 导入提交会重新校验项目归属、UUID、锁定状态和字段规则，并在一个事务中写入记录值和审计。
 - 批量删除执行时比较预览得到的完整 UUID 集合；集合变化或包含锁定记录即拒绝执行。
@@ -127,6 +127,8 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 `backend/app/services/workbook_import.py` 直接读取 ZIP 内的 workbook relationships、shared strings、inline strings、布尔和数字单元格，不把上传包解压到磁盘。解析器在按单元格列号扩充行数组前先校验坐标和 200 列上限。导入按表头映射到核心/自定义字段，字段标签/key/system key 的跨字段歧义会被拒绝；预览阶段产出逐行 `create/update/errors`，提交阶段由 `backend/app/api/imports.py` 负责二次校验和事务。
 
 导出由 `backend/app/services/workbooks.py` 生成 XLSX；请求模型限制最多 100 个工作表、每表 10,000 行/200 列、总计 2,000,000 个单元格。Electron 保存 IPC 将文件名规范化为 `.xlsx`，限制单次写入不超过 256 MiB，并要求用户确认保存路径。
+
+台账原生预览与打开复用临时 XLSX 快照和 Office/WPS COM 服务。预览范围支持选中单元格、当前项目、当前筛选结果和整本台账；当前项目范围只按项目 UUID 取数，不继承页面搜索条件。
 
 ### 6.2 DOCX 与打印
 

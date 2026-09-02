@@ -776,7 +776,7 @@ class PrintEngineRead(BaseModel):
     resolved_engine: Literal["wps", "word"] | None
 
 
-PreviewScope = Literal["selection", "filtered", "all"]
+PreviewScope = Literal["selection", "project", "filtered", "all"]
 NativePreviewAction = Literal["preview", "open"]
 NativePreviewStatus = Literal["starting", "open", "completed", "failed"]
 

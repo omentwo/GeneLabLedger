@@ -301,7 +301,7 @@ type ValidationPanelState = {
 const validationPanel = ref<ValidationPanelState | null>(null);
 const validationCommitLoading = ref(false);
 let pendingValidationAction: (() => Promise<void>) | null = null;
-const previewScope = ref<"selection" | "all">("all");
+const previewScope = ref<"selection" | "project" | "all">("all");
 const previewEngine = ref<PrintEngine>("auto");
 const previewCapabilities = ref<PreviewCapabilities | null>(null);
 const nativePreviewLoading = ref(false);
@@ -3550,9 +3550,9 @@ function nativeEngineAvailable(engine: PrintEngine): boolean {
 }
 
 function nativeEngineLabel(): string {
-  if (previewEngine.value === "word") return "Office";
+  if (previewEngine.value === "word") return "Excel";
   if (previewEngine.value === "wps") return "WPS";
-  return "Office/WPS";
+  return "Excel/WPS";
 }
 
 function sleep(milliseconds: number): Promise<void> {
@@ -3564,7 +3564,7 @@ async function monitorNativeLedgerJob(task: NativePreviewTask): Promise<void> {
   let openedNotified = false;
   for (let attempt = 0; attempt < 28_800; attempt += 1) {
     if (current.status === "failed") {
-      ElMessage.error(current.error || "Office/WPS 原生窗口打开失败");
+      ElMessage.error(current.error || "Excel/WPS 原生窗口打开失败");
       return;
     }
     if (current.status === "open" && !openedNotified) {
@@ -3583,7 +3583,7 @@ async function monitorNativeLedgerJob(task: NativePreviewTask): Promise<void> {
 async function openLedgerNative(action: NativePreviewAction): Promise<void> {
   if (!currentProject.value) return;
   if (!nativeEngineAvailable(previewEngine.value)) {
-    ElMessage.warning("当前电脑未检测到可用的 Office/WPS 表格程序");
+    ElMessage.warning("当前电脑未检测到可用的 Excel/WPS 表格程序");
     return;
   }
   const scope = previewScope.value;
@@ -3604,10 +3604,10 @@ async function openLedgerNative(action: NativePreviewAction): Promise<void> {
       print_engine: previewEngine.value,
     });
     void monitorNativeLedgerJob(task).catch((error) => {
-      ElMessage.error(error instanceof Error ? error.message : "Office/WPS 原生窗口状态读取失败");
+      ElMessage.error(error instanceof Error ? error.message : "Excel/WPS 原生窗口状态读取失败");
     });
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "无法打开 Office/WPS 原生窗口");
+    ElMessage.error(error instanceof Error ? error.message : "无法打开 Excel/WPS 原生窗口");
   } finally {
     nativePreviewLoading.value = false;
   }
@@ -5385,11 +5385,12 @@ onBeforeUnmount(() => {
               @change="savePreviewEngineSetting"
             >
               <el-option label="自动选择" value="auto" />
-              <el-option label="Microsoft Office" value="word" :disabled="!nativeEngineAvailable('word')" />
+              <el-option label="Microsoft Excel" value="word" :disabled="!nativeEngineAvailable('word')" />
               <el-option label="WPS" value="wps" :disabled="!nativeEngineAvailable('wps')" />
             </el-select>
             <el-select v-model="previewScope" class="ledger-preview-scope" aria-label="预览范围">
               <el-option label="当前选区" value="selection" :disabled="!hasGridCellSelection" />
+              <el-option label="当前项目" value="project" />
               <el-option label="整本台账" value="all" />
             </el-select>
             <el-button

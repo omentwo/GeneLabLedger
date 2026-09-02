@@ -191,6 +191,64 @@ def test_experiment_numbering_only_updates_numbers_and_remains_editable(
     assert rejected.status_code == 409
 
 
+def test_experiment_numbering_supports_multiple_ledgers_atomically(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    first = client.post(
+        "/api/records",
+        json={
+            "project_id": seeded_projects["TB"]["id"],
+            "pathology_number": "MULTI-TB",
+            "experiment_number": "TB-ORIGINAL",
+        },
+    ).json()
+    second = client.post(
+        "/api/records",
+        json={
+            "project_id": seeded_projects["BRAFV600E"]["id"],
+            "pathology_number": "MULTI-BRAF",
+            "experiment_number": "BRAF-ORIGINAL",
+        },
+    ).json()
+
+    applied = client.post(
+        "/api/records/experiment-numbers",
+        json={
+            "record_ids": [second["id"], first["id"], second["id"]],
+            "prefix": "MIXED",
+        },
+    )
+    assert applied.status_code == 200, applied.text
+    assert [record["id"] for record in applied.json()] == [second["id"], first["id"]]
+    assert [record["experiment_number"] for record in applied.json()] == ["MIXED-1", "MIXED-2"]
+
+    assert client.patch(
+        f"/api/records/{first['id']}", json={"experiment_number": "TB-BEFORE-BLOCKED"}
+    ).status_code == 200
+    assert client.patch(
+        f"/api/records/{second['id']}", json={"experiment_number": "BRAF-BEFORE-BLOCKED"}
+    ).status_code == 200
+    assert (
+        client.put(f"/api/records/{second['id']}/lock", json={"locked": True}).status_code
+        == 200
+    )
+
+    blocked = client.post(
+        "/api/records/experiment-numbers",
+        json={"record_ids": [first["id"], second["id"]], "prefix": "BLOCKED"},
+    )
+    assert blocked.status_code == 409
+    assert (
+        client.get(f"/api/records/{first['id']}").json()["experiment_number"]
+        == "TB-BEFORE-BLOCKED"
+    )
+    assert (
+        client.get(f"/api/records/{second['id']}").json()["experiment_number"]
+        == "BRAF-BEFORE-BLOCKED"
+    )
+
+
 def test_block_number_is_independent_and_numbering_keeps_canonical_pathology(
     client: TestClient,
     seeded_projects: dict[str, dict],
