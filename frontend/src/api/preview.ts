@@ -6,6 +6,10 @@ import type {
   PrintEngine,
 } from "@/types/api";
 
+export type LedgerPreviewScope = "selection" | "project" | "filtered" | "all";
+
+export const DEFAULT_LEDGER_PREVIEW_SCOPE: LedgerPreviewScope = "project";
+
 export function getPreviewCapabilities(): Promise<PreviewCapabilities> {
   return apiRequest<PreviewCapabilities>("/preview/capabilities");
 }
@@ -14,7 +18,7 @@ export function createLedgerNativePreview(
   ledgerId: string,
   payload: {
     action: NativePreviewAction;
-    scope: "selection" | "project" | "filtered" | "all";
+    scope: LedgerPreviewScope;
     cells?: Array<{ record_id: string; field_id: string }>;
     search?: string;
     status?: string;

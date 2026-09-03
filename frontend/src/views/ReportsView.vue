@@ -27,6 +27,11 @@ import {
 } from "@/api/reports";
 import { getSetting, putSetting } from "@/api/system";
 import { useAppStore } from "@/stores/app";
+import {
+  DEFAULT_REPORT_PRINT_ORDER,
+  reportRecordIdsInPrintOrder,
+  type ReportPrintOrder,
+} from "@/utils/reportPrint";
 import type {
   MappingSourceType,
   PrintEngine,
@@ -58,6 +63,7 @@ const showGenerated = ref(false);
 const printers = ref<PrinterInfo[]>([]);
 const printEngines = ref<PrintEngineStatus[]>([]);
 const selectedPrintEngine = ref<PrintEngine>("auto");
+const selectedPrintOrder = ref<ReportPrintOrder>(DEFAULT_REPORT_PRINT_ORDER);
 const selectedPrinterName = ref("");
 const printing = ref(false);
 const previewCapabilities = ref<PreviewCapabilities | null>(null);
@@ -294,9 +300,13 @@ async function directPrintSelected(): Promise<void> {
     ElMessage.warning("未检测到可用打印机");
     return;
   }
+  const printOrderDescription =
+    selectedPrintOrder.value === "descending"
+      ? "倒序（先打印末条，最后打印首条）"
+      : "正序（先打印首条，最后打印末条）";
   try {
     await ElMessageBox.confirm(
-      `确认把 ${selectedRecords.value.length} 份报告直接发送到打印机“${selectedPrinterName.value}”？`,
+      `确认按${printOrderDescription}把 ${selectedRecords.value.length} 份报告直接发送到打印机“${selectedPrinterName.value}”？`,
       "批量直接打印",
       {
         confirmButtonText: "确认打印",
@@ -311,9 +321,14 @@ async function directPrintSelected(): Promise<void> {
   printing.value = true;
   try {
     window.localStorage.setItem("report_printer_name", selectedPrinterName.value);
+    const recordIds = reportRecordIdsInPrintOrder(
+      records.value,
+      selectedRecords.value,
+      selectedPrintOrder.value,
+    );
     const result = await printReports(
       activeVersion.value.id,
-      selectedRecords.value.map((record) => record.id),
+      recordIds,
       selectedPrinterName.value,
       selectedPrintEngine.value,
     );
@@ -680,6 +695,14 @@ onMounted(() => {
               :label="printer.is_default ? `${printer.name}（默认）` : printer.name"
               :value="printer.name"
             />
+          </el-select>
+          <el-select
+            v-model="selectedPrintOrder"
+            aria-label="打印顺序"
+            style="width: 190px"
+          >
+            <el-option label="倒序打印（末条 → 首条）" value="descending" />
+            <el-option label="正序打印（首条 → 末条）" value="ascending" />
           </el-select>
           <el-button
             :loading="nativePreviewLoading"

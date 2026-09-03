@@ -32,8 +32,10 @@ import { useRoute, useRouter } from "vue-router";
 import { commitWorkbookImport, previewWorkbookImport } from "@/api/imports";
 import {
   createLedgerNativePreview,
+  DEFAULT_LEDGER_PREVIEW_SCOPE,
   getNativePreviewStatus,
   getPreviewCapabilities,
+  type LedgerPreviewScope,
 } from "@/api/preview";
 import {
   DEFAULT_LEDGER_DISPLAY_SETTINGS,
@@ -301,7 +303,7 @@ type ValidationPanelState = {
 const validationPanel = ref<ValidationPanelState | null>(null);
 const validationCommitLoading = ref(false);
 let pendingValidationAction: (() => Promise<void>) | null = null;
-const previewScope = ref<"selection" | "project" | "all">("all");
+const previewScope = ref<LedgerPreviewScope>(DEFAULT_LEDGER_PREVIEW_SCOPE);
 const previewEngine = ref<PrintEngine>("auto");
 const previewCapabilities = ref<PreviewCapabilities | null>(null);
 const nativePreviewLoading = ref(false);
@@ -5404,7 +5406,7 @@ onBeforeUnmount(() => {
             </el-select>
             <el-select v-model="previewScope" class="ledger-preview-scope" aria-label="预览范围">
               <el-option label="当前选区" value="selection" :disabled="!hasGridCellSelection" />
-              <el-option label="当前项目" value="project" />
+              <el-option label="当前台账" value="project" />
               <el-option label="整本台账" value="all" />
             </el-select>
             <el-button
@@ -5985,6 +5987,7 @@ onBeforeUnmount(() => {
             type="button"
             role="tab"
             :aria-selected="project.id === activeProjectId"
+            :title="project.name"
             @click="selectProject(project.id)"
           >
             <span>{{ project.name }}</span>
@@ -6600,37 +6603,94 @@ onBeforeUnmount(() => {
 }
 
 .project-tab {
+  position: relative;
+  isolation: isolate;
   display: flex;
-  min-width: 96px;
-  max-width: 180px;
-  min-height: 30px;
+  min-width: 80px;
+  max-width: 164px;
+  min-height: 28px;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--app-border);
-  border-bottom-color: #cfd4dc;
-  border-radius: 7px 7px 0 0;
-  color: #344054;
-  background: #f2f4f7;
-  padding: 5px 12px;
+  overflow: hidden;
+  border: 1px solid #d9e1ed;
+  border-bottom-color: #c7d1df;
+  border-radius: 9px 9px 3px 3px;
+  color: #64748b;
+  background: linear-gradient(180deg, #ffffff 0%, #eef2f7 100%);
+  padding: 5px 10px;
   text-align: center;
   cursor: pointer;
+  transition:
+    color 160ms ease,
+    border-color 160ms ease,
+    background 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
   white-space: nowrap;
 }
 
-.project-tab:hover {
-  border-color: #84adff;
+.project-tab::before {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  background: linear-gradient(118deg, #07152f 0%, #0b4fd6 58%, #6d28d9 100%);
+  content: "";
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+
+.project-tab::after {
+  position: absolute;
+  top: 0;
+  right: 12px;
+  left: 12px;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, #67e8f9 35%, #c4b5fd 70%, transparent);
+  box-shadow: 0 0 9px rgb(103 232 249 / 75%);
+  content: "";
+  opacity: 0;
+}
+
+.project-tab:hover:not(.active) {
+  border-color: #60a5fa;
+  color: #1d4ed8;
+  background: linear-gradient(180deg, #ffffff 0%, #edf6ff 100%);
+  box-shadow: 0 -3px 10px rgb(37 99 235 / 10%);
+  transform: translateY(-1px);
 }
 
 .project-tab.active {
-  border-color: var(--app-primary);
-  border-bottom-color: #fff;
-  color: #0958d9;
-  background: #fff;
-  box-shadow: inset 0 2px 0 var(--app-primary);
+  border-color: #2563eb;
+  border-bottom-color: #312e81;
+  color: #ffffff;
+  background: #0b4fd6;
+  box-shadow:
+    0 -5px 16px rgb(37 99 235 / 28%),
+    inset 0 1px 0 rgb(255 255 255 / 24%);
+  transform: translateY(-1px);
+}
+
+.project-tab.active::before,
+.project-tab.active::after {
+  opacity: 1;
+}
+
+.project-tab:focus-visible {
+  outline: 2px solid #22d3ee;
+  outline-offset: 2px;
 }
 
 .project-tab span {
-  font-weight: 700;
+  position: relative;
+  z-index: 1;
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  line-height: 1.2;
+  text-overflow: ellipsis;
 }
 
 .manage-project-button {

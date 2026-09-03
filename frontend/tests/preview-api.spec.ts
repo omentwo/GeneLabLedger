@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createLedgerNativePreview } from "@/api/preview";
+import {
+  createLedgerNativePreview,
+  DEFAULT_LEDGER_PREVIEW_SCOPE,
+} from "@/api/preview";
 
 describe("ledger native preview API", () => {
   afterEach(() => {
@@ -44,6 +47,7 @@ describe("ledger native preview API", () => {
   });
 
   it("sends the current-project scope for Excel or WPS preview", async () => {
+    expect(DEFAULT_LEDGER_PREVIEW_SCOPE).toBe("project");
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({

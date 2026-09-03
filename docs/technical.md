@@ -114,7 +114,7 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 | 台账 | `GET/POST /api/records`；`GET/PATCH/DELETE /api/records/{record_id}`；`PUT /api/records/{record_id}/lock`；`POST /api/records/{record_id}/assign-project`；`PUT /api/records/report-status` | 记录查询、CRUD、相对目标行插入、锁定、分配项目、报告标记 |
 | 动态查询与批量单元格 | `POST /api/records/query`；`POST /api/records/query/ids`；`POST /api/records/cell-batches/preview`；`POST /api/records/cell-batches/commit`；`POST /api/records/replace/preview`；`POST /api/records/replace/commit` | 动态字段分页筛选排序、跨页 ID、粘贴/填充与查找替换的预检查和原子提交 |
 | 编号与批删 | `POST /api/records/experiment-numbers`；`POST /api/records/bulk-delete/preview`；`POST /api/records/bulk-delete/execute` | 实验编号原子回写、预览/执行批量删除 |
-| 报告 | `GET/POST /api/report-templates`；`POST /api/report-templates/{template_id}/versions`；`PUT /api/report-template-versions/{version_id}/mappings`；`DELETE /api/report-templates/{template_id}`；`GET /api/printers`；`GET /api/print-engines`；`POST /api/reports/print` | 模板版本、映射、打印机和直接打印 |
+| 报告 | `GET/POST /api/report-templates`；`POST /api/report-templates/{template_id}/versions`；`PUT /api/report-template-versions/{version_id}/mappings`；`DELETE /api/report-templates/{template_id}`；`GET /api/printers`；`GET /api/print-engines`；`POST /api/reports/print` | 模板版本、映射、打印机和直接打印；前端默认按台账列表倒序提交所选记录，后端保持请求顺序逐份打印 |
 | Excel | `POST /api/exports/workbook`；`POST /api/imports/workbook/preview`；`POST /api/imports/workbook/commit` | XLSX 生成、预览导入、原子提交 |
 | 自动导出 | `GET /api/auto-export/config`；`GET/POST /api/auto-export/tasks`；`PUT/DELETE /api/auto-export/tasks/{task_id}`；`POST /api/auto-export/tasks/{task_id}/run`；`GET /api/auto-export/tasks/{task_id}/runs`；`POST /api/auto-export/validate-cron` | 任务配置、立即执行、历史查询、Cron 校验 |
 
