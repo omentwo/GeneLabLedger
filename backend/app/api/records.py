@@ -5,7 +5,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import Float, String, and_, cast, func, or_, select
+from sqlalchemy import String, and_, cast, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -229,7 +229,10 @@ def _complex_record_statement(
             text = item.value or ""
             filters.append(func.lower(cast(expression, String)).like(f"%{text.lower()}%"))
         elif item.operator == "equals":
-            filters.append(cast(expression, String) == (item.value or ""))
+            filters.append(
+                or_(expression.is_(None), cast(expression, String) == "")
+                if not item.value else cast(expression, String) == item.value
+            )
         elif item.operator == "in":
             selected_values = list(dict.fromkeys(item.values))
             includes_empty = "" in selected_values
@@ -263,7 +266,7 @@ def _complex_record_statement(
                     date_expression <= (end_value if field.is_core else end_value.isoformat())
                 )
         elif item.operator == "number_between":
-            number_expression = cast(expression, Float)
+            number_expression = func.strict_number(expression)
             try:
                 if item.start not in {None, ""}:
                     filters.append(number_expression >= float(item.start))
@@ -276,7 +279,7 @@ def _complex_record_statement(
         sort_field = fields[payload.sort.field_id]
         sort_expression = _query_field_expression(sort_field)
         if sort_field.data_type == "number":
-            sort_expression = cast(sort_expression, Float)
+            sort_expression = func.strict_number(sort_expression)
         order = sort_expression.desc() if payload.sort.direction == "desc" else sort_expression.asc()
         statement = statement.order_by(order, ProjectRecord.position.asc(), ProjectRecord.id.asc())
     else:

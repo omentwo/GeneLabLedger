@@ -208,12 +208,12 @@ def replace_record_values(
     for field_id, text in validated.items():
         if text == "":
             if field_id in existing:
-                session.delete(existing[field_id])
+                record.values.remove(existing[field_id])
             continue
         if field_id in existing:
             existing[field_id].value_text = text
         else:
-            session.add(RecordValue(record_id=record.id, field_id=field_id, value_text=text))
+            record.values.append(RecordValue(record_id=record.id, field_id=field_id, value_text=text))
 
 
 def assign_record_to_project(

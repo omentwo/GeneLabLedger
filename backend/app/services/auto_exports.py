@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import calendar
+import json
 import logging
 import re
 from contextlib import suppress
@@ -16,6 +17,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.audit import audit
 from app.database import Database
 from app.models import (
+    AppSetting,
     AutoExportRun,
     AutoExportTask,
     FieldDefinition,
@@ -295,9 +297,7 @@ def create_export_file(session: Session, task: AutoExportTask) -> Path:
         raise ValueError("任务没有可导出的检测项目")
     timestamp = datetime.now(LOCAL_TIMEZONE).strftime("%Y%m%d_%H%M%S")
     unique_suffix = f"{task.id[:8]}_{uuid4().hex[:8]}"
-    path = output_directory / (
-        f"{_safe_filename(task.name)}_{timestamp}_{unique_suffix}.xlsx"
-    )
+    path = output_directory / (f"{_safe_filename(task.name)}_{timestamp}_{unique_suffix}.xlsx")
     write_xlsx(path, sheets)
     return path
 
@@ -310,7 +310,35 @@ def _is_path_inside(path: Path, directory: Path) -> bool:
         return False
 
 
+def _finish_export_cleanup(session: Session, pending: AppSetting) -> None:
+    metadata = json.loads(pending.value)
+    path = Path(metadata["path"])
+    if not _is_path_inside(path, Path(metadata["directory"])):
+        return
+    run = session.get(AutoExportRun, metadata["run_id"])
+    if run:
+        run.file_path = None
+    # Keep a durable cleanup reference before deleting the physical file.
+    # A failed commit cannot leave a run pointing at an already deleted file.
+    session.commit()
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        if run:
+            run.file_path = str(path)
+        session.commit()
+        logger.warning("旧导出文件暂时无法清理，将在下次运行重试：%s", path)
+        return
+    session.delete(pending)
+    session.commit()
+
+
 def apply_retention_policy(session: Session, task: AutoExportTask) -> None:
+    prefix = f"auto_export_cleanup:{task.id}:"
+    pending_items = list(session.scalars(select(AppSetting).where(AppSetting.key.startswith(prefix))))
+    pending_ids = {json.loads(item.value)["run_id"] for item in pending_items}
+    for item in pending_items:
+        _finish_export_cleanup(session, item)
     if task.retention_count is None:
         return
     successful_runs = list(
@@ -322,13 +350,23 @@ def apply_retention_policy(session: Session, task: AutoExportTask) -> None:
     )
     output_directory = validate_output_directory(task.output_directory)
     for old_run in successful_runs[task.retention_count :]:
-        if not old_run.file_path:
+        if not old_run.file_path or old_run.id in pending_ids:
             continue
         file_path = Path(old_run.file_path)
-        if _is_path_inside(file_path, output_directory):
-            with suppress(FileNotFoundError):
-                file_path.unlink()
-        old_run.file_path = None
+        if not _is_path_inside(file_path, output_directory):
+            continue
+        pending = AppSetting(
+            key=f"{prefix}{old_run.id}",
+            value=json.dumps(
+                {
+                    "run_id": old_run.id,
+                    "path": str(file_path),
+                    "directory": str(output_directory),
+                }
+            ),
+        )
+        session.add(pending)
+        _finish_export_cleanup(session, pending)
 
 
 def execute_auto_export_task(database: Database, task_id: str, trigger: str) -> AutoExportRun:
@@ -341,6 +379,7 @@ def execute_auto_export_task(database: Database, task_id: str, trigger: str) -> 
         session.commit()
         run_id = run.id
 
+    output_path: Path | None = None
     attempts = 0
     last_error: Exception | None = None
     while True:
@@ -350,7 +389,8 @@ def execute_auto_export_task(database: Database, task_id: str, trigger: str) -> 
                 task = session.get(AutoExportTask, task_id)
                 if not task:
                     raise ValueError("自动导出任务不存在")
-                output_path = create_export_file(session, task)
+                if output_path is None:
+                    output_path = create_export_file(session, task)
                 run = session.get(AutoExportRun, run_id)
                 if not run:
                     raise ValueError("自动导出执行记录不存在")
@@ -363,8 +403,6 @@ def execute_auto_export_task(database: Database, task_id: str, trigger: str) -> 
                 task.last_status = "success"
                 task.last_message = f"已导出到 {output_path}"
                 task.next_run_at = compute_next_run(task, finished_at) if task.enabled else None
-                session.flush()
-                apply_retention_policy(session, task)
                 audit(
                     session,
                     "auto_export.run.success",
@@ -374,6 +412,15 @@ def execute_auto_export_task(database: Database, task_id: str, trigger: str) -> 
                 )
                 session.commit()
                 session.refresh(run)
+                session.expunge(run)
+                # Export success is durable before any old file is touched. Cleanup
+                # failure must never regenerate this export or mark its run failed.
+                try:
+                    apply_retention_policy(session, task)
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                    logger.exception("自动导出已成功，保留策略清理失败")
                 return run
         except Exception as error:  # noqa: BLE001
             last_error = error
@@ -393,6 +440,7 @@ def execute_auto_export_task(database: Database, task_id: str, trigger: str) -> 
         run.status = "failed"
         run.attempt_count = attempts
         run.error_message = message
+        run.file_path = str(output_path) if output_path else None
         run.finished_at = finished_at
         task.last_run_at = finished_at
         task.last_status = "failed"
@@ -416,17 +464,27 @@ class AutoExportScheduler:
         self.poll_seconds = poll_seconds
         self._loop_task: asyncio.Task[None] | None = None
         self._running_task_ids: set[str] = set()
+        self._jobs: set[asyncio.Task] = set()
+        self._stopping = False
 
     async def start(self) -> None:
         await asyncio.to_thread(self._recover_interrupted_runs)
         self._loop_task = asyncio.create_task(self._loop())
 
     async def stop(self) -> None:
-        if not self._loop_task:
-            return
-        self._loop_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await self._loop_task
+        self._stopping = True
+        if self._loop_task:
+            self._loop_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._loop_task
+            self._loop_task = None
+        if self._jobs:
+            await asyncio.gather(*tuple(self._jobs), return_exceptions=True)
+
+    def _job_done(self, job: asyncio.Task) -> None:
+        self._jobs.discard(job)
+        if not job.cancelled() and job.exception() is not None:
+            logger.error("自动导出任务异常", exc_info=job.exception())
 
     def _recover_interrupted_runs(self) -> None:
         now = utc_now()
@@ -463,17 +521,30 @@ class AutoExportScheduler:
                 due_task_ids = await asyncio.to_thread(self._due_task_ids)
                 for task_id in due_task_ids:
                     if task_id not in self._running_task_ids:
-                        asyncio.create_task(self.run_task(task_id, "scheduled"))
+                        job = asyncio.create_task(self.run_task(task_id, "scheduled"))
+                        self._jobs.add(job)
+                        job.add_done_callback(self._job_done)
             except Exception:  # noqa: BLE001
                 logger.exception("自动导出调度器轮询失败")
             await asyncio.sleep(self.poll_seconds)
 
     async def run_task(self, task_id: str, trigger: str = "manual") -> AutoExportRun:
+        if self._stopping:
+            raise AutoExportBusyError("应用正在退出")
         if task_id in self._running_task_ids:
             raise AutoExportBusyError("该任务正在执行，请稍后再试")
         self._running_task_ids.add(task_id)
         try:
-            return await asyncio.to_thread(execute_auto_export_task, self.database, task_id, trigger)
+            job = asyncio.create_task(
+                asyncio.to_thread(execute_auto_export_task, self.database, task_id, trigger)
+            )
+            self._jobs.add(job)
+            job.add_done_callback(self._job_done)
+            try:
+                return await asyncio.shield(job)
+            except asyncio.CancelledError:
+                await job
+                raise
         finally:
             self._running_task_ids.discard(task_id)
 

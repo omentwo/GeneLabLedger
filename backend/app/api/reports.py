@@ -212,9 +212,9 @@ async def create_report_template(
     content = await read_docx_upload(file, settings)
     template = ReportTemplate(project_id=project_id, name=clean_name)
     session.add(template)
-    session.flush()
     target_path: Path | None = None
     try:
+        session.flush()
         version_id = str(uuid.uuid4())
         target_path, placeholders = store_template_version(
             settings,
@@ -249,6 +249,11 @@ async def create_report_template(
             {"project_id": project_id, "name": clean_name, "placeholders": placeholders},
         )
         session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        if target_path:
+            shutil.rmtree(target_path.parent, ignore_errors=True)
+        raise HTTPException(status_code=409, detail="当前项目已有同名模板") from error
     except Exception:
         session.rollback()
         if target_path:

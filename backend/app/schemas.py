@@ -897,6 +897,7 @@ class AppSettingRead(BaseModel):
 
 class AppSettingUpdate(BaseModel):
     value: object
+    expected_value: object = None
 
 
 WorkbookCell = str | int | float | bool | None
@@ -927,63 +928,6 @@ class WorkbookExportCreate(BaseModel):
         if cell_count > 2_000_000:
             raise ValueError("导出内容过大，请缩小项目或时间范围")
         return self
-
-
-class WorkbookImportRow(BaseModel):
-    row_number: int = Field(ge=2)
-    record_id: str | None = None
-    pathology_number: str = Field(min_length=1, max_length=160)
-    block_number: str | None = Field(default=None, max_length=80)
-    status: RecordStatus = "待实验"
-    experiment_date: date | None = None
-    experiment_number: str | None = Field(default=None, max_length=80)
-    values: dict[str, str] = Field(default_factory=dict)
-
-    @field_validator("pathology_number")
-    @classmethod
-    def clean_pathology_number(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("病理号不能为空")
-        return value
-
-    @field_validator("block_number", "experiment_number")
-    @classmethod
-    def clean_experiment_number(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        value = value.strip()
-        return value or None
-
-
-class WorkbookImportPreviewRow(WorkbookImportRow):
-    action: Literal["create", "update"]
-    errors: list[str] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
-    suggestions: list[str] = Field(default_factory=list)
-
-
-class WorkbookImportPreviewRead(BaseModel):
-    filename: str
-    project_id: str
-    selected_sheet: str
-    available_sheets: list[str]
-    rows: list[WorkbookImportPreviewRow]
-    create_count: int
-    update_count: int
-    errors: list[str]
-
-
-class WorkbookImportCommit(BaseModel):
-    project_id: str
-    rows: list[WorkbookImportRow] = Field(min_length=1, max_length=10000)
-    accept_warnings: bool = False
-
-
-class WorkbookImportResult(BaseModel):
-    created: int
-    updated: int
-    record_ids: list[str]
 
 
 class BulkDeleteFilter(BaseModel):

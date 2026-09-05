@@ -45,7 +45,6 @@ describe("ledger project layout settings", () => {
           visible: { kind: "text", value: "阳性" },
           hidden: { kind: "options", values: ["旧值"] },
         },
-        frozenUntilFieldId: "visible",
       },
     );
 
@@ -55,23 +54,21 @@ describe("ledger project layout settings", () => {
         visible: { kind: "text", value: "阳性" },
         hidden: { kind: "options", values: ["旧值"] },
       },
-      frozen_until_field_id: "visible",
     });
     expect(resolveLedgerProjectLayout(document, "project-1", fields)).toEqual({
       sort: { fieldId: "visible", order: "descending" },
       filters: { visible: { kind: "text", value: "阳性" } },
-      frozenUntilFieldId: "visible",
     });
   });
 
-  it("drops malformed saved values instead of applying an invalid layout", () => {
+  it("drops malformed values and ignores the retired frozen-column setting", () => {
     const document = normalizeLedgerLayoutSettings({
       version: 1,
       projects: {
         "project-1": {
           sort: { field_id: "visible", direction: "sideways" },
           filters: { visible: { kind: "options", values: ["A", 1] } },
-          frozen_until_field_id: 12,
+          frozen_until_field_id: "retired-setting",
         },
       },
     });
@@ -79,7 +76,6 @@ describe("ledger project layout settings", () => {
     expect(document.projects["project-1"]).toEqual({
       sort: null,
       filters: { visible: { kind: "options", values: ["A"] } },
-      frozen_until_field_id: null,
     });
   });
 });

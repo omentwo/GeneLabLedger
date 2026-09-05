@@ -281,35 +281,6 @@ export interface RecordOperationApplyResult {
   deleted_ids: string[];
 }
 
-export interface WorkbookImportRow {
-  row_number: number;
-  record_id: string | null;
-  pathology_number: string;
-  block_number?: string | null;
-  status: RecordStatus;
-  experiment_date: string | null;
-  experiment_number: string | null;
-  values: Record<string, string>;
-}
-
-export interface WorkbookImportPreviewRow extends WorkbookImportRow {
-  action: "create" | "update";
-  errors: string[];
-  warnings: string[];
-  suggestions: string[];
-}
-
-export interface WorkbookImportPreview {
-  filename: string;
-  project_id: string;
-  selected_sheet: string;
-  available_sheets: string[];
-  rows: WorkbookImportPreviewRow[];
-  create_count: number;
-  update_count: number;
-  errors: string[];
-}
-
 export type BulkDeleteDateField = "experiment_date" | "created_at" | "updated_at";
 
 export interface BulkDeleteFilter {

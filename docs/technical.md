@@ -15,7 +15,7 @@ Electron 主进程
         └─ FastAPI / Uvicorn（127.0.0.1:<随机端口>）
               ├─ SQLAlchemy 2 + SQLite
               ├─ DOCX Open XML + Word/WPS COM 打印
-              ├─ XLSX Open XML 解析与生成
+              ├─ XLSX Open XML 生成
               └─ asyncio 自动导出调度器
 ```
 
@@ -32,7 +32,7 @@ Electron 负责桌面边界和文件对话框，Vue 前端只通过 HTTP API 和
 | UI | Element Plus、Tailwind CSS 4（未启用 Preflight） |
 | 后端 | Python 3.13、FastAPI、Uvicorn、Pydantic v2 |
 | 持久化 | SQLAlchemy 2、SQLite、Alembic |
-| Excel | 标准库 `zipfile`/XML 的 XLSX 读取与写入 |
+| Excel | `POST /api/exports/workbook` | XLSX 生成（导入已移除） |
 | 文档与打印 | DOCX Open XML、pywin32 COM、Word/WPS |
 | 任务 | Python `asyncio` 自动导出调度器 |
 | 测试与质量 | pytest、HTTPX、Vitest/jsdom、vue-tsc、Ruff |
@@ -93,10 +93,9 @@ AppSetting
 
 SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除和更新通过外键、唯一约束及服务层校验共同保证一致性。核心业务规则包括：
 
-- 锁定记录不能修改、导入覆盖或删除；锁定/解锁操作本身可审计。
+- 锁定记录不能修改或删除；锁定/解锁操作本身可审计。
 - 实验编号允许重复；批量编排允许记录来自多个项目，只校验记录存在、未锁定且仍为“待实验”，再按请求顺序在一个事务中写回编号。
 - 实验编排中的组合病理号由前端按 `pathology_number[-block_number]` 临时派生，用于编排显示、排序和 Excel 导出；报告映射选择 `pathology_with_block` 时由后端按同一规则临时生成。两者都不改台账中的病理号或蜡块号。
-- Excel 导入提交会重新校验项目归属、UUID、锁定状态和字段规则，并在一个事务中写入记录值和审计。
 - 批量删除执行时比较预览得到的完整 UUID 集合；集合变化或包含锁定记录即拒绝执行。
 - 单元格粘贴、填充和查找替换先预检查字段规则与预期旧值，再在一个事务中提交；严格错误阻止整批写入，锁定记录跳过，警告需显式确认。
 
@@ -115,7 +114,7 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 | 动态查询与批量单元格 | `POST /api/records/query`；`POST /api/records/query/ids`；`POST /api/records/cell-batches/preview`；`POST /api/records/cell-batches/commit`；`POST /api/records/replace/preview`；`POST /api/records/replace/commit` | 动态字段分页筛选排序、跨页 ID、粘贴/填充与查找替换的预检查和原子提交 |
 | 编号与批删 | `POST /api/records/experiment-numbers`；`POST /api/records/bulk-delete/preview`；`POST /api/records/bulk-delete/execute` | 实验编号原子回写、预览/执行批量删除 |
 | 报告 | `GET/POST /api/report-templates`；`POST /api/report-templates/{template_id}/versions`；`PUT /api/report-template-versions/{version_id}/mappings`；`DELETE /api/report-templates/{template_id}`；`GET /api/printers`；`GET /api/print-engines`；`POST /api/reports/print` | 模板版本、映射、打印机和直接打印；前端默认按台账列表倒序提交所选记录，后端保持请求顺序逐份打印 |
-| Excel | `POST /api/exports/workbook`；`POST /api/imports/workbook/preview`；`POST /api/imports/workbook/commit` | XLSX 生成、预览导入、原子提交 |
+| Excel | `POST /api/exports/workbook` | XLSX 生成（导入已移除） |
 | 自动导出 | `GET /api/auto-export/config`；`GET/POST /api/auto-export/tasks`；`PUT/DELETE /api/auto-export/tasks/{task_id}`；`POST /api/auto-export/tasks/{task_id}/run`；`GET /api/auto-export/tasks/{task_id}/runs`；`POST /api/auto-export/validate-cron` | 任务配置、立即执行、历史查询、Cron 校验 |
 
 兼容记录列表支持项目、状态、实验日期、报告状态、关键字和 `limit/offset`。主台账使用复杂查询接口，每页固定 200 条，并支持动态字段筛选、排序和筛选结果的完整 ID 集合。未指定字段排序时按项目内 `position` 返回；创建请求可用 `insert_before_record_id` 或 `insert_after_record_id` 指定相对插入位置，其他新增路径追加到末尾。
@@ -124,7 +123,7 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 
 ### 6.1 XLSX
 
-`backend/app/services/workbook_import.py` 直接读取 ZIP 内的 workbook relationships、shared strings、inline strings、布尔和数字单元格，不把上传包解压到磁盘。解析器在按单元格列号扩充行数组前先校验坐标和 200 列上限。导入按表头映射到核心/自定义字段，字段标签/key/system key 的跨字段歧义会被拒绝；预览阶段产出逐行 `create/update/errors`，提交阶段由 `backend/app/api/imports.py` 负责二次校验和事务。
+Excel 导入入口、API 和解析服务已移除；粘贴使用单元格批量预检/提交接口。
 
 导出由 `backend/app/services/workbooks.py` 生成 XLSX；请求模型限制最多 100 个工作表、每表 10,000 行/200 列、总计 2,000,000 个单元格。Electron 保存 IPC 将文件名规范化为 `.xlsx`，限制单次写入不超过 256 MiB，并要求用户确认保存路径。
 
@@ -143,13 +142,13 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 - 主窗口和快速录入 BrowserWindow 均使用 `contextIsolation=true`、`nodeIntegration=false`、`sandbox=true`；渲染进程只能使用 `preload.cjs` 暴露的白名单能力。
 - 渲染器自行调用 `window.open` 仍会被拒绝，生产导航只允许打包入口及其 hash 路由。普通桌面 IPC 只接受主窗口发送者；打开快速录入只允许主窗口调用，返回主程序及变更通知只允许当前快速录入窗口调用。
 - 后端仅绑定 `127.0.0.1`，CORS 只允许 `null` 和本地 Vite origin。当前没有用户认证，文件系统和数据目录权限由 Windows 环境负责。
-- 自动导出同一任务使用运行中集合避免重复执行；批量单元格预览 token 在提交前原子认领，事务失败时释放、成功时消费；打印、导入、批删和编号回写均在服务层完成关键状态复核。
+- 自动导出同一任务使用运行中集合避免重复执行；批量单元格预览 token 在提交前原子认领，事务失败时释放、成功时消费；打印、批删和编号回写均在服务层完成关键状态复核。
 
 ## 8. 配置、迁移与数据恢复
 
 主要环境变量使用 `GENE_LEDGER_` 前缀：`DATA_DIR`、`DATABASE_URL`、`HOST`、`PORT`、`AUTO_CREATE_SCHEMA`、`MAX_TEMPLATE_SIZE_MB`、`PREVIEW_TTL_SECONDS`、`AUDIT_LOG_RETENTION_DAYS`、`AUDIT_LOG_MAX_ROWS`。PDF 打印预览默认保留 24 小时，启动及生成新预览时会清理过期文件。桌面启动通过命令行参数覆盖数据目录、主机和端口。
 
-迁移脚本位于 `backend/migrations/versions/`。历史迁移 `e5f6a7b8c9d0` 曾增加字段验证配置和项目命名视图；`f1a2b3c4d5e6` 移除已退役的命名视图表。台账排序、筛选和冻结改由通用 `AppSetting` 中的 `ledger_layout_settings` 按项目保存，表头顺序、宽度和隐藏仍由 `FieldDefinition` 管理。启动检测到旧 SQLite 结构时，会先在数据目录的 `backups/` 下生成带时间戳的数据库副本，再执行迁移或桌面兼容升级；报告模板目录仍应纳入外部备份。
+迁移脚本位于 `backend/migrations/versions/`。历史迁移 `e5f6a7b8c9d0` 曾增加字段验证配置和项目命名视图；`f1a2b3c4d5e6` 移除已退役的命名视图表。台账排序和筛选改由通用 `AppSetting` 中的 `ledger_layout_settings` 按项目保存，表头顺序、宽度和隐藏仍由 `FieldDefinition` 管理。启动检测到旧 SQLite 结构时，会先在数据目录的 `backups/` 下生成带时间戳的数据库副本，再执行迁移或桌面兼容升级；报告模板目录仍应纳入外部备份。
 
 普通开发后端的初始化流程由 `backend/run_backend.ps1` 执行：必要时 `uv sync --dev`，构建前端，运行 `alembic upgrade head`，再启动 `uvicorn app.main:app --host 127.0.0.1 --port 8000`。桌面 launcher 使用 `auto_create_schema=True`，不应把该行为误认为 `Settings` 的默认值。
 
@@ -180,11 +179,9 @@ backend/app/models.py                  ORM 模型与约束
 backend/app/api/system.py              健康、审计、设置
 backend/app/api/projects.py            项目、动态字段、批量表头与验证规则
 backend/app/api/records.py             台账、复杂查询、单元格批处理、编号与批量删除
-backend/app/api/imports.py              Excel 预览与提交
 backend/app/api/exports.py              Excel 字节流导出
 backend/app/api/reports.py              模板、映射、打印
 backend/app/api/auto_exports.py         自动导出任务与运行历史
-backend/app/services/workbook_import.py XLSX 解析
 backend/app/services/workbooks.py       XLSX 生成
 backend/app/services/docx_template.py   DOCX 占位符处理
 backend/app/services/cell_batches.py    单元格预检查、并发校验与原子提交
@@ -197,7 +194,7 @@ frontend/electron/preload.cjs           IPC 白名单桥接
 frontend/src/router/index.ts            页面路由
 frontend/src/views/QuickEntryView.vue   独立快速录入、未出报告病理号列表与快捷修改
 frontend/src/utils/quickEntry.ts         快捷字段配置、值规范化和提交载荷
-frontend/src/utils/ledgerLayoutSettings.ts 按项目保存台账排序、筛选和冻结
+frontend/src/utils/ledgerLayoutSettings.ts 按项目保存台账排序和筛选
 frontend/src/utils/ledgerClipboard.ts    台账选区复制载荷与跨应用文本矩阵
 frontend/src/views/                    各业务页面
 ```

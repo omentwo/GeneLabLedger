@@ -25,8 +25,12 @@ const picker = ref<HTMLInputElement>();
 function openPicker(): void {
   if (props.readonly || !picker.value) return;
   const input = picker.value as HTMLInputElement & { showPicker?: () => void };
-  if (input.showPicker) input.showPicker();
-  else input.click();
+  try {
+    if (input.showPicker) input.showPicker();
+    else input.click();
+  } catch {
+    input.click();
+  }
 }
 
 function applyPicker(event: Event): void {
@@ -84,13 +88,13 @@ function applyPicker(event: Event): void {
   place-items: center;
   border: 0;
   border-radius: 6px;
-  color: #667085;
+  color: var(--app-muted);
   background: transparent;
   cursor: pointer;
 }
 
 .date-trigger:hover {
-  color: var(--app-primary);
+  color: var(--app-primary-text);
   background: var(--app-primary-soft);
 }
 

@@ -9,7 +9,7 @@ import {
   Upload as UploadFilled,
 } from "@lucide/vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 
 import { getNativePreviewStatus, getPreviewCapabilities } from "@/api/preview";
@@ -119,7 +119,10 @@ const sourceTypeLabels: Record<MappingSourceType, string> = {
   experiment_number: "实验编号",
   blank: "留空",
 };
+let querySelectionConsumed = false;
+let disposed = false;
 let recordRequestGeneration = 0;
+onUnmounted(() => { disposed = true; recordRequestGeneration += 1; });
 let templateRequestGeneration = 0;
 
 function placeholderText(value: string): string {
@@ -167,6 +170,7 @@ async function loadRecordsForTemplate(): Promise<void> {
     if (offset >= page.total || page.items.length === 0) break;
   }
   if (generation !== recordRequestGeneration || activeTemplateId.value !== template.id) return;
+  const previousSelection = new Set(selectedRecords.value.map((record) => record.id));
   records.value = loaded;
   selectedRecords.value = [];
   const queryRecords = Array.isArray(route.query.records)
@@ -178,7 +182,9 @@ async function loadRecordsForTemplate(): Promise<void> {
   const requestedIds = new Set(
     [queryRecord, ...queryRecords.split(",")].map((id) => id.trim()).filter(Boolean),
   );
-  const requested = records.value.filter((record) => requestedIds.has(record.id));
+  const ids = querySelectionConsumed ? previousSelection : requestedIds;
+  querySelectionConsumed = true;
+  const requested = records.value.filter((record) => ids.has(record.id));
   if (requested.some((record) => record.report_generated)) {
     showGenerated.value = true;
   }
@@ -374,7 +380,9 @@ async function openNativeReport(action: "preview" | "open"): Promise<void> {
 async function monitorNativeReportJob(task: NativePreviewTask): Promise<void> {
   let current = task;
   let openedNotified = false;
+  let failures = 0;
   for (let attempt = 0; attempt < 28_800; attempt += 1) {
+    if (disposed) return;
     if (current.status === "failed") {
       ElMessage.error(current.error || "Office/WPS 原生窗口打开失败");
       return;
@@ -387,8 +395,16 @@ async function monitorNativeReportJob(task: NativePreviewTask): Promise<void> {
       ElMessage.info(`${nativeEngineLabel()} 原生窗口已关闭`);
       return;
     }
-    await sleep(500);
-    current = await getNativePreviewStatus(task.job_id);
+    await sleep(openedNotified ? 2000 : 500);
+    if (disposed) return;
+    try {
+      current = await getNativePreviewStatus(task.job_id);
+      failures = 0;
+    } catch (error) {
+      if (disposed) return;
+      failures += 1;
+      if (failures >= 5) throw error;
+    }
   }
 }
 
@@ -825,10 +841,10 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  border: 1px solid #dcebe9;
+  border: 1px solid var(--app-border);
   border-left: 4px solid var(--app-primary);
   border-radius: 10px;
-  background: linear-gradient(110deg, #f3faf6, #f5faff);
+  background: linear-gradient(110deg, var(--app-hover), var(--app-hover));
   padding: 12px 14px;
 }
 
@@ -865,18 +881,18 @@ onMounted(() => {
   border: 1px solid var(--app-border);
   border-radius: 10px;
   color: inherit;
-  background: #fff;
+  background: var(--app-bg);
   padding: 11px;
   text-align: left;
   cursor: pointer;
 }
 
 .template-item:hover {
-  border-color: #8abeb5;
+  border-color: var(--app-primary-mid);
 }
 
 .template-item.active {
-  border-color: var(--app-primary);
+  border-color: var(--app-primary-text);
   background: var(--app-primary-soft);
   box-shadow: inset 3px 0 var(--app-primary);
 }
@@ -896,7 +912,7 @@ onMounted(() => {
 .mapping-help {
   border-bottom: 1px solid var(--app-border);
   color: var(--app-muted);
-  background: #fafafa;
+  background: var(--app-surface-soft);
   padding: 10px 14px;
   font-size: 12px;
 }
@@ -913,8 +929,8 @@ onMounted(() => {
 
 code {
   border-radius: 5px;
-  color: #167d73;
-  background: #eaf7f2;
+  color: var(--app-primary-text);
+  background: var(--app-primary-soft);
   padding: 3px 6px;
 }
 
@@ -933,16 +949,16 @@ code {
   align-items: center;
   justify-content: center;
   gap: 10px;
-  border: 1px dashed #98a2b3;
+  border: 1px dashed var(--app-subtle);
   border-radius: 9px;
-  color: #475467;
-  background: #fafafa;
+  color: var(--app-muted);
+  background: var(--app-surface-soft);
   cursor: pointer;
 }
 
 .file-drop:hover {
-  color: var(--app-primary);
-  border-color: var(--app-primary);
+  color: var(--app-primary-text);
+  border-color: var(--app-primary-text);
   background: var(--app-primary-soft);
 }
 

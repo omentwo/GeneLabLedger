@@ -15,7 +15,6 @@ from fastapi.staticfiles import StaticFiles
 from app.api import (
     auto_exports,
     exports,
-    imports,
     ledger_templates,
     preview,
     projects,
@@ -77,7 +76,7 @@ def create_app(
 
     app = FastAPI(
         title=app_settings.app_name,
-    version="0.11.4",
+        version="0.11.5",
         lifespan=lifespan,
     )
     app.add_middleware(
@@ -100,7 +99,6 @@ def create_app(
     app.include_router(records.router, prefix="/api")
     app.include_router(reports.router, prefix="/api")
     app.include_router(auto_exports.router, prefix="/api")
-    app.include_router(imports.router, prefix="/api")
     app.include_router(exports.router, prefix="/api")
 
     @app.api_route(

@@ -9,9 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.database import Database
-from app.models import FieldDefinition
 from app.services import cell_batches
-from app.services.workbooks import build_xlsx
 
 
 def project_fields(project: dict) -> dict[str, dict]:
@@ -133,40 +131,6 @@ def test_field_labels_cannot_conflict_with_import_identifiers(
         json={"label": "caseId"},
     )
     assert renamed.status_code == 409, renamed.text
-
-
-def test_workbook_preview_rejects_legacy_ambiguous_field_names(
-    client: TestClient,
-    seeded_projects: dict[str, dict],
-) -> None:
-    project_id = seeded_projects["TB"]["id"]
-    with client.app.state.database.session_factory() as session:
-        session.add(
-            FieldDefinition(
-                project_id=project_id,
-                key="custom_legacy_status",
-                label="status",
-                data_type="text",
-                sort_order=100,
-            )
-        )
-        session.commit()
-
-    workbook = build_xlsx([("TB", ["病理号", "状态", "status"], [["CASE-1", "待实验", "值"]])])
-    response = client.post(
-        "/api/imports/workbook/preview",
-        data={"project_id": project_id},
-        files={
-            "file": (
-                "ambiguous.xlsx",
-                workbook,
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        },
-    )
-
-    assert response.status_code == 409, response.text
-    assert "status" in response.json()["detail"]
 
 
 def test_invalid_field_default_and_malformed_core_template_are_rejected(

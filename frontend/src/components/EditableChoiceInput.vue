@@ -1,4 +1,15 @@
 <script setup lang="ts">
+import { onMounted, onUnmounted, useId } from "vue";
+
+const suggestionClass = `choice-suggestions-${useId().replace(/[^a-z0-9-]/gi, "")}`;
+function keepSuggestionFocus(event: MouseEvent): void {
+  if (event.target instanceof Element && event.target.closest(`.${suggestionClass} li`)) {
+    event.preventDefault();
+  }
+}
+onMounted(() => document.addEventListener("mousedown", keepSuggestionFocus, true));
+onUnmounted(() => document.removeEventListener("mousedown", keepSuggestionFocus, true));
+
 interface ChoiceSuggestion {
   value: string;
 }
@@ -27,7 +38,15 @@ function commit(value: string): void {
   emit("change", value);
 }
 
+let selectedValue: string | null = null;
+function commitTyped(value: string): void {
+  if (selectedValue === value) { selectedValue = null; return; }
+  selectedValue = null;
+  commit(value);
+}
+
 function update(value: string | number): void {
+  selectedValue = null;
   emit("update:modelValue", String(value ?? ""));
 }
 
@@ -44,6 +63,7 @@ function suggestions(
 }
 
 function selectSuggestion(item: ChoiceSuggestion): void {
+  selectedValue = item.value;
   commit(item.value);
 }
 </script>
@@ -61,12 +81,13 @@ function selectSuggestion(item: ChoiceSuggestion): void {
     class="editable-choice-input"
     :model-value="modelValue"
     :fetch-suggestions="suggestions"
+    :popper-class="suggestionClass"
     :debounce="0"
     value-key="value"
     clearable
     :placeholder="placeholder"
     @update:model-value="update"
-    @change="commit(String($event ?? ''))"
+    @change="commitTyped(String($event ?? ''))"
     @select="selectSuggestion"
     @paste="emit('paste', $event)"
   />

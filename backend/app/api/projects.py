@@ -58,7 +58,7 @@ def _ensure_unique_field_label(
     if normalized in RESERVED_WORKBOOK_HEADERS:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="表头名称不能使用 Excel 导入保留字段",
+            detail="表头名称不能使用 系统保留字段",
         )
     fields = session.scalars(
         select(FieldDefinition).where(FieldDefinition.project_id == project_id)

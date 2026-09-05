@@ -4,36 +4,23 @@ import {
   CalendarRange,
   ChevronDown,
   CircleAlert,
-  Download,
-  FileSpreadsheet,
   FlaskConical,
   Layers3,
-  LoaderCircle,
   Radar,
-  RefreshCw,
 } from "@lucide/vue";
-import { ElMessage } from "element-plus";
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 
 import { listRecords } from "@/api/records";
-import EditableDateInput from "@/components/EditableDateInput.vue";
 import { useAppStore } from "@/stores/app";
-import type { FieldDefinition, ProjectRecord } from "@/types/api";
+import type { ProjectRecord } from "@/types/api";
 import { shanghaiDateKey, shiftDateKey, shiftMonthKey } from "@/utils/datetime";
-import { exportWorkbook } from "@/utils/workbook";
 
 const appStore = useAppStore();
 const records = ref<ProjectRecord[]>([]);
 const loading = ref(false);
 const errorMessage = ref("");
-const exportVisible = ref(false);
-const exportProjects = ref<string[]>([]);
 const monthlyProjectId = ref("");
 const monthlyHoverIndex = ref<number | null>(null);
-const exportFilter = reactive({
-  start: "",
-  end: "",
-});
 const countFormatter = new Intl.NumberFormat("zh-CN");
 
 function formatCount(value: number): string {
@@ -225,80 +212,6 @@ function setMonthlyHover(index: number): void {
   monthlyHoverIndex.value = index;
 }
 
-function normalizeDate(value: string): string {
-  const cleaned = value.trim().replace(/[/.]/g, "-");
-  if (!cleaned) return "";
-  const match = cleaned.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
-  if (!match) throw new Error("日期格式应为 YYYY-MM-DD");
-  const [, year, month, day] = match;
-  const normalized = `${year}-${String(Number(month)).padStart(2, "0")}-${String(
-    Number(day),
-  ).padStart(2, "0")}`;
-  const date = new Date(`${normalized}T00:00:00`);
-  if (
-    Number.isNaN(date.getTime()) ||
-    date.getFullYear() !== Number(year) ||
-    date.getMonth() + 1 !== Number(month) ||
-    date.getDate() !== Number(day)
-  ) {
-    throw new Error("日期无效");
-  }
-  return normalized;
-}
-
-function fieldValue(record: ProjectRecord, field: FieldDefinition): string {
-  if (field.system_key === "pathology_number") return record.pathology_number;
-  if (field.system_key === "block_number") return record.block_number ?? "";
-  if (field.system_key === "experiment_date") return record.experiment_date ?? "";
-  if (field.system_key === "experiment_number") return record.experiment_number ?? "";
-  if (field.system_key === "status") return record.status;
-  return record.values[field.id] ?? "";
-}
-
-async function exportStatistics(): Promise<void> {
-  try {
-    const start = normalizeDate(exportFilter.start);
-    const end = normalizeDate(exportFilter.end);
-    if (start && end && start > end) throw new Error("开始日期不能晚于结束日期");
-    if (!exportProjects.value.length) throw new Error("请至少选择一个导出项目");
-    exportFilter.start = start;
-    exportFilter.end = end;
-    const selectedProjects = appStore.projects.filter((project) =>
-      exportProjects.value.includes(project.id),
-    );
-    const sheets = selectedProjects.map((project) => {
-      const fields = project.fields
-        .filter((field) => !field.hidden)
-        .slice()
-        .sort((a, b) => a.sort_order - b.sort_order);
-      const projectRecords = records.value.filter((record) => {
-        const date = record.experiment_date ?? "";
-        return (
-          record.project_id === project.id &&
-          (!start || date >= start) &&
-          (!end || date <= end)
-        );
-      });
-      return {
-        name: project.name,
-        headers: ["_record_id", "_project_id", ...fields.map((field) => field.label)],
-        hiddenColumns: [1, 2],
-        rows: projectRecords.map((record) => [
-          record.id,
-          record.project_id,
-          ...fields.map((field) => fieldValue(record, field)),
-        ]),
-      };
-    });
-    const saved = await exportWorkbook(sheets, "统计筛选台账");
-    const count = sheets.reduce((sum, sheet) => sum + sheet.rows.length, 0);
-    if (!saved) return;
-    ElMessage.success(`正在按 ${sheets.length} 个项目分工作表导出 ${count} 条记录`);
-  } catch (error) {
-    ElMessage.warning(error instanceof Error ? error.message : "导出条件无效");
-  }
-}
-
 async function loadDashboard(): Promise<void> {
   loading.value = true;
   errorMessage.value = "";
@@ -326,9 +239,6 @@ onMounted(() => {
 watch(
   () => appStore.projects,
   (projects) => {
-    if (!exportProjects.value.length) {
-      exportProjects.value = projects.map((project) => project.id);
-    }
     if (
       monthlyProjectId.value &&
       !projects.some((project) => project.id === monthlyProjectId.value)
@@ -356,85 +266,7 @@ watch(
         <h1><span>数据</span><em>观测台</em></h1>
         <p>以实验日期为统一口径，观察跨项目记录、月度轨迹与工作负载。</p>
       </div>
-      <div class="masthead-side">
-        <div class="coverage-chip">
-          <LoaderCircle
-            v-if="loading"
-            class="coverage-loader"
-            :size="18"
-            :stroke-width="1.8"
-            aria-hidden="true"
-          />
-          <span v-else class="coverage-pulse" aria-hidden="true" />
-          <div>
-            <small aria-live="polite">{{ loading ? "正在同步数据" : "当前统计范围" }}</small>
-            <strong>{{ formatCount(total) }} 条记录</strong>
-          </div>
-        </div>
-        <div class="dashboard-actions">
-          <el-button
-            class="dashboard-button dashboard-button-ghost"
-            @click="exportVisible = !exportVisible"
-          >
-            <Download class="button-icon" :size="16" :stroke-width="1.8" aria-hidden="true" />
-            {{ exportVisible ? "收起导出" : "按时间导出" }}
-          </el-button>
-          <el-button
-            class="dashboard-button dashboard-button-primary"
-            :disabled="loading"
-            @click="loadDashboard"
-          >
-            <RefreshCw
-              class="button-icon"
-              :class="{ 'is-spinning': loading }"
-              :size="16"
-              :stroke-width="1.8"
-              aria-hidden="true"
-            />
-            刷新数据
-          </el-button>
-        </div>
-      </div>
     </header>
-
-    <Transition name="export-panel">
-      <section v-if="exportVisible" class="stats-export-panel" aria-label="按时间导出统计数据">
-        <div class="export-panel-heading">
-          <span class="export-heading-icon" aria-hidden="true">
-            <FileSpreadsheet :size="20" :stroke-width="1.7" />
-          </span>
-          <div>
-            <strong>导出实验记录</strong>
-            <p>按实验日期筛选，每个项目生成独立的 Excel 工作表。</p>
-          </div>
-        </div>
-        <div class="export-row">
-          <label>
-            <span>开始日期</span>
-            <EditableDateInput v-model="exportFilter.start" />
-          </label>
-          <label>
-            <span>结束日期</span>
-            <EditableDateInput v-model="exportFilter.end" />
-          </label>
-          <el-tag effect="plain">.xlsx</el-tag>
-          <el-button class="export-confirm-button" @click="exportStatistics">
-            <Download :size="16" :stroke-width="1.8" aria-hidden="true" />
-            确认导出
-          </el-button>
-        </div>
-        <el-checkbox-group v-model="exportProjects" class="project-checkboxes">
-          <el-checkbox
-            v-for="project in appStore.projects"
-            :key="project.id"
-            :value="project.id"
-            border
-          >
-            {{ project.name }}
-          </el-checkbox>
-        </el-checkbox-group>
-      </section>
-    </Transition>
 
     <section class="dashboard-kpis" aria-label="核心统计指标">
       <article class="kpi-card kpi-card-primary">
@@ -685,13 +517,13 @@ watch(
 
 <style scoped>
 .dashboard-stage {
-  --dashboard-ink: #243746;
-  --dashboard-ink-soft: #526775;
-  --dashboard-paper: #f7fafc;
-  --dashboard-line: #e3ecef;
-  --dashboard-accent: #167d73;
-  --dashboard-aqua: #238b80;
-  --dashboard-blue: #3e8cb5;
+  --dashboard-ink: var(--app-text);
+  --dashboard-ink-soft: var(--app-muted);
+  --dashboard-paper: var(--app-bg);
+  --dashboard-line: var(--app-border);
+  --dashboard-accent: var(--app-primary-text);
+  --dashboard-aqua: var(--app-chart-primary);
+  --dashboard-blue: var(--app-chart-secondary);
   position: relative;
   isolation: isolate;
   min-height: calc(100vh - 60px);
@@ -699,7 +531,7 @@ watch(
   padding: clamp(18px, 2.5vw, 34px);
   overflow: hidden;
   background:
-    radial-gradient(circle at 92% 4%, #eaf7f2, transparent 25rem),
+    radial-gradient(circle at 92% 4%, var(--app-primary-soft), transparent 25rem),
     var(--dashboard-paper);
   color: var(--dashboard-ink);
   gap: clamp(14px, 1.7vw, 22px);
@@ -717,10 +549,10 @@ watch(
   display: flex;
   align-items: center;
   gap: 9px;
-  border: 1px solid rgba(217, 45, 32, 0.2);
+  border: 1px solid rgba(198, 87, 70, 0.2);
   border-radius: 14px;
-  background: rgba(255, 245, 244, 0.92);
-  color: #b42318;
+  background: var(--app-danger-soft);
+  color: var(--app-danger);
   padding: 12px 14px;
   font-size: 13px;
   font-weight: 600;
@@ -730,16 +562,16 @@ watch(
 .dashboard-masthead {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.6fr);
+  grid-template-columns: minmax(0, 1fr);
   min-height: 148px;
   overflow: hidden;
   border: 1px solid var(--dashboard-line);
   border-radius: 26px;
   background:
-    radial-gradient(circle at 96% 0%, #edf6fd, transparent 36%),
-    radial-gradient(circle at 70% 100%, #eaf7f2, transparent 32%),
-    #fff;
-  box-shadow: 0 6px 24px rgba(36, 55, 70, 0.04);
+    radial-gradient(circle at 96% 0%, var(--app-accent-soft), transparent 36%),
+    radial-gradient(circle at 70% 100%, var(--app-primary-soft), transparent 32%),
+    var(--app-bg);
+  box-shadow: 0 6px 24px rgba(45, 42, 38, 0.04);
   animation: dashboard-rise 700ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
@@ -747,8 +579,7 @@ watch(
   content: none;
 }
 
-.masthead-copy,
-.masthead-side {
+.masthead-copy {
   position: relative;
   z-index: 1;
 }
@@ -765,7 +596,7 @@ watch(
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  color: #6f7c93;
+  color: var(--app-muted);
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.16em;
@@ -773,7 +604,7 @@ watch(
 }
 
 .masthead-kicker {
-  color: var(--dashboard-aqua);
+  color: var(--dashboard-accent);
 }
 
 .masthead-copy h1 {
@@ -805,212 +636,11 @@ watch(
   line-height: 1.7;
 }
 
-.masthead-side {
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  gap: 24px;
-  border-left: 1px solid var(--dashboard-line);
-  padding: clamp(20px, 2vw, 28px);
-}
-
-.coverage-chip {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  align-self: flex-end;
-  min-width: 190px;
-  border: 1px solid #e3ecef;
-  border-radius: 16px;
-  background: #f5faf8;
-  padding: 12px 14px;
-}
-
-.coverage-pulse {
-  width: 9px;
-  height: 9px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: var(--dashboard-accent);
-  box-shadow: 0 0 0 5px #eaf7f2;
-
-}
-
-.coverage-loader {
-  flex: 0 0 auto;
-  color: var(--dashboard-aqua);
-  animation: dashboard-spin 900ms linear infinite;
-}
-
-.coverage-chip div {
-  display: grid;
-  gap: 2px;
-}
-
-.coverage-chip small {
-  color: var(--dashboard-ink-soft);
-  font-size: 12px;
-}
-
-.coverage-chip strong {
-  color: var(--dashboard-ink);
-  font-size: 14px;
-  font-weight: 650;
-}
-
-.dashboard-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.dashboard-button {
-  min-height: 38px;
-  border-radius: 999px;
-  padding-inline: 16px;
-  font-weight: 650;
-  transition:
-    transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
-    border-color 180ms ease,
-    background 180ms ease;
-}
-
-.dashboard-button:hover {
-  transform: translateY(-2px);
-}
-
-.dashboard-button-ghost {
-  border-color: #bccfca;
-  background: #fff;
-  color: var(--dashboard-ink);
-}
-
-.dashboard-button-ghost:hover,
-.dashboard-button-ghost:focus-visible {
-  border-color: var(--dashboard-accent);
-  background: #eaf7f2;
-  color: var(--dashboard-accent);
-}
-
-.dashboard-button-primary {
-  border-color: var(--dashboard-accent);
-  background: var(--dashboard-accent);
-  color: #fff;
-}
-
-.dashboard-button-primary:hover,
-.dashboard-button-primary:focus-visible {
-  border-color: #11695f;
-  background: #11695f;
-  color: #fff;
-}
-
-.button-icon,
-.export-confirm-button svg {
-  flex: 0 0 auto;
-}
-
-.button-icon.is-spinning {
-  animation: dashboard-spin 900ms linear infinite;
-}
-
-.stats-export-panel {
-  display: grid;
-  grid-template-columns: minmax(220px, 0.7fr) minmax(0, 1.3fr);
-  gap: 18px 26px;
-  align-items: center;
-  border: 1px solid rgba(11, 16, 32, 0.1);
-  border-radius: 20px;
-  background: #fff;
-  padding: 18px;
-  box-shadow: 0 6px 22px rgba(36, 55, 70, 0.05);
-}
-
-.export-panel-heading {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  grid-row: 1 / 3;
-}
-
-.export-heading-icon {
-  display: inline-grid;
-  width: 44px;
-  height: 44px;
-  flex: 0 0 auto;
-  place-items: center;
-  border-radius: 14px;
-  background: #eaf7f2;
-  color: var(--dashboard-accent);
-}
-
-.export-panel-heading div {
-  display: grid;
-  gap: 4px;
-}
-
-.export-panel-heading strong {
-  font-size: 15px;
-}
-
-.export-panel-heading p,
 .overview-panel-header p {
   margin: 0;
-  color: #667085;
+  color: var(--app-muted);
   font-size: 12px;
   line-height: 1.55;
-}
-
-.export-row,
-.project-checkboxes {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: end;
-  gap: 8px;
-}
-
-.export-row label {
-  display: grid;
-  width: min(190px, 100%);
-  gap: 6px;
-  color: #596579;
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.export-confirm-button {
-  border-color: var(--dashboard-accent);
-  border-radius: 10px;
-  background: var(--dashboard-accent);
-  color: #fff;
-}
-
-.export-confirm-button:hover,
-.export-confirm-button:focus-visible {
-  border-color: #11695f;
-  background: #11695f;
-  color: #fff;
-}
-
-.export-panel-enter-active,
-.export-panel-leave-active {
-  overflow: hidden;
-  transition:
-    opacity 240ms ease,
-    transform 320ms cubic-bezier(0.22, 1, 0.36, 1),
-    max-height 320ms ease;
-}
-
-.export-panel-enter-from,
-.export-panel-leave-to {
-  max-height: 0;
-  opacity: 0;
-  transform: translateY(-10px);
-}
-
-.export-panel-enter-to,
-.export-panel-leave-from {
-  max-height: 260px;
 }
 
 .dashboard-kpis {
@@ -1026,9 +656,9 @@ watch(
   overflow: hidden;
   border: 1px solid var(--dashboard-line);
   border-radius: 22px;
-  background: #fff;
+  background: var(--app-card);
   padding: 18px;
-  box-shadow: 0 6px 22px rgba(36, 55, 70, 0.05);
+  box-shadow: 0 6px 22px rgba(45, 42, 38, 0.05);
   transition:
     transform 360ms cubic-bezier(0.22, 1, 0.36, 1),
     box-shadow 360ms ease,
@@ -1050,7 +680,7 @@ watch(
 
 .kpi-card:hover {
   border-color: rgba(11, 16, 32, 0.2);
-  box-shadow: 0 6px 22px rgba(36, 55, 70, 0.05);
+  box-shadow: 0 6px 22px rgba(45, 42, 38, 0.05);
   transform: translateY(-2px);
 }
 
@@ -1059,7 +689,7 @@ watch(
 }
 
 .kpi-card-primary {
-  background: linear-gradient(115deg, #fff 55%, #f0faf5);
+  background: linear-gradient(115deg, var(--app-bg) 55%, var(--app-hover));
   color: var(--dashboard-ink);
 }
 
@@ -1079,17 +709,17 @@ watch(
   height: 40px;
   place-items: center;
   border-radius: 13px;
-  background: #edf2f6;
+  background: var(--app-surface-soft);
   color: var(--dashboard-ink);
 }
 
 .kpi-card-primary .kpi-icon {
-  background: #eaf7f2;
+  background: var(--app-primary-soft);
   color: var(--dashboard-accent);
 }
 
 .kpi-index {
-  color: #627985;
+  color: var(--app-muted);
   font-family: ui-monospace, "Cascadia Code", monospace;
   font-size: 12px;
   letter-spacing: 0.12em;
@@ -1120,7 +750,7 @@ watch(
 }
 
 .kpi-caption span {
-  color: #526775;
+  color: var(--app-muted);
   font-size: 12px;
 }
 
@@ -1140,8 +770,8 @@ watch(
   min-width: 0;
   border: 1px solid var(--dashboard-line);
   border-radius: 24px;
-  background: #fff;
-  box-shadow: 0 6px 22px rgba(36, 55, 70, 0.05);
+  background: var(--app-card);
+  box-shadow: 0 6px 22px rgba(45, 42, 38, 0.05);
   animation: dashboard-rise 720ms 110ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
@@ -1173,7 +803,7 @@ watch(
 
 .chart-heading p {
   margin-top: 6px;
-  color: #526775;
+  color: var(--app-muted);
   font-size: 12px;
 }
 
@@ -1188,12 +818,12 @@ watch(
 .monthly-card {
   overflow: hidden;
   border-color: var(--dashboard-line);
-  background: linear-gradient(180deg, #fff 70%, #f8fcfb);
+  background: linear-gradient(180deg, var(--app-bg) 70%, var(--app-surface-soft));
   color: var(--dashboard-ink);
 }
 
 .monthly-card .section-eyebrow {
-  color: var(--dashboard-aqua);
+  color: var(--dashboard-accent);
 }
 
 .monthly-card .chart-heading h2 {
@@ -1225,7 +855,7 @@ watch(
   height: 8px;
   border-radius: 50%;
   background: var(--dashboard-aqua);
-  box-shadow: 0 0 0 5px rgba(126, 231, 218, 0.1);
+  box-shadow: 0 0 0 5px rgb(var(--app-primary-rgb) / 0.1);
 }
 
 .monthly-project-select {
@@ -1235,13 +865,13 @@ watch(
 .monthly-project-select :deep(.el-select__wrapper) {
   min-height: 38px;
   border-radius: 12px;
-  background: #fff;
-  box-shadow: 0 0 0 1px #b8cbc8 inset;
+  background: var(--app-bg);
+  box-shadow: 0 0 0 1px var(--app-border-strong) inset;
 }
 
 .monthly-project-select :deep(.el-select__wrapper:hover),
 .monthly-project-select :deep(.el-select__wrapper.is-focused) {
-  box-shadow: 0 0 0 1px rgba(126, 231, 218, 0.48) inset;
+  box-shadow: 0 0 0 1px rgb(var(--app-primary-rgb) / 0.48) inset;
 }
 
 .monthly-project-select :deep(.el-select__selected-item),
@@ -1253,7 +883,7 @@ watch(
 .monthly-chart-scroll {
   margin: 20px -4px -4px;
   overflow-x: auto;
-  scrollbar-color: rgba(126, 231, 218, 0.28) transparent;
+  scrollbar-color: rgb(var(--app-primary-rgb) / 0.28) transparent;
   scrollbar-width: thin;
 }
 
@@ -1272,7 +902,7 @@ watch(
 }
 
 .monthly-gradient-start {
-  stop-color: var(--dashboard-aqua);
+  stop-color: var(--dashboard-accent);
   stop-opacity: 0.16;
 }
 
@@ -1282,13 +912,13 @@ watch(
 }
 
 .monthly-grid-lines line {
-  stroke: #e3ecef;
+  stroke: var(--app-border);
   stroke-dasharray: 3 7;
   stroke-width: 1;
 }
 
 .monthly-grid-lines line:last-of-type {
-  stroke: #b9cbcf;
+  stroke: var(--app-border-strong);
   stroke-dasharray: none;
 }
 
@@ -1326,7 +956,7 @@ watch(
 }
 
 .monthly-point {
-  fill: #fff;
+  fill: var(--app-bg);
   stroke: var(--dashboard-aqua);
   stroke-width: 2;
   pointer-events: none;
@@ -1340,7 +970,7 @@ watch(
 
 .monthly-axis-label,
 .monthly-y-label {
-  fill: #526775;
+  fill: var(--app-muted);
   font-family: ui-monospace, "Cascadia Code", monospace;
   font-size: 12px;
 }
@@ -1351,10 +981,10 @@ watch(
   z-index: 2;
   width: 220px;
   padding: 13px 14px;
-  border: 1px solid #c8d9d5;
+  border: 1px solid var(--app-border-strong);
   border-radius: 13px;
-  background: #fff;
-  box-shadow: 0 8px 26px rgba(36, 55, 70, 0.12);
+  background: var(--app-bg);
+  box-shadow: 0 8px 26px rgba(45, 42, 38, 0.12);
   color: var(--dashboard-ink);
   pointer-events: none;
   transition: left 150ms ease, top 150ms ease;
@@ -1430,8 +1060,8 @@ watch(
   min-height: 28px;
   border: 1px solid rgba(11, 16, 32, 0.1);
   border-radius: 999px;
-  background: #f3f5f8;
-  color: #566176;
+  background: var(--app-surface-soft);
+  color: var(--app-muted);
   padding: 0 10px;
   font-size: 12px;
   font-weight: 700;
@@ -1460,10 +1090,16 @@ watch(
 .project-bar-row:hover,
 .project-bar-row:focus-visible {
   border-color: rgba(11, 16, 32, 0.1);
-  background: rgba(238, 242, 247, 0.82);
+  background: var(--app-hover);
   outline: none;
   transform: translateX(2px);
 }
+
+
+.project-bar-row:nth-child(5n + 2) { --project-color: var(--app-chart-secondary); }
+.project-bar-row:nth-child(5n + 3) { --project-color: var(--app-chart-third); }
+.project-bar-row:nth-child(5n + 4) { --project-color: var(--app-chart-fourth); }
+.project-bar-row:nth-child(5n + 5) { --project-color: var(--app-chart-fifth); }
 
 .project-bar-heading {
   display: grid;
@@ -1473,7 +1109,7 @@ watch(
 }
 
 .project-bar-rank {
-  color: #627985;
+  color: var(--app-muted);
   font-family: ui-monospace, "Cascadia Code", monospace;
   font-size: 12px;
 }
@@ -1492,7 +1128,7 @@ watch(
 }
 
 .project-bar-heading svg {
-  color: #627985;
+  color: var(--app-muted);
   transition: color 180ms ease, transform 180ms ease;
 }
 
@@ -1506,7 +1142,7 @@ watch(
   height: 5px;
   overflow: hidden;
   border-radius: 999px;
-  background: #e9edf2;
+  background: var(--app-surface-soft);
 }
 
 .project-bar-total {
@@ -1514,14 +1150,14 @@ watch(
   height: 100%;
   min-width: 0;
   border-radius: inherit;
-  background: linear-gradient(90deg, var(--dashboard-blue), var(--dashboard-aqua));
+  background: var(--project-color, var(--app-chart-primary));
   transform: scaleX(1);
   transform-origin: left;
   animation: project-bar-reveal 650ms 160ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
 }
 
 .project-bar-row small {
-  color: #526775;
+  color: var(--app-muted);
   font-size: 12px;
   text-align: right;
 }
@@ -1558,7 +1194,7 @@ watch(
   overflow: hidden;
   border: 1px solid var(--dashboard-line);
   border-radius: 17px;
-  background: #fafbfc;
+  background: var(--app-surface-soft);
   color: inherit;
   padding: 15px;
   text-decoration: none;
@@ -1572,8 +1208,8 @@ watch(
 .project-overview-card:hover,
 .project-overview-card:focus-visible {
   border-color: rgba(11, 16, 32, 0.24);
-  background: #fff;
-  box-shadow: 0 6px 22px rgba(36, 55, 70, 0.05);
+  background: var(--app-bg);
+  box-shadow: 0 6px 22px rgba(45, 42, 38, 0.05);
   outline: none;
   transform: translateY(-2px);
 }
@@ -1584,7 +1220,7 @@ watch(
   right: 0;
   left: 0;
   height: 3px;
-  background: linear-gradient(90deg, var(--dashboard-blue), var(--dashboard-aqua), var(--dashboard-accent));
+  background: var(--dashboard-accent);
   transform: scaleX(0.28);
   transform-origin: left;
   transition: transform 460ms cubic-bezier(0.22, 1, 0.36, 1);
@@ -1612,7 +1248,7 @@ watch(
 
 .project-overview-title svg {
   flex: 0 0 auto;
-  color: #627985;
+  color: var(--app-muted);
 }
 
 .project-overview-metric {
@@ -1629,7 +1265,7 @@ watch(
 }
 
 .project-overview-metric span {
-  color: #526775;
+  color: var(--app-muted);
   font-size: 12px;
 }
 
@@ -1639,22 +1275,12 @@ watch(
   align-items: center;
   justify-content: center;
   gap: 9px;
-  color: #526775;
+  color: var(--app-muted);
   font-size: 13px;
 }
 
 .dashboard-empty-overview {
   grid-column: 1 / -1;
-}
-
-:deep(.stats-export-panel .el-input__wrapper) {
-  border-radius: 10px;
-  box-shadow: 0 0 0 1px rgba(11, 16, 32, 0.11) inset;
-}
-
-:deep(.stats-export-panel .el-checkbox.is-bordered) {
-  border-radius: 9px;
-  background: rgba(255, 255, 255, 0.66);
 }
 
 @keyframes dashboard-rise {
@@ -1683,23 +1309,6 @@ watch(
   }
 }
 
-@keyframes coverage-pulse {
-  0% {
-    box-shadow: 0 0 0 0 rgba(185, 247, 101, 0.32);
-  }
-
-  70%,
-  100% {
-    box-shadow: 0 0 0 10px rgba(185, 247, 101, 0);
-  }
-}
-
-@keyframes dashboard-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 @media (max-width: 1180px) {
   .analytics-grid {
     grid-template-columns: 1fr;
@@ -1711,35 +1320,12 @@ watch(
 }
 
 @media (max-width: 900px) {
-  .dashboard-masthead {
-    grid-template-columns: 1fr;
-  }
-
-  .masthead-side {
-    flex-direction: row;
-    align-items: center;
-    border-top: 1px solid rgba(255, 255, 255, 0.08);
-    border-left: 0;
-  }
-
-  .coverage-chip {
-    align-self: auto;
-  }
-
   .dashboard-kpis {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .kpi-card-primary {
     grid-column: 1 / -1;
-  }
-
-  .stats-export-panel {
-    grid-template-columns: 1fr;
-  }
-
-  .export-panel-heading {
-    grid-row: auto;
   }
 
   .project-overview-grid {
@@ -1752,8 +1338,7 @@ watch(
     padding: 14px;
   }
 
-  .masthead-copy,
-  .masthead-side {
+  .masthead-copy {
     padding: 20px;
   }
 
@@ -1761,21 +1346,10 @@ watch(
     font-size: clamp(34px, 12vw, 48px);
   }
 
-  .masthead-side,
-  .dashboard-actions,
   .chart-heading,
   .overview-panel-header {
     flex-direction: column;
     align-items: stretch;
-  }
-
-  .coverage-chip {
-    width: 100%;
-  }
-
-  .dashboard-actions .el-button {
-    width: 100%;
-    margin-left: 0;
   }
 
   .dashboard-kpis,
@@ -1793,8 +1367,7 @@ watch(
     align-items: flex-start;
   }
 
-  .monthly-project-select,
-  .export-row label {
+  .monthly-project-select {
     width: 100%;
   }
 
@@ -1814,13 +1387,6 @@ watch(
   .overview-panel,
   .monthly-line,
   .project-bar-total,
-  .coverage-pulse,
-  .coverage-loader,
-  .button-icon.is-spinning {
-    animation: none;
-  }
-
-  .dashboard-button,
   .kpi-card,
   .project-bar-row,
   .project-overview-card,

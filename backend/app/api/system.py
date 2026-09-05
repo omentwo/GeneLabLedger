@@ -7,7 +7,8 @@ import os
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from sqlalchemy import String, cast, func, or_, select, text
+from sqlalchemy import String, cast, func, or_, select, text, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.audit import audit
@@ -123,9 +124,7 @@ def list_audit_logs(
             ]
         )
         matching_actions = [
-            action
-            for action, label in AUDIT_ACTION_SEARCH_LABELS.items()
-            if term in label.casefold()
+            action for action, label in AUDIT_ACTION_SEARCH_LABELS.items() if term in label.casefold()
         ]
         matching_entities = [
             entity_type
@@ -172,6 +171,29 @@ def update_setting(
 ) -> dict:
     serialized = json.dumps(payload.value, ensure_ascii=False)
     setting = session.get(AppSetting, key)
+    if "expected_value" in payload.model_fields_set:
+        actual = get_setting(key, session)["value"]
+        if actual != payload.expected_value:
+            raise HTTPException(status_code=409, detail="设置已被另一窗口修改，请刷新后重试")
+        if setting:
+            changed = session.execute(
+                update(AppSetting)
+                .where(AppSetting.key == key, AppSetting.value == setting.value)
+                .values(value=serialized),
+                execution_options={"synchronize_session": False},
+            )
+            if changed.rowcount != 1:
+                session.rollback()
+                raise HTTPException(status_code=409, detail="设置已被另一窗口修改，请刷新后重试")
+        else:
+            session.add(AppSetting(key=key, value=serialized))
+        audit(session, "setting.update", "app_setting", key)
+        try:
+            session.commit()
+        except IntegrityError as error:
+            session.rollback()
+            raise HTTPException(status_code=409, detail="设置已被另一窗口修改，请刷新后重试") from error
+        return {"key": key, "value": payload.value}
     if setting:
         setting.value = serialized
     else:

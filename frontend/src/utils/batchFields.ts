@@ -53,7 +53,7 @@ export function previewBatchFieldLabels(
       return { index: index + 1, label, status: "conflict", message: "超过 120 个字符" };
     }
     if (RESERVED_FIELD_LABELS.has(label)) {
-      return { index: index + 1, label, status: "conflict", message: "Excel 导入保留字段" };
+      return { index: index + 1, label, status: "conflict", message: "系统保留字段" };
     }
     const existing = existingByLabel.get(label);
     if (existing) {

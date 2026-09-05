@@ -82,6 +82,7 @@ export function printReports(
   printEngine: PrintEngine,
 ): Promise<ReportPrintResult> {
   return apiRequest<ReportPrintResult>("/reports/print", {
+    timeoutMs: 600_000,
     method: "POST",
     body: jsonBody({
       template_version_id: templateVersionId,

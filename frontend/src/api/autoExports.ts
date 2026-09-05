@@ -39,6 +39,7 @@ export function deleteAutoExportTask(taskId: string): Promise<void> {
 
 export function runAutoExportTask(taskId: string): Promise<AutoExportRun> {
   return apiRequest<AutoExportRun>(`/auto-export/tasks/${taskId}/run`, {
+    timeoutMs: 600_000,
     method: "POST",
   });
 }

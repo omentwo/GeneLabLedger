@@ -120,14 +120,15 @@ function projectNames(task: AutoExportTask): string {
 }
 
 function scheduleSummary(task: AutoExportTask): string {
+  const runTime = task.run_time || "未设置时间";
   if (task.schedule_type === "cron") return `Cron：${task.cron_expression}`;
-  if (task.preset === "hourly") return `每小时第 ${task.hourly_minute} 分钟`;
+  if (task.preset === "hourly") return `每小时第 ${task.hourly_minute ?? "未设置"} 分钟`;
   if (task.preset === "weekly") {
     const weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
-    return `每${weekdays[task.weekday] ?? "周一"} ${task.run_time}`;
+    return `每${weekdays[task.weekday] ?? "周一"} ${runTime}`;
   }
-  if (task.preset === "monthly") return `每月 ${task.month_day} 日 ${task.run_time}`;
-  return `每天 ${task.run_time}`;
+  if (task.preset === "monthly") return `每月 ${task.month_day ?? "未设置"} 日 ${runTime}`;
+  return `每天 ${runTime}`;
 }
 let taskLoadGeneration = 0;
 let taskSelectionGeneration = 0;
@@ -201,7 +202,17 @@ async function checkCron(): Promise<void> {
   }
 }
 
+function requiredInteger(value: unknown, label: string, min: number, max: number): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`请填写有效的${label}（${min}–${max}）`);
+  }
+  return value;
+}
+
 function payload(): AutoExportTaskInput {
+  if (!form.run_time || !/^([01]\d|2[0-3]):[0-5]\d$/.test(form.run_time)) {
+    throw new Error("请填写有效的执行时间");
+  }
   return {
     ...form,
     name: form.name.trim(),
@@ -209,11 +220,11 @@ function payload(): AutoExportTaskInput {
     output_directory: form.output_directory.trim(),
     cron_expression:
       form.schedule_type === "cron" ? form.cron_expression?.trim() || null : null,
-    retention_count: unlimitedRetention.value ? null : Number(form.retention_count),
-    failure_retries: Number(form.failure_retries),
-    hourly_minute: Number(form.hourly_minute),
-    weekday: Number(form.weekday),
-    month_day: Number(form.month_day),
+    retention_count: unlimitedRetention.value ? null : requiredInteger(form.retention_count, "保留数量", 1, 10000),
+    failure_retries: requiredInteger(form.failure_retries, "重试次数", 0, 10),
+    hourly_minute: requiredInteger(form.hourly_minute, "分钟", 0, 59),
+    weekday: requiredInteger(form.weekday, "星期", 0, 6),
+    month_day: requiredInteger(form.month_day, "日期", 1, 31),
   };
 }
 
@@ -256,7 +267,7 @@ async function runTaskNow(): Promise<void> {
     const loadedRuns = await listAutoExportRuns(taskId);
     if (selectedTaskId.value === taskId) {
       runs.value = loadedRuns;
-      await loadTasks(taskId);
+      tasks.value = await listAutoExportTasks();
     }
     ElMessage.success(`导出成功：${run.file_path ?? "已完成"}`);
   } catch (error) {
@@ -581,10 +592,10 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  border: 1px solid #dcebe9;
+  border: 1px solid var(--app-border);
   border-left: 4px solid var(--app-primary);
   border-radius: 10px;
-  background: linear-gradient(110deg, #f3faf6, #f5faff);
+  background: linear-gradient(110deg, var(--app-hover), var(--app-hover));
   padding: 12px 14px;
 }
 
@@ -621,18 +632,18 @@ onMounted(() => {
   border: 1px solid var(--app-border);
   border-radius: 10px;
   color: inherit;
-  background: #fff;
+  background: var(--app-bg);
   padding: 11px;
   text-align: left;
   cursor: pointer;
 }
 
 .task-item:hover {
-  border-color: #8abeb5;
+  border-color: var(--app-primary-mid);
 }
 
 .task-item.active {
-  border-color: var(--app-primary);
+  border-color: var(--app-primary-text);
   background: var(--app-primary-soft);
   box-shadow: inset 3px 0 var(--app-primary);
 }
@@ -665,19 +676,19 @@ onMounted(() => {
   height: 8px;
   flex: 0 0 auto;
   border-radius: 999px;
-  background: #98a2b3;
+  background: var(--app-subtle);
 }
 
 .status-dot.enabled {
-  background: #12b76a;
+  background: var(--app-live);
 }
 
 .status-dot.failed {
-  background: #f04438;
+  background: var(--app-danger);
 }
 
 .status-dot.disabled {
-  background: #98a2b3;
+  background: var(--app-subtle);
 }
 
 .form-grid {

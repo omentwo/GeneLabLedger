@@ -117,7 +117,7 @@ export function normalizeLedgerDisplaySettings(value: unknown): LedgerDisplaySet
 }
 
 export function getHealth(): Promise<HealthStatus> {
-  return apiRequest<HealthStatus>("/health");
+  return apiRequest<HealthStatus>("/health", { timeoutMs: 4000 });
 }
 
 export function listAuditLogs(search = "", limit = 50, offset = 0): Promise<AuditLogPage> {
@@ -133,9 +133,10 @@ export function getSetting<T>(key: string): Promise<{ key: string; value: T | nu
 export function putSetting<T>(
   key: string,
   value: T,
+  comparison?: { expectedValue: unknown },
 ): Promise<{ key: string; value: T }> {
   return apiRequest<{ key: string; value: T }>(`/settings/${key}`, {
     method: "PUT",
-    body: JSON.stringify({ value }),
+    body: JSON.stringify({ value, ...(comparison ? { expected_value: comparison.expectedValue } : {}) }),
   });
 }

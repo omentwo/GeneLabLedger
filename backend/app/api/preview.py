@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import FileResponse
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.database import get_session
@@ -71,8 +71,6 @@ def _search_filters(project_id: str, payload: LedgerPrintPreviewCreate) -> list[
 
 
 def _preview_filters(project_id: str, payload: LedgerPrintPreviewCreate) -> list[Any]:
-    if payload.scope == "all":
-        return []
     if payload.scope == "project":
         return [ProjectRecord.project_id == project_id]
     return _search_filters(project_id, payload)
@@ -83,11 +81,11 @@ def _safe_filename(value: str) -> str:
     return (cleaned or "ledger")[:100]
 
 
-def _build_ledger_source(
+def _build_ledger_sheet(
     session: Session,
     project: Project,
     payload: LedgerPrintPreviewCreate,
-) -> tuple[bytes, str, str, int]:
+) -> tuple[tuple[str, list[str], list[list[object]]], int]:
     fields = [
         field
         for field in sorted(project.fields, key=lambda item: (item.sort_order, item.created_at))
@@ -97,113 +95,23 @@ def _build_ledger_source(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="The ledger has no printable fields."
         )
+    if payload.scope == "selection":
+        selected_field_ids = {item.field_id for item in payload.cells}
+        indices = [index for index, field in enumerate(fields) if field.id in selected_field_ids]
+        if not indices:
+            raise HTTPException(status_code=422, detail="请选择当前台账的可见单元格")
+        fields = fields[min(indices) : max(indices) + 1]
     filters = _preview_filters(project.id, payload)
-    base_query = (
-        select(ProjectRecord)
-        .where(*filters)
-        .options(selectinload(ProjectRecord.values))
-        .order_by(ProjectRecord.position.asc(), ProjectRecord.id.asc())
-    )
-    all_records = list(session.scalars(base_query))
-    selected_targets = {(item.record_id, item.field_id) for item in payload.cells}
     if payload.scope == "selection":
-        if not selected_targets:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Select at least one cell to preview.",
-            )
-        record_by_id = {record.id: record for record in all_records}
-        missing_ids = {record_id for record_id, _ in selected_targets if record_id not in record_by_id}
-        if missing_ids:
-            extra_records = list(
-                session.scalars(
-                    select(ProjectRecord)
-                    .where(ProjectRecord.project_id == project.id, ProjectRecord.id.in_(missing_ids))
-                    .options(selectinload(ProjectRecord.values))
-                )
-            )
-            record_by_id.update({record.id: record for record in extra_records})
-        field_by_id = {field.id: field for field in fields}
-        selected_targets = {
-            (record_id, field_id)
-            for record_id, field_id in selected_targets
-            if record_id in record_by_id and field_id in field_by_id
-        }
-        if not selected_targets:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="The selected cells are not part of this ledger.",
-            )
-        ordered_records = [
-            record_by_id[record_id]
-            for record_id in record_by_id
-            if any(target[0] == record_id for target in selected_targets)
+        filters = [
+            ProjectRecord.project_id == project.id,
+            ProjectRecord.id.in_({item.record_id for item in payload.cells}),
         ]
-        ordered_records.sort(key=lambda record: (record.position, record.id))
-        selected_field_ids = {field_id for _, field_id in selected_targets}
-        ordered_fields = [field for field in fields if field.id in selected_field_ids]
-        first_field_index = min(fields.index(field) for field in ordered_fields)
-        last_field_index = max(fields.index(field) for field in ordered_fields)
-        ordered_fields = fields[first_field_index : last_field_index + 1]
-        rows: list[list[object]] = []
-        for record in ordered_records:
-            values = {value.field_id: value.value_text for value in record.values}
-            rows.append(
-                [
-                    _display_value(record, field, values)
-                    if (record.id, field.id) in selected_targets
-                    else ""
-                    for field in ordered_fields
-                ]
-            )
-        headers = [field.label for field in ordered_fields]
-        selected_count = len(selected_targets)
-        scope = "selection"
-    else:
-        ordered_records = all_records
-        rows = []
-        for record in ordered_records:
-            values = {value.field_id: value.value_text for value in record.values}
-            rows.append([_display_value(record, field, values) for field in fields])
-        headers = [field.label for field in fields]
-        selected_count = len(rows) * len(headers)
-        scope = payload.scope
-    filename = f"{_safe_filename(project.name)}.xlsx"
-    return build_xlsx([(_safe_filename(project.name), headers, rows)]), filename, scope, selected_count
-
-
-@router.get("/preview/capabilities", response_model=PreviewCapabilitiesRead)
-def preview_capabilities(
-    request: Request,
-    service: OfficePreviewService = Depends(preview_service_from),
-) -> dict[str, object]:
-    return service.capabilities()
-
-
-@router.post("/ledgers/{ledger_id}/print-preview", response_model=LedgerPrintPreviewRead)
-def create_ledger_print_preview(
-    ledger_id: str,
-    payload: LedgerPrintPreviewCreate,
-    request: Request,
-    session: Session = Depends(get_session),
-    service: OfficePreviewService = Depends(preview_service_from),
-) -> dict[str, object]:
-    project = session.scalar(
-        select(Project).where(Project.id == ledger_id).options(selectinload(Project.fields))
-    )
-    if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ledger not found.")
-    fields = [
-        field
-        for field in sorted(project.fields, key=lambda item: (item.sort_order, item.created_at))
-        if not field.hidden
-    ]
-    if not fields:
+    row_count = session.scalar(select(func.count()).select_from(ProjectRecord).where(*filters)) or 0
+    if (row_count + 1) * len(fields) > 2_000_000 or row_count > 10_000 or len(fields) > 200:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="The ledger has no printable fields."
+            status_code=422, detail="预览内容过大，请缩小范围（最多 10000 行、200 列、200 万格）"
         )
-
-    filters = _preview_filters(ledger_id, payload)
     base_query = (
         select(ProjectRecord)
         .where(*filters)
@@ -219,17 +127,6 @@ def create_ledger_print_preview(
                 detail="Select at least one cell to preview.",
             )
         record_by_id = {record.id: record for record in all_records}
-        # Selection may contain records outside the active filter, so load them explicitly.
-        missing_ids = {record_id for record_id, _ in selected_targets if record_id not in record_by_id}
-        if missing_ids:
-            extra_records = list(
-                session.scalars(
-                    select(ProjectRecord)
-                    .where(ProjectRecord.project_id == ledger_id, ProjectRecord.id.in_(missing_ids))
-                    .options(selectinload(ProjectRecord.values))
-                )
-            )
-            record_by_id.update({record.id: record for record in extra_records})
         field_by_id = {field.id: field for field in fields}
         selected_targets = {
             (record_id, field_id)
@@ -263,7 +160,6 @@ def create_ledger_print_preview(
             )
         headers = [field.label for field in ordered_fields]
         selected_count = len(selected_targets)
-        scope = "selection"
     else:
         ordered_records = all_records
         rows = []
@@ -272,7 +168,67 @@ def create_ledger_print_preview(
             rows.append([_display_value(record, field, values) for field in fields])
         headers = [field.label for field in fields]
         selected_count = len(rows) * len(headers)
-        scope = payload.scope
+    return (project.name, headers, rows), selected_count
+
+
+def _build_ledger_source(
+    session: Session,
+    project: Project,
+    payload: LedgerPrintPreviewCreate,
+) -> tuple[bytes, str, str, int]:
+    if payload.scope != "all":
+        sheet, count = _build_ledger_sheet(session, project, payload)
+        return build_xlsx([sheet]), f"{_safe_filename(project.name)}.xlsx", payload.scope, count
+    projects = list(
+        session.scalars(
+            select(Project).options(selectinload(Project.fields)).order_by(Project.sort_order, Project.id)
+        )
+    )
+    counts = dict(
+        session.execute(
+            select(ProjectRecord.project_id, func.count()).group_by(ProjectRecord.project_id)
+        ).all()
+    )
+    printable_projects = [item for item in projects if any(not field.hidden for field in item.fields)]
+    cell_count = sum(
+        (counts.get(item.id, 0) + 1) * sum(not field.hidden for field in item.fields)
+        for item in printable_projects
+    )
+    if len(printable_projects) > 100 or cell_count > 2_000_000:
+        raise HTTPException(status_code=422, detail="预览内容过大，请缩小项目范围")
+    sheets = []
+    selected_count = 0
+    for item in printable_projects:
+        sheet, count = _build_ledger_sheet(session, item, payload.model_copy(update={"scope": "project"}))
+        sheets.append(sheet)
+        selected_count += count
+    if not sheets:
+        raise HTTPException(status_code=409, detail="没有可打印的表头")
+    return build_xlsx(sheets), "全部台账.xlsx", "all", selected_count
+
+
+@router.get("/preview/capabilities", response_model=PreviewCapabilitiesRead)
+def preview_capabilities(
+    request: Request,
+    service: OfficePreviewService = Depends(preview_service_from),
+) -> dict[str, object]:
+    return service.capabilities()
+
+
+@router.post("/ledgers/{ledger_id}/print-preview", response_model=LedgerPrintPreviewRead)
+def create_ledger_print_preview(
+    ledger_id: str,
+    payload: LedgerPrintPreviewCreate,
+    request: Request,
+    session: Session = Depends(get_session),
+    service: OfficePreviewService = Depends(preview_service_from),
+) -> dict[str, object]:
+    project = session.scalar(
+        select(Project).where(Project.id == ledger_id).options(selectinload(Project.fields))
+    )
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ledger not found.")
+    document_bytes, _, scope, selected_count = _build_ledger_source(session, project, payload)
 
     preview_id = uuid.uuid4().hex
     settings = request.app.state.settings
@@ -284,7 +240,7 @@ def create_ledger_print_preview(
     preview_dir.mkdir(parents=True, exist_ok=True)
     input_path = preview_dir / f"{preview_id}.xlsx"
     output_path = preview_dir / f"{preview_id}.pdf"
-    input_path.write_bytes(build_xlsx([(_safe_filename(project.name), headers, rows)]))
+    input_path.write_bytes(document_bytes)
     try:
         resolved_engine = service.convert_xlsx_to_pdf(input_path, output_path, payload.print_engine)
     except (PreviewEngineUnavailable, OfficePreviewError) as error:

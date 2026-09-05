@@ -6,7 +6,7 @@
 flowchart LR
   A[Vue 页面] --> B[记录与项目 API]
   B --> C[(SQLite 数据库)]
-  A --> D[Excel 导入导出 API]
+  A --> D[Excel 导出 API]
   A --> E[报告模板与打印 API]
   A --> F[自动导出调度器]
 ```
@@ -19,7 +19,7 @@ flowchart LR
 flowchart LR
   P[项目切换] --> W[UniverLedgerGrid]
   W --> S[Univer workbook snapshot]
-  W --> R[记录更新/批量导入 API]
+  W --> R[记录更新/批量单元格 API]
   R --> DB[(SQLite)]
   T[工具栏与业务页面] --> R
   T --> X[实验编排、报告、导出、自动导出]
@@ -34,7 +34,7 @@ Univer 不应成为业务数据库，也不应直接决定记录是否删除、�
 - 接收当前项目、字段定义和记录列表。
 - 生成 `IWorkbookData`，建立 `rowIndex -> record.id`、`columnIndex -> field.id` 映射。
 - 处理选区、编辑、复制粘贴、滚动和表格显示样式。
-- 将修改转换为现有记录更新或批量导入请求。
+- 将修改转换为现有记录更新或批量单元格请求。
 - 项目切换、组件卸载时调用 Univer dispose，避免旧工作簿残留。
 
 ### 现有业务页面
@@ -47,7 +47,7 @@ Univer 不应成为业务数据库，也不应直接决定记录是否删除、�
 ### 后端
 
 - 记录更新和锁定校验继续由后端执行。
-- `/imports/workbook/commit` 继续处理批量粘贴或 Excel 导入。
+- `/records/cell-batches/preview` 和 `/records/cell-batches/commit` 处理批量粘贴；Excel 导入已移除。
 - `/exports/workbook` 继续生成手动 Excel 文件。
 - 自动导出调度器和报告打印服务不因表格组件更换而改变。
 

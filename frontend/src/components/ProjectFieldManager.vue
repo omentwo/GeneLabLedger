@@ -8,6 +8,7 @@ import {
   FilePlus2 as DocumentAdd,
   Pencil as EditPen,
   Dna,
+  GripVertical,
   Plus,
   Settings2 as Setting,
 } from "@lucide/vue";
@@ -59,6 +60,11 @@ const newProjectTemplateId = ref("");
 const ledgerTemplates = ref<LedgerTemplate[]>([]);
 const workingFields = ref<FieldDefinition[]>([]);
 const saving = ref(false);
+const draggingFieldId = ref("");
+const dragStartIndex = ref(-1);
+const dragTargetIndex = ref(-1);
+const dragOverRowIndex = ref(-1);
+const dragInsertAfter = ref(false);
 const fieldDialogVisible = ref(false);
 const batchFieldDialogVisible = ref(false);
 const batchFieldText = ref("");
@@ -94,6 +100,9 @@ const currentProject = computed(() =>
 );
 const batchFieldPreview = computed(() =>
   previewBatchFieldLabels(batchFieldText.value, workingFields.value),
+);
+const draggingField = computed(() =>
+  workingFields.value.find((field) => field.id === draggingFieldId.value) ?? null,
 );
 
 const dataTypeLabels: Record<DataType, string> = {
@@ -362,6 +371,93 @@ async function moveField(index: number, offset: -1 | 1): Promise<void> {
   }
 }
 
+function clearFieldDrag(): void {
+  draggingFieldId.value = "";
+  dragStartIndex.value = -1;
+  dragTargetIndex.value = -1;
+  dragOverRowIndex.value = -1;
+  dragInsertAfter.value = false;
+}
+
+function startFieldDrag(event: DragEvent, field: FieldDefinition, index: number): void {
+  if (saving.value) {
+    event.preventDefault();
+    return;
+  }
+  draggingFieldId.value = field.id;
+  dragStartIndex.value = index;
+  dragTargetIndex.value = index;
+  dragOverRowIndex.value = index;
+  dragInsertAfter.value = false;
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", field.id);
+  }
+}
+
+function updateFieldDropTarget(event: DragEvent): void {
+  if (!draggingFieldId.value) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+  const eventTarget = event.target;
+  if (!(eventTarget instanceof Element)) return;
+  const row = eventTarget.closest("tr.el-table__row");
+  const body = row?.parentElement;
+  if (!(row instanceof HTMLTableRowElement) || !(body instanceof HTMLTableSectionElement)) return;
+  const rowIndex = Array.from(body.rows).indexOf(row);
+  if (rowIndex < 0 || rowIndex >= workingFields.value.length) return;
+  const sourceIndex = workingFields.value.findIndex(
+    (field) => field.id === draggingFieldId.value,
+  );
+  if (sourceIndex < 0) return;
+  const insertAfter = event.clientY >= row.getBoundingClientRect().top + row.offsetHeight / 2;
+  const boundaryIndex = rowIndex + (insertAfter ? 1 : 0);
+  const targetIndex = boundaryIndex > sourceIndex ? boundaryIndex - 1 : boundaryIndex;
+  dragOverRowIndex.value = rowIndex;
+  dragInsertAfter.value = insertAfter;
+  dragTargetIndex.value = Math.max(0, Math.min(workingFields.value.length - 1, targetIndex));
+}
+
+async function dropField(event: DragEvent): Promise<void> {
+  updateFieldDropTarget(event);
+  const projectId = currentProject.value?.id;
+  const sourceIndex = workingFields.value.findIndex(
+    (field) => field.id === draggingFieldId.value,
+  );
+  const targetIndex = dragTargetIndex.value;
+  clearFieldDrag();
+  if (!projectId || sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return;
+
+  const reordered = workingFields.value.slice();
+  const [field] = reordered.splice(sourceIndex, 1);
+  if (!field) return;
+  reordered.splice(targetIndex, 0, field);
+  workingFields.value = reordered;
+  saving.value = true;
+  try {
+    await reorderFields(
+      projectId,
+      reordered.map((item) => item.id),
+    );
+    await reloadAndNotify();
+    ElMessage.success("表头顺序已保存");
+  } catch (error) {
+    syncCurrentProject();
+    ElMessage.error(error instanceof Error ? error.message : "表头顺序保存失败");
+  } finally {
+    saving.value = false;
+  }
+}
+
+function fieldRowClassName({ row, rowIndex }: { row: FieldDefinition; rowIndex: number }): string {
+  const classes: string[] = [];
+  if (row.id === draggingFieldId.value) classes.push("field-row-dragging");
+  if (rowIndex === dragOverRowIndex.value && draggingFieldId.value) {
+    classes.push(dragInsertAfter.value ? "field-drop-after" : "field-drop-before");
+  }
+  return classes.join(" ");
+}
+
 function openAddField(): void {
   Object.assign(newField, {
     label: "",
@@ -625,23 +721,48 @@ watch(
           </div>
         </div>
 
-        <el-table :data="workingFields" row-key="id" border max-height="480">
-          <el-table-column label="顺序" width="92" align="center">
-            <template #default="{ $index }">
-              <el-button
-                link
-                :icon="ArrowUp"
-                :disabled="$index === 0"
-                title="向前移动"
-                @click="moveField($index, -1)"
-              />
-              <el-button
-                link
-                :icon="ArrowDown"
-                :disabled="$index === workingFields.length - 1"
-                title="向后移动"
-                @click="moveField($index, 1)"
-              />
+        <div v-if="draggingField" class="field-drag-status" aria-live="polite">
+          正在移动“{{ draggingField.label }}”：第 {{ dragStartIndex + 1 }} 位 →
+          第 {{ dragTargetIndex + 1 }} 位
+        </div>
+        <el-table
+          :data="workingFields"
+          row-key="id"
+          :row-class-name="fieldRowClassName"
+          border
+          max-height="480"
+          @dragover="updateFieldDropTarget"
+          @drop="dropField"
+        >
+          <el-table-column label="顺序" width="116" align="center">
+            <template #default="{ row, $index }: { row: FieldDefinition; $index: number }">
+              <span class="field-order-actions">
+                <button
+                  type="button"
+                  class="field-drag-handle"
+                  :draggable="!saving"
+                  :aria-label="`拖动表头“${row.label}”调整顺序`"
+                  title="拖动调整顺序"
+                  @dragstart="startFieldDrag($event, row, $index)"
+                  @dragend="clearFieldDrag"
+                >
+                  <GripVertical :size="18" aria-hidden="true" />
+                </button>
+                <el-button
+                  link
+                  :icon="ArrowUp"
+                  :disabled="$index === 0"
+                  title="向前移动"
+                  @click="moveField($index, -1)"
+                />
+                <el-button
+                  link
+                  :icon="ArrowDown"
+                  :disabled="$index === workingFields.length - 1"
+                  title="向后移动"
+                  @click="moveField($index, 1)"
+                />
+              </span>
             </template>
           </el-table-column>
           <el-table-column label="表头名称" min-width="180">
@@ -1025,22 +1146,22 @@ watch(
   display: flex;
   height: 52px;
   margin-bottom: 8px;
-  border: 1px solid #eaecf0;
+  border: 1px solid var(--app-border);
   border-radius: 12px;
-  background: #fff;
+  background: var(--app-bg);
   line-height: 52px;
 }
 
 .project-panel :deep(.el-menu-item.is-active) {
-  border-color: #bddfd4;
-  color: #167d73;
-  background: #eaf7f2;
+  border-color: var(--app-primary-border);
+  color: var(--app-primary-text);
+  background: var(--app-primary-soft);
 }
 
 .project-symbol {
   margin-right: 8px;
   flex-shrink: 0;
-  color: var(--app-primary);
+  color: var(--app-primary-text);
 }
 
 .project-count {
@@ -1048,8 +1169,8 @@ watch(
   height: 24px;
   margin-left: 8px;
   border-radius: 999px;
-  color: #475467;
-  background: #f2f4f7;
+  color: var(--app-muted);
+  background: var(--app-surface-soft);
   font-size: 12px;
   line-height: 24px;
   text-align: center;
@@ -1112,6 +1233,67 @@ watch(
   font-size: 12px;
 }
 
+.field-drag-status {
+  position: fixed;
+  z-index: 4000;
+  top: 20px;
+  left: 50%;
+  border: 1px solid var(--app-primary-border);
+  border-radius: 8px;
+  color: var(--app-primary-text);
+  background: var(--app-primary-soft);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 12%);
+  padding: 7px 10px;
+  font-size: 12px;
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.field-order-actions {
+  display: inline-flex;
+  align-items: center;
+}
+
+.field-order-actions :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.field-drag-handle {
+  display: inline-flex;
+  width: 26px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 5px;
+  color: var(--app-muted);
+  background: transparent;
+  cursor: grab;
+  padding: 0;
+}
+
+.field-drag-handle:hover,
+.field-drag-handle:focus-visible {
+  color: var(--app-primary-text);
+  background: var(--app-primary-soft);
+}
+
+.field-drag-handle:active {
+  cursor: grabbing;
+}
+
+:deep(.el-table__body tr.field-row-dragging > td.el-table__cell) {
+  opacity: 0.45;
+}
+
+:deep(.el-table__body tr.field-drop-before > td.el-table__cell) {
+  box-shadow: inset 0 3px 0 var(--app-primary);
+}
+
+:deep(.el-table__body tr.field-drop-after > td.el-table__cell) {
+  box-shadow: inset 0 -3px 0 var(--app-primary);
+}
+
 .option-summary {
   display: block;
   overflow: hidden;
@@ -1157,7 +1339,7 @@ watch(
 
 .batch-field-preview-row.is-duplicate,
 .batch-field-preview-row.is-conflict {
-  background: #fff7ed;
+  background: var(--app-warning-soft);
 }
 
 .batch-field-index {

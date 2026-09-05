@@ -279,7 +279,7 @@ watch(
   padding: 10px;
   border: 1px solid var(--app-border);
   border-radius: 10px;
-  background: #f8fcfa;
+  background: var(--app-surface-soft);
   grid-template-columns: minmax(0, 1fr) minmax(88px, 110px) minmax(96px, 120px) minmax(130px, 1fr) 48px;
   gap: 8px;
   align-items: center;

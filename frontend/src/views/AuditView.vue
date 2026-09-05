@@ -57,18 +57,23 @@ const entityLabels: Record<string, string> = {
   app_setting: "系统设置",
 };
 
+let logRequestGeneration = 0;
+
 async function loadLogs(pageNumber = currentPage.value): Promise<void> {
+  const generation = ++logRequestGeneration;
   loading.value = true;
   errorMessage.value = "";
   try {
-    currentPage.value = pageNumber;
     const page = await listAuditLogs(search.value, PAGE_SIZE, (pageNumber - 1) * PAGE_SIZE);
+    if (generation !== logRequestGeneration) return;
+    currentPage.value = pageNumber;
     logs.value = page.items;
     total.value = page.total;
   } catch (error) {
+    if (generation !== logRequestGeneration) return;
     errorMessage.value = error instanceof Error ? error.message : "日志读取失败";
   } finally {
-    loading.value = false;
+    if (generation === logRequestGeneration) loading.value = false;
   }
 }
 
@@ -170,7 +175,7 @@ onMounted(() => {
       </el-table>
       <div v-if="total" class="pagination-row">
         <el-pagination
-          v-model:current-page="currentPage"
+          :current-page="currentPage"
           background
           layout="total, prev, pager, next, jumper"
           :page-size="PAGE_SIZE"
@@ -205,5 +210,5 @@ code {
 }
 .pagination-row { overflow-x: auto; }
 @media (max-width: 640px) { .pagination-row { justify-content: flex-start; } }
-pre { padding: 12px; border-radius: 8px; background: #f5faf8; color: #243746; }
+pre { padding: 12px; border-radius: 8px; background: var(--app-surface-soft); color: var(--app-text); }
 </style>

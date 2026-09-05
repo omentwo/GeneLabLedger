@@ -25,6 +25,13 @@ import {
   type LedgerDisplaySettings,
 } from "@/api/system";
 import { desktopBridge } from "@/utils/desktop";
+import { currentTheme, setTheme, THEME_OPTIONS, type ThemeId } from "@/utils/themePreference";
+
+function selectTheme(theme: ThemeId): void {
+  if (!setTheme(theme)) {
+    ElMessage.warning("配色已切换，但本机存储不可用，关闭窗口后可能无法保留。");
+  }
+}
 
 const bridge = desktopBridge();
 const currentDirectory = ref(bridge?.dataDirectory ?? "");
@@ -194,6 +201,28 @@ onMounted(() => {
       </div>
     </section>
 
+    <section class="page-card overflow-hidden" aria-labelledby="theme-heading">
+      <div class="page-card-header">
+        <div>
+          <h2 id="theme-heading" class="page-card-title">配色风格</h2>
+          <p class="page-description">选择后立即生效并自动记住，下次打开沿用；快速录入窗口同步切换。</p>
+        </div>
+      </div>
+      <div class="theme-options" role="radiogroup" aria-labelledby="theme-heading">
+        <label v-for="theme in THEME_OPTIONS" :key="theme.id" class="theme-option" :class="{ 'is-selected': currentTheme === theme.id }">
+          <input type="radio" name="color-theme" :value="theme.id" :checked="currentTheme === theme.id" @change="selectTheme(theme.id)" />
+          <span class="theme-option-body">
+            <span class="theme-swatches" aria-hidden="true">
+              <span v-for="color in theme.colors" :key="color" :style="{ backgroundColor: color }" />
+            </span>
+            <strong>{{ theme.name }}</strong>
+            <span class="theme-description">{{ theme.description }}</span>
+            <span class="theme-selection">{{ currentTheme === theme.id ? "当前使用" : "选择此风格" }}</span>
+          </span>
+        </label>
+      </div>
+    </section>
+
     <section class="page-card overflow-hidden">
       <div class="page-card-header">
         <div>
@@ -353,3 +382,21 @@ onMounted(() => {
     </section>
   </div>
 </template>
+
+<style scoped>
+.theme-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; padding: 20px; }
+.theme-option { display: flex; align-items: flex-start; gap: 10px; min-width: 0; padding: 16px; border: 1px solid var(--app-border-strong); border-radius: 12px; background: var(--app-bg); cursor: pointer; }
+.theme-option:hover { background: var(--app-hover); }
+.theme-option.is-selected { border-color: var(--app-primary); box-shadow: inset 0 0 0 1px var(--app-primary); background: var(--app-primary-soft); }
+.theme-option:focus-within { outline: 2px solid var(--app-primary); outline-offset: 3px; }
+.theme-option input { margin: 4px 0 0; accent-color: var(--app-primary); }
+.theme-option-body { display: grid; gap: 9px; min-width: 0; }
+.theme-swatches { display: flex; gap: 6px; }
+.theme-swatches > span { width: 28px; height: 28px; border: 1px solid var(--app-border-strong); border-radius: 50%; }
+.theme-description { color: var(--app-muted); font-size: 12px; line-height: 1.7; }
+.theme-selection { color: var(--app-primary-text); font-size: 12px; font-weight: 600; }
+.settings-page .text-slate-500, .settings-page .text-slate-600 { color: var(--app-muted); }
+.settings-page .text-slate-700 { color: var(--app-text); }
+.settings-page .bg-slate-100 { background: var(--app-surface-soft); }
+@media (max-width: 800px) { .theme-options { grid-template-columns: minmax(0, 1fr); } }
+</style>

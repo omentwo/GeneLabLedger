@@ -21,10 +21,7 @@ from app.services.field_names import RESERVED_WORKBOOK_HEADERS
 from app.services.field_validation import validate_default_value
 
 router = APIRouter(tags=["ledger-templates"])
-CORE_FIELD_BY_SYSTEM_KEY = {
-    str(field["system_key"]): field
-    for field in CORE_FIELDS
-}
+CORE_FIELD_BY_SYSTEM_KEY = {str(field["system_key"]): field for field in CORE_FIELDS}
 
 
 def _clean_fields(values: list[LedgerTemplateField]) -> list[dict[str, Any]]:
@@ -37,8 +34,26 @@ def _clean_fields(values: list[LedgerTemplateField]) -> list[dict[str, Any]]:
     # not contain it. Upgrade those templates in memory so they remain usable.
     if not any(field.system_key == "block_number" for field in values):
         block_definition = CORE_FIELD_BY_SYSTEM_KEY["block_number"]
+        # Keep legacy custom-field semantics (options/defaults/validation) intact.
+        # Give colliding identifiers a stable name before adding the new core field.
+        identifiers = {
+            name for field in values for name in (field.key, field.label, field.system_key) if name
+        }
+        reserved = {str(block_definition["key"]), str(block_definition["label"]), "block_number"}
+        upgraded = []
+        for field in values:
+            changes = {}
+            for attribute in ("key", "label"):
+                name = getattr(field, attribute)
+                if not field.is_core and name in reserved:
+                    candidate = f"{name}_legacy" if attribute == "key" else f"{name}（旧自定义）"
+                    while candidate in identifiers:
+                        candidate += "_"
+                    identifiers.add(candidate)
+                    changes[attribute] = candidate
+            upgraded.append(field.model_copy(update=changes))
         values = [
-            *values,
+            *upgraded,
             LedgerTemplateField(
                 key=str(block_definition["key"]),
                 label=str(block_definition["label"]),
@@ -83,14 +98,14 @@ def _clean_fields(values: list[LedgerTemplateField]) -> list[dict[str, Any]]:
         if reserved:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="模板表头不能使用 Excel 导入保留字段",
+                detail="模板表头不能使用 系统保留字段",
             )
         conflicts = identifiers & seen_import_identifiers
         if conflicts:
             names = "、".join(sorted(conflicts))
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"模板表头存在导入命名冲突：{names}",
+                detail=f"模板表头存在字段命名冲突：{names}",
             )
         seen_import_identifiers.update(identifiers)
         core_definition = CORE_FIELD_BY_SYSTEM_KEY.get(system_key or "")
@@ -208,9 +223,7 @@ def template_dict(template: LedgerTemplate) -> dict[str, Any]:
 
 
 def apply_template_fields(session: Session, project: Project, template: LedgerTemplate) -> None:
-    fields = _clean_fields(
-        [LedgerTemplateField.model_validate(item) for item in template.fields or []]
-    )
+    fields = _clean_fields([LedgerTemplateField.model_validate(item) for item in template.fields or []])
     for index, item in enumerate(fields):
         field = FieldDefinition(
             project_id=project.id,

@@ -132,15 +132,15 @@ onBeforeUnmount(() => {
 
 <template>
   <div
-    class="app-shell bg-slate-50 text-slate-900"
+    class="app-shell"
     :class="{ 'sidebar-collapsed': isSidebarCollapsed }"
   >
     <header class="window-titlebar" aria-label="窗口标题栏">
       <div class="window-titlebar-drag" @dblclick="toggleMaximize">
         <svg class="window-titlebar-mark" viewBox="0 0 64 64" aria-hidden="true">
-          <rect x="2" y="2" width="60" height="60" rx="18" fill="#e8f3ff" stroke="#b9d7f5" stroke-width="2" />
-          <path d="M22 16c14 4 14 28 28 32M42 16c-14 4-14 28-28 32" fill="none" stroke="#1677ff" stroke-width="4" stroke-linecap="round" />
-          <path d="M24 22h16M22 32h20M24 42h16" stroke="#16a36a" stroke-width="3" stroke-linecap="round" />
+          <rect x="2" y="2" width="60" height="60" rx="18" fill="var(--app-primary-soft)" stroke="var(--app-primary-border)" stroke-width="2" />
+          <path d="M22 16c14 4 14 28 28 32M42 16c-14 4-14 28-28 32" fill="none" stroke="var(--app-primary)" stroke-width="4" stroke-linecap="round" />
+          <path d="M24 22h16M22 32h20M24 42h16" stroke="var(--app-brand)" stroke-width="3" stroke-linecap="round" />
         </svg>
         <span>基因检测台账</span>
       </div>
@@ -264,6 +264,8 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .app-shell {
+  background: var(--app-bg);
+  color: var(--app-text);
   --app-sidebar-expanded-width: 224px;
   --app-sidebar-collapsed-width: 72px;
   --app-sidebar-current-width: var(--app-sidebar-expanded-width);
@@ -286,9 +288,9 @@ onBeforeUnmount(() => {
   height: 36px;
   flex: 0 0 36px;
   align-items: stretch;
-  border-bottom: 1px solid #e4e7ec;
-  background: rgb(255 255 255 / 96%);
-  color: #475467;
+  border-bottom: 1px solid var(--app-border);
+  background: var(--app-bg);
+  color: var(--app-muted);
   user-select: none;
   -webkit-app-region: drag;
 }
@@ -327,7 +329,7 @@ onBeforeUnmount(() => {
   justify-content: center;
   border: 0;
   background: transparent;
-  color: #667085;
+  color: var(--app-muted);
   cursor: pointer;
   outline: none;
   padding: 0;
@@ -336,18 +338,18 @@ onBeforeUnmount(() => {
 
 .window-control:hover,
 .window-control:focus-visible {
-  background: #f2f4f7;
-  color: #182230;
+  background: var(--app-surface-soft);
+  color: var(--app-text);
 }
 
 .window-control.active {
-  background: #eaf3ff;
-  color: #1677ff;
+  background: var(--app-primary-soft);
+  color: var(--app-primary-text);
 }
 
 .window-control.active:hover,
 .window-control.active:focus-visible {
-  background: #dbeafe;
+  background: var(--app-primary-border);
 }
 
 .window-control svg {
@@ -367,8 +369,8 @@ onBeforeUnmount(() => {
 
 .window-close:hover,
 .window-close:focus-visible {
-  background: #e81123;
-  color: #fff;
+  background: var(--app-danger);
+  color: var(--app-bg);
 }
 
 .app-content {
@@ -389,8 +391,8 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  border-right: 1px solid #e3ecef;
-  background: #fff;
+  border-right: 1px solid var(--app-nav-line);
+  background: var(--app-nav-bg);
   padding: 20px 12px 16px;
   position: sticky;
   top: 36px;
@@ -408,7 +410,7 @@ onBeforeUnmount(() => {
   gap: 8px;
   flex-shrink: 0;
   padding: 0 0 18px;
-  border-bottom: 1px solid #edf2f3;
+  border-bottom: 1px solid var(--app-nav-line);
 }
 
 .sidebar-brand-mark {
@@ -417,8 +419,8 @@ onBeforeUnmount(() => {
   flex: 0 0 36px;
   height: 40px;
   border-radius: 12px;
-  background: #eaf7f2;
-  color: #167d73;
+  background: var(--app-nav-active);
+  color: var(--app-nav-active-text);
 }
 
 .sidebar-brand-title {
@@ -430,14 +432,14 @@ onBeforeUnmount(() => {
 }
 
 .sidebar-brand-title strong {
-  color: #243746;
+  color: var(--app-nav-heading);
   font-size: 14px;
   font-weight: 650;
 }
 
 .sidebar-brand-title span,
 .sidebar-section-label {
-  color: #627985;
+  color: var(--app-nav-muted);
   font-size: 12px;
 }
 
@@ -461,7 +463,7 @@ onBeforeUnmount(() => {
   border: 0;
   border-radius: 10px;
   background: transparent;
-  color: #526775;
+  color: var(--app-nav-text);
   cursor: pointer;
   outline: none;
   padding: 0;
@@ -470,8 +472,8 @@ onBeforeUnmount(() => {
 
 .sidebar-toggle:hover,
 .sidebar-toggle:focus-visible {
-  background: #eaf7f2;
-  color: #167d73;
+  background: var(--app-nav-hover);
+  color: var(--app-nav-active-text);
 }
 
 .sidebar-nav-link {
@@ -484,7 +486,7 @@ onBeforeUnmount(() => {
   border: 1px solid transparent;
   border-radius: 12px;
   padding: 10px 12px;
-  color: #526775;
+  color: var(--app-nav-text);
   font-size: 14px;
   font-weight: 550;
   text-decoration: none;
@@ -496,20 +498,20 @@ onBeforeUnmount(() => {
 }
 
 .sidebar-nav-link:hover {
-  background: #f3f9fb;
-  color: #243746;
+  background: var(--app-nav-hover);
+  color: var(--app-nav-active-text);
 }
 
 .sidebar-nav-link.router-link-active {
-  background: #eaf7f2;
-  border-color: #d5ece3;
-  color: #167d73;
+  background: var(--app-nav-active);
+  border-color: var(--app-nav-active-border);
+  color: var(--app-nav-active-text);
   font-weight: 650;
 }
 
 .sidebar-nav-link:focus-visible,
 .sidebar-toggle:focus-visible {
-  outline: 2px solid #167d73;
+  outline: 2px solid var(--app-nav-focus);
   outline-offset: 2px;
 }
 
@@ -519,19 +521,19 @@ onBeforeUnmount(() => {
   gap: 10px;
   flex-shrink: 0;
   margin-top: auto;
-  border-top: 1px solid #e3ecef;
+  border-top: 1px solid var(--app-nav-line);
   padding: 18px 10px 4px;
-  color: #526775;
+  color: var(--app-nav-muted);
   font-size: 12px;
 }
 
 .sidebar-status > svg {
   flex-shrink: 0;
-  color: #627985;
+  color: var(--app-nav-muted);
 }
 
 .sidebar-status > svg.is-online {
-  color: #167d73;
+  color: var(--app-live);
 }
 
 .sidebar-nav-link span {

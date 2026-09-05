@@ -10,7 +10,6 @@ export const LEDGER_LAYOUT_SETTINGS_KEY = "ledger_layout_settings";
 export interface LedgerProjectLayoutSettings {
   sort: { field_id: string; direction: "asc" | "desc" } | null;
   filters: Record<string, LedgerFieldFilter>;
-  frozen_until_field_id: string | null;
 }
 
 export interface LedgerLayoutSettingsDocument {
@@ -21,7 +20,6 @@ export interface LedgerLayoutSettingsDocument {
 export interface ResolvedLedgerProjectLayout {
   sort: LedgerSortState;
   filters: LedgerFilterMap;
-  frozenUntilFieldId: string | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -64,10 +62,6 @@ function normalizeProjectSettings(value: unknown): LedgerProjectLayoutSettings {
   return {
     sort,
     filters,
-    frozen_until_field_id:
-      typeof source.frozen_until_field_id === "string" && source.frozen_until_field_id
-        ? source.frozen_until_field_id
-        : null,
   };
 }
 
@@ -101,10 +95,6 @@ export function resolveLedgerProjectLayout(
   return {
     sort,
     filters,
-    frozenUntilFieldId:
-      settings.frozen_until_field_id && visibleFieldIds.has(settings.frozen_until_field_id)
-        ? settings.frozen_until_field_id
-        : null,
   };
 }
 
@@ -129,7 +119,6 @@ export function withLedgerProjectLayout(
             }
           : null,
         filters,
-        frozen_until_field_id: layout.frozenUntilFieldId,
       },
     },
   };

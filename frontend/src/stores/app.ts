@@ -35,13 +35,15 @@ export const useAppStore = defineStore("app", {
         this.bootstrapping = true;
         this.bootstrapError = "";
         try {
-          const [health, projects] = await Promise.all([getHealth(), listProjects()]);
-          this.health = health;
-          this.projects = projects.slice().sort((a, b) => a.sort_order - b.sort_order);
-        } catch (error) {
-          this.health = null;
-          this.bootstrapError =
-            error instanceof Error ? error.message : "无法连接本机后端";
+          const [health, projects] = await Promise.allSettled([getHealth(), listProjects()]);
+          this.health = health.status === "fulfilled" ? health.value : null;
+          if (projects.status === "fulfilled") {
+            this.projects = projects.value.slice().sort((a, b) => a.sort_order - b.sort_order);
+          }
+          const failed = [health, projects].find((result) => result.status === "rejected");
+          if (failed?.status === "rejected") {
+            this.bootstrapError = failed.reason instanceof Error ? failed.reason.message : "页面数据读取失败";
+          }
         } finally {
           this.bootstrapping = false;
         }
@@ -52,6 +54,9 @@ export const useAppStore = defineStore("app", {
       } finally {
         bootstrapPromise = null;
       }
+    },
+    async refreshHealth(): Promise<void> {
+      this.health = await getHealth().catch(() => null);
     },
     async reloadProjects(): Promise<void> {
       this.projects = (await listProjects()).slice().sort((a, b) => a.sort_order - b.sort_order);

@@ -16,12 +16,10 @@ import {
   Search,
   Settings2 as Setting,
   LockOpen as Unlock,
-  Upload,
   NotebookTabs,
   Undo2,
   Redo2,
   Check,
-  Printer,
 } from "@lucide/vue";
 import { ElMessage, ElMessageBox, type TableColumnCtx } from "element-plus";
 import {
@@ -36,7 +34,6 @@ import {
 } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
-import { commitWorkbookImport, previewWorkbookImport } from "@/api/imports";
 import {
   createLedgerNativePreview,
   DEFAULT_LEDGER_PREVIEW_SCOPE,
@@ -61,10 +58,7 @@ import {
   applyRecordOperation,
   createRecord,
   deleteRecord,
-  executeBulkDelete,
-  getRecord,
   getRecordsByIds,
-  previewBulkDelete,
   commitCellBatch,
   commitReplace,
   listRecords,
@@ -95,13 +89,9 @@ import {
 } from "@/composables/useLedgerHistory";
 import type {
   FieldDefinition,
-  BulkDeleteFilter,
-  BulkDeletePreview,
-  WorkbookImportPreview,
   ProjectRecord,
   RecordStatus,
   RecordUpdateInput,
-  NativePreviewAction,
   NativePreviewTask,
   PreviewCapabilities,
   PrintEngine,
@@ -114,7 +104,12 @@ import type {
   RecordReplacePreview,
   RecordValidationIssue,
 } from "@/types/api";
-import { formatShanghaiDateTime } from "@/utils/datetime";
+import {
+  buildGridFillEntries,
+  normalizeDate,
+  type GridFillMode,
+} from "@/utils/ledgerFill";
+import { shanghaiDateKey } from "@/utils/datetime";
 import { desktopBridge } from "@/utils/desktop";
 import {
   LEDGER_GRID_CLIPBOARD_MIME,
@@ -164,8 +159,6 @@ const selectedRecords = ref<ProjectRecord[]>([]);
 const ledgerDisplaySettings = ref<LedgerDisplaySettings>({
   ...DEFAULT_LEDGER_DISPLAY_SETTINGS,
 });
-const selectionStartDate = ref("");
-const selectionEndDate = ref("");
 const ledgerTableCardRef = ref<HTMLElement | null>(null);
 const projectStripRef = ref<HTMLElement | null>(null);
 const tableRef = ref<{
@@ -206,6 +199,7 @@ type GridFillDragState = {
   pointerId: number;
   source: NormalizedGridRange;
   target: NormalizedGridRange;
+  mode: GridFillMode;
   startX: number;
   startY: number;
   lastX: number;
@@ -285,7 +279,6 @@ const ledgerLayoutSettings = ref<LedgerLayoutSettingsDocument>(
   normalizeLedgerLayoutSettings(null),
 );
 const columnWidthSaveQueues = new Map<string, LatestValuePersistence<number>>();
-const frozenUntilFieldId = ref<string | null>(null);
 const findReplaceVisible = ref(false);
 const findReplaceLoading = ref(false);
 const findReplacePreview = ref<RecordReplacePreview | null>(null);
@@ -369,15 +362,6 @@ const draftRows = ref<LedgerRow[]>([]);
 const globalSearchResults = ref<ProjectRecord[]>([]);
 const globalSearchTotal = ref(0);
 const focusRecordId = ref("");
-const importFileInput = ref<HTMLInputElement | null>(null);
-const importFile = ref<File | null>(null);
-const importSheetName = ref("");
-const importPreview = ref<WorkbookImportPreview | null>(null);
-const importDialogVisible = ref(false);
-const importLoading = ref(false);
-const bulkDeleteDialogVisible = ref(false);
-const bulkDeleteLoading = ref(false);
-const bulkDeletePreview = ref<BulkDeletePreview | null>(null);
 const highlightDialogVisible = ref(false);
 const highlightLoading = ref(false);
 const highlightColor = ref("#fff2cc");
@@ -386,12 +370,6 @@ type HighlightMode = "record" | "cell";
 type CellHighlightTarget = { recordId: string; fieldId: string };
 const highlightMode = ref<HighlightMode>("record");
 const highlightCellTargets = ref<CellHighlightTarget[]>([]);
-const bulkDeleteFilter = reactive<BulkDeleteFilter>({
-  project_id: "",
-  date_field: "experiment_date",
-  start_date: "",
-  end_date: "",
-});
 type HighlightColorOption = { label: string; color: string };
 
 const highlightThemeRows: HighlightColorOption[][] = [
@@ -515,12 +493,6 @@ const fields = computed(() =>
     .slice()
     .sort((left, right) => left.sort_order - right.sort_order),
 );
-const frozenFieldIds = computed(() => {
-  const fieldId = frozenUntilFieldId.value;
-  if (!fieldId) return new Set<string>();
-  const end = fields.value.findIndex((field) => field.id === fieldId);
-  return new Set(fields.value.slice(0, end + 1).map((field) => field.id));
-});
 const selectedCount = computed(() => selectedRecordIds.value.size);
 const baseTableRows = computed<LedgerRow[]>(() => [...records.value, ...draftRows.value]);
 const tableRows = computed<LedgerRow[]>(() =>
@@ -579,15 +551,6 @@ const ledgerTableStyle = computed<CSSProperties>(
       "--ledger-zoom": String(ledgerDisplaySettings.value.zoomPercent / 100),
     }) as CSSProperties,
 );
-const importHasErrors = computed(
-  () =>
-    Boolean(importPreview.value?.errors.length) ||
-    Boolean(importPreview.value?.rows.some((row) => row.errors.length)),
-);
-const importWarningCount = computed(
-  () => importPreview.value?.rows.reduce((total, row) => total + row.warnings.length, 0) ?? 0,
-);
-
 function isDraft(record: LedgerRow): boolean {
   return record._draft === true;
 }
@@ -641,13 +604,17 @@ function restoreGridIdentity(identity: { rowId: string; fieldId: string } | null
   return rowIndex >= 0 && columnIndex >= 0 ? { rowIndex, columnIndex } : null;
 }
 
-function clearSelectionsAfterLedgerViewChange(): void {
-  activeGridCell.value = null;
-  clearGridCellSelection();
+function clearRecordSelection(): void {
+  tableRef.value?.clearSelection();
   selectedRecords.value = [];
   selectedRecordIds.value = new Set();
   selectedRecordCache.clear();
-  tableRef.value?.clearSelection();
+}
+
+function clearSelectionsAfterLedgerViewChange(): void {
+  activeGridCell.value = null;
+  clearGridCellSelection();
+  clearRecordSelection();
 }
 
 async function restoreGridFocusAfterLedgerViewChange(
@@ -1204,7 +1171,9 @@ async function finishGridCellEdit(commit = true, focusAfter = true): Promise<boo
   const snapshot = editingGridSnapshot.value;
   if (!editing || !snapshot) return true;
   const finish = (async (): Promise<boolean> => {
-    const data = gridCellData(editing);
+    const record = tableRows.value.find((row) => row.id === snapshot.rowId);
+    const field = fields.value.find((item) => item.id === snapshot.fieldId);
+    const data = record && field ? { record, field } : null;
     if (!data) {
       editingGridCell.value = null;
       editingGridSnapshot.value = null;
@@ -1471,100 +1440,14 @@ function handleGridPointerCancel(event: PointerEvent): void {
   stopGridCellDrag();
 }
 
-function formatFilledDate(value: string, dayOffset: number): string {
-  const date = new Date(`${value}T00:00:00`);
-  if (Number.isNaN(date.getTime())) return value;
-  date.setDate(date.getDate() + dayOffset);
-  return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, "0"), String(date.getDate()).padStart(2, "0")].join(
-    "-",
-  );
-}
-
-function filledSeriesValue(
-  sourceValues: string[],
-  offset: number,
-  field: FieldDefinition,
-): string {
-  if (!sourceValues.length) return "";
-  const values = sourceValues.map((value) => value.trim());
-  const dateField = field.data_type === "date" || field.system_key === "experiment_date";
-  if (dateField && values.every((value) => Boolean(value))) {
-    try {
-      const dates = values.map(normalizeDate);
-      const step = dates.length > 1
-        ? Math.round(
-            (new Date(`${dates.at(-1)}T00:00:00`).getTime() -
-              new Date(`${dates.at(-2)}T00:00:00`).getTime()) /
-              86_400_000,
-          )
-        : 1;
-      return formatFilledDate(dates.at(-1) ?? dates[0] ?? "", step * (offset + 1));
-    } catch {
-      // Fall back to text cycling when the selected values are not valid dates.
-    }
-  }
-
-  const numericPattern = /^[-+]?(?:\d+\.?\d*|\.\d+)$/;
-  if (values.every((value) => numericPattern.test(value))) {
-    const numbers = values.map(Number);
-    const step = numbers.length > 1 ? numbers.at(-1)! - numbers.at(-2)! : 1;
-    const next = numbers.at(-1)! + step * (offset + 1);
-    return Number.isInteger(next) ? String(next) : String(Number(next.toFixed(10)));
-  }
-
-  return values[offset % values.length] ?? "";
-}
-
-function buildGridFillEntries(
-  source: NormalizedGridRange,
-  target: NormalizedGridRange,
-): GridPasteEntry[] {
-  const extendsDown = target.rowEnd > source.rowEnd;
-  const extendsRight = target.columnEnd > source.columnEnd;
-  if (!extendsDown && !extendsRight) return [];
-
-  const sourceHeight = source.rowEnd - source.rowStart + 1;
-  const sourceWidth = source.columnEnd - source.columnStart + 1;
-  const entries: GridPasteEntry[] = [];
-  for (let rowIndex = source.rowStart; rowIndex <= target.rowEnd; rowIndex += 1) {
-    for (let columnIndex = source.columnStart; columnIndex <= target.columnEnd; columnIndex += 1) {
-      const isSourceCell = rowIndex <= source.rowEnd && columnIndex <= source.columnEnd;
-      if (isSourceCell) continue;
-      const field = fields.value[columnIndex];
-      const record = tableRows.value[rowIndex];
-      if (!field || !record) continue;
-
-      const sourceColumnIndex =
-        source.columnStart + ((columnIndex - source.columnStart) % sourceWidth);
-      const sourceRowIndex = source.rowStart + ((rowIndex - source.rowStart) % sourceHeight);
-      const sourceValues = extendsDown
-        ? Array.from({ length: sourceHeight }, (_, index) =>
-            valueFor(tableRows.value[source.rowStart + index]!, fields.value[sourceColumnIndex]!),
-          )
-        : Array.from({ length: sourceWidth }, (_, index) =>
-            valueFor(tableRows.value[sourceRowIndex]!, fields.value[source.columnStart + index]!),
-          );
-      const offset = extendsDown
-        ? rowIndex - source.rowEnd - 1
-        : columnIndex - source.columnEnd - 1;
-      entries.push({
-        rowOffset: rowIndex - source.rowStart,
-        columnOffset: columnIndex - source.columnStart,
-        value: filledSeriesValue(sourceValues, offset, field),
-      });
-    }
-  }
-  return entries;
-}
-
 function gridFillTargetForCell(
   source: NormalizedGridRange,
   cell: GridCellPosition,
 ): NormalizedGridRange {
   return {
-    rowStart: source.rowStart,
+    rowStart: Math.min(source.rowStart, cell.rowIndex),
     rowEnd: Math.max(source.rowEnd, cell.rowIndex),
-    columnStart: source.columnStart,
+    columnStart: Math.min(source.columnStart, cell.columnIndex),
     columnEnd: Math.max(source.columnEnd, cell.columnIndex),
   };
 }
@@ -1572,12 +1455,20 @@ function gridFillTargetForCell(
 function updateGridFillPreview(
   target: NormalizedGridRange,
   source: NormalizedGridRange,
+  mode: GridFillMode,
   pointer?: { x: number; y: number },
   currentCell?: GridCellPosition,
 ): void {
   gridFillPreviewSource.value = { ...source };
   gridFillPreviewRange.value = { ...target };
-  const entries = buildGridFillEntries(source, target);
+  const entries = buildGridFillEntries(
+    source,
+    target,
+    fields.value,
+    tableRows.value,
+    valueFor,
+    mode,
+  );
   const values = new Map<string, string>();
   entries.forEach((entry) => {
     values.set(
@@ -1613,8 +1504,16 @@ function stopGridFillDrag(): void {
 async function applyGridFill(
   source: NormalizedGridRange,
   target: NormalizedGridRange,
+  mode: GridFillMode = "series",
 ): Promise<void> {
-  const entries = buildGridFillEntries(source, target);
+  const entries = buildGridFillEntries(
+    source,
+    target,
+    fields.value,
+    tableRows.value,
+    valueFor,
+    mode,
+  );
   if (!entries.length) return;
   const changed = await pasteGrid(
     null,
@@ -1626,7 +1525,7 @@ async function applyGridFill(
   );
   if (changed.length) {
     const selection = {
-      anchor: { rowIndex: source.rowStart, columnIndex: source.columnStart },
+      anchor: { rowIndex: target.rowStart, columnIndex: target.columnStart },
       focus: { rowIndex: target.rowEnd, columnIndex: target.columnEnd },
     };
     replaceGridCellSelection(
@@ -1656,6 +1555,7 @@ function handleGridFillPointerDown(event: PointerEvent): void {
     pointerId: event.pointerId,
     source,
     target: { ...source },
+    mode: event.ctrlKey ? "copy" : "series",
     startX: event.clientX,
     startY: event.clientY,
     lastX: event.clientX,
@@ -1685,10 +1585,12 @@ function handleGridFillPointerMove(event: PointerEvent): void {
   }
   const cell = gridCellAtPoint(event.clientX, event.clientY);
   if (cell) {
+    state.mode = event.ctrlKey ? "copy" : "series";
     state.target = gridFillTargetForCell(state.source, cell);
     updateGridFillPreview(
       state.target,
       state.source,
+      state.mode,
       { x: event.clientX, y: event.clientY },
       cell,
     );
@@ -1702,13 +1604,14 @@ async function handleGridFillPointerUp(event: PointerEvent): Promise<void> {
   const shouldFill = state.dragging;
   const source = state.source;
   const target = state.target;
+  const mode: GridFillMode = event.ctrlKey ? "copy" : "series";
   const finishPromise = state.finishPromise;
   if (shouldFill) {
     event.preventDefault();
     suppressGridClick = true;
   }
   stopGridFillDrag();
-  if (shouldFill && (await finishPromise)) await applyGridFill(source, target);
+  if (shouldFill && (await finishPromise)) await applyGridFill(source, target, mode);
 }
 
 function handleGridFillPointerCancel(event: PointerEvent): void {
@@ -1878,8 +1781,7 @@ function runGridShortcutFill(
       if (mode === "today") {
         const field = fields.value[columnIndex];
         if (!field || (field.data_type !== "date" && field.system_key !== "experiment_date")) continue;
-        const now = new Date();
-        value = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+        value = shanghaiDateKey();
       } else if (mode === "down") {
         const source = gridCellData({ rowIndex: range.rowStart, columnIndex });
         if (!source || rowIndex === range.rowStart) continue;
@@ -2933,27 +2835,6 @@ function rememberAll(): void {
   records.value.forEach(rememberRecord);
 }
 
-function normalizeDate(value: string): string {
-  const cleaned = value.trim().replace(/[/.]/g, "-");
-  if (!cleaned) return "";
-  const match = cleaned.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
-  if (!match) throw new Error("日期格式应为 YYYY-MM-DD，例如 2026-07-27");
-  const [, year, month, day] = match;
-  const normalized = `${year}-${String(Number(month)).padStart(2, "0")}-${String(
-    Number(day),
-  ).padStart(2, "0")}`;
-  const date = new Date(`${normalized}T00:00:00`);
-  if (
-    Number.isNaN(date.getTime()) ||
-    date.getFullYear() !== Number(year) ||
-    date.getMonth() + 1 !== Number(month) ||
-    date.getDate() !== Number(day)
-  ) {
-    throw new Error("日期无效，请重新输入");
-  }
-  return normalized;
-}
-
 function payloadForField(
   record: ProjectRecord,
   field: FieldDefinition,
@@ -3058,8 +2939,11 @@ function reconcileCellAfterCompletedSave(
 }
 
 function handleTableSelectionChange(rows: ProjectRecord[]): void {
-  selectedRecords.value = rows;
   const visibleIds = new Set(records.value.map((record) => record.id));
+  // Off-page rows are accepted only while explicitly retained in our selection.
+  // A stale reserve-selection event must not resurrect a deleted/reset record.
+  rows = rows.filter((record) => visibleIds.has(record.id) || selectedRecordIds.value.has(record.id));
+  selectedRecords.value = rows;
   const next = new Set(selectedRecordIds.value);
   visibleIds.forEach((recordId) => next.delete(recordId));
   visibleIds.forEach((recordId) => {
@@ -3124,9 +3008,7 @@ function reconcileOperationResult(result: {
   records.value.sort((left, right) => {
     return left.position - right.position || left.id.localeCompare(right.id);
   });
-  selectedRecords.value = [];
-  selectedRecordIds.value = new Set();
-  selectedRecordCache.clear();
+  clearRecordSelection();
   activeGridCell.value = null;
   clearGridCellSelection();
   rememberAll();
@@ -3304,6 +3186,10 @@ function finishPersistedDraft(
   projectId: string,
   notify: boolean,
 ): void {
+    if (editingGridSnapshot.value?.rowId === record.id) {
+      editingGridCell.value = null;
+      editingGridSnapshot.value = null;
+    }
     const draftIndex = draftRows.value.findIndex((item) => item.id === record.id);
     reanchorPendingInsertedDrafts(record, created);
     if (draftIndex >= 0) draftRows.value.splice(draftIndex, 1);
@@ -3589,7 +3475,7 @@ async function monitorNativeLedgerJob(task: NativePreviewTask): Promise<void> {
   }
 }
 
-async function openLedgerNative(action: NativePreviewAction): Promise<void> {
+async function openLedgerNative(): Promise<void> {
   if (!currentProject.value) return;
   if (!nativeEngineAvailable(previewEngine.value)) {
     ElMessage.warning("当前电脑未检测到可用的 Excel/WPS 表格程序");
@@ -3598,13 +3484,13 @@ async function openLedgerNative(action: NativePreviewAction): Promise<void> {
   const scope = previewScope.value;
   const cells = scope === "selection" ? selectedPreviewCells() : [];
   if (scope === "selection" && !cells.length) {
-    ElMessage.warning("请先选择要预览的单元格");
+    ElMessage.warning("请先选择要打开的单元格");
     return;
   }
   nativePreviewLoading.value = true;
   try {
     const task = await createLedgerNativePreview(currentProject.value.id, {
-      action,
+      action: "open",
       scope,
       cells,
       search: appliedSearch.text || undefined,
@@ -3745,10 +3631,7 @@ async function loadRecords(
     fieldErrors.value = {};
     clearAllCellSaveStates();
     selectedRecords.value = [];
-    if (!options.preserveSelection) {
-      selectedRecordIds.value = new Set();
-      selectedRecordCache.clear();
-    }
+    if (!options.preserveSelection) clearRecordSelection();
     if (!isGlobalScope) rememberAll();
     await nextTick();
     tableRef.value?.doLayout();
@@ -3820,35 +3703,6 @@ function changeLedgerPage(page: number): void {
   editingGridCell.value = null;
   editingGridSnapshot.value = null;
   void loadRecords(activeProjectId.value, { preserveHistory: true, preserveSelection: true });
-}
-
-async function selectAllFilteredRecords(): Promise<void> {
-  if (!activeProjectId.value) return;
-  loading.value = true;
-  try {
-    const result = await queryRecordIds({
-      ...buildRecordQuery(),
-      limit: 1000,
-      offset: 0,
-    });
-    selectedRecordCache.clear();
-    selectedRecordIds.value = new Set(result.record_ids);
-    tableRef.value?.clearSelection();
-    const visibleSelected: ProjectRecord[] = [];
-    records.value.forEach((record) => {
-      if (selectedRecordIds.value.has(record.id)) {
-        selectedRecordCache.set(record.id, record);
-        tableRef.value?.toggleRowSelection(record, true);
-        visibleSelected.push(record);
-      }
-    });
-    selectedRecords.value = visibleSelected;
-    ElMessage.success(`已选择全部 ${result.total} 条筛选结果`);
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "选择筛选结果失败");
-  } finally {
-    loading.value = false;
-  }
 }
 
 async function ensureProjectLoaded(projectId: string): Promise<void> {
@@ -3940,20 +3794,6 @@ function openGlobalSearchResult(record: ProjectRecord): void {
   }
 }
 
-function selectAllVisible(): void {
-  const selectableRows = tableRows.value.filter((row) => !isDraft(row));
-  const selectedIds = selectedRecordIds.value;
-  if (selectableRows.every((row) => selectedIds.has(row.id))) return;
-  const next = new Set(selectedIds);
-  selectableRows.forEach((row) => {
-    next.add(row.id);
-    selectedRecordCache.set(row.id, row);
-    tableRef.value?.toggleRowSelection(row, true);
-  });
-  selectedRecordIds.value = next;
-  selectedRecords.value = selectableRows;
-}
-
 function invertVisibleSelection(): void {
   const selectedIds = new Set(selectedRecordIds.value);
   const next = new Set(selectedIds);
@@ -3974,24 +3814,6 @@ function invertVisibleSelection(): void {
   });
   selectedRecordIds.value = next;
   selectedRecords.value = nextVisible;
-}
-
-function selectByDateRange(): void {
-  try {
-    const startDate = normalizeDate(selectionStartDate.value);
-    const endDate = normalizeDate(selectionEndDate.value);
-    if (!startDate || !endDate) throw new Error("请选择开始日期和结束日期");
-    if (startDate > endDate) throw new Error("开始日期不能晚于结束日期");
-    tableRef.value?.clearSelection();
-    tableRows.value.forEach((row) => {
-      const date = row.experiment_date ?? "";
-      if (!isDraft(row) && date >= startDate && date <= endDate) {
-        tableRef.value?.toggleRowSelection(row, true);
-      }
-    });
-  } catch (error) {
-    ElMessage.warning(error instanceof Error ? error.message : "日期无效");
-  }
 }
 
 function rowCellStyle({
@@ -4131,9 +3953,8 @@ async function submitHighlight(color: string | null): Promise<void> {
     const recordIds = [...new Set(targets.map((target) => target.recordId))];
     highlightLoading.value = true;
     try {
-      const before = records.value
-        .filter((record) => recordIds.includes(record.id))
-        .map(snapshotRecord);
+      const before = (await getRecordsByIds(recordIds)).map(snapshotRecord);
+      if (before.length !== recordIds.length) throw new Error("部分目标记录已不存在，请刷新后重试");
       const updated = await setCellsHighlight(
         targets.map(({ recordId, fieldId }) => ({ record_id: recordId, field_id: fieldId })),
         color,
@@ -4162,9 +3983,8 @@ async function submitHighlight(color: string | null): Promise<void> {
   if (!recordIds.length) return;
   highlightLoading.value = true;
   try {
-    const before = records.value
-      .filter((record) => recordIds.includes(record.id))
-      .map(snapshotRecord);
+    const before = (await getRecordsByIds(recordIds)).map(snapshotRecord);
+      if (before.length !== recordIds.length) throw new Error("部分目标记录已不存在，请刷新后重试");
     const updated = await setRecordsHighlight(recordIds, color);
     const updatedById = new Map(updated.map((record) => [record.id, record]));
     updated.forEach(replaceRecord);
@@ -4210,6 +4030,7 @@ async function clearSelectedHighlight(): Promise<void> {
     ElMessage.warning("请先勾选需要清除底色的记录");
     return;
   }
+  highlightMode.value = "record";
   highlightTargetIds.value = recordIds;
   await submitHighlight(null);
 }
@@ -4229,9 +4050,13 @@ async function handleManagerChanged(): Promise<void> {
   await loadRecords();
 }
 
+let persistedLedgerLayout: unknown = null;
+let layoutSaveGeneration = 0;
+
 async function loadLedgerLayoutSettings(): Promise<void> {
   try {
     const result = await getSetting<unknown>(LEDGER_LAYOUT_SETTINGS_KEY);
+    persistedLedgerLayout = result.value;
     ledgerLayoutSettings.value = normalizeLedgerLayoutSettings(result.value);
   } catch (error) {
     ElMessage.warning(error instanceof Error ? error.message : "台账布局设置读取失败");
@@ -4247,7 +4072,6 @@ function applyLedgerProjectLayout(projectId: string): void {
   );
   ledgerSort.value = layout.sort;
   ledgerFilters.value = layout.filters;
-  frozenUntilFieldId.value = layout.frozenUntilFieldId;
 }
 
 function persistLedgerProjectLayout(projectId = activeProjectId.value): Promise<void> {
@@ -4258,31 +4082,23 @@ function persistLedgerProjectLayout(projectId = activeProjectId.value): Promise<
     {
       sort: ledgerSort.value,
       filters: ledgerFilters.value,
-      frozenUntilFieldId: frozenUntilFieldId.value,
     },
   );
   const snapshot = ledgerLayoutSettings.value;
+  const generation = layoutSaveGeneration;
   ledgerLayoutSaveQueue = ledgerLayoutSaveQueue
     .then(async () => {
-      await putSetting(LEDGER_LAYOUT_SETTINGS_KEY, snapshot);
+      if (generation !== layoutSaveGeneration) return;
+      await putSetting(LEDGER_LAYOUT_SETTINGS_KEY, snapshot, { expectedValue: persistedLedgerLayout });
+      persistedLedgerLayout = snapshot;
     })
-    .catch((error) => {
+    .catch(async (error) => {
+      layoutSaveGeneration += 1;
+      await loadLedgerLayoutSettings();
+      applyLedgerProjectLayout(activeProjectId.value);
       ElMessage.warning(error instanceof Error ? error.message : "台账布局设置保存失败");
     });
   return ledgerLayoutSaveQueue;
-}
-
-function freezeThroughField(field: FieldDefinition): void {
-  frozenUntilFieldId.value = field.id;
-  closeColumnTools();
-  void persistLedgerProjectLayout();
-  refreshTableLayout();
-}
-
-function clearFrozenFields(): void {
-  frozenUntilFieldId.value = null;
-  void persistLedgerProjectLayout();
-  refreshTableLayout();
 }
 
 async function openQuickEntry(): Promise<void> {
@@ -4670,7 +4486,7 @@ async function pasteGrid(
     }
     return changedPositions;
   } catch (error) {
-    await loadRecords(projectId, { showLoading: false });
+    await loadRecords(projectId, { showLoading: false, preserveHistory: true, preserveSelection: true });
     ElMessage.error(error instanceof Error ? error.message : "粘贴保存失败");
     return [];
   }
@@ -4801,9 +4617,7 @@ async function deleteSelectedRecords(): Promise<void> {
       .map(snapshotRecord);
     records.value = records.value.filter((record) => !deletedIds.has(record.id));
     recordTotal.value = Math.max(0, recordTotal.value - deletedIds.size);
-    selectedRecords.value = [];
-    selectedRecordIds.value = new Set();
-    selectedRecordCache.clear();
+    clearRecordSelection();
     activeGridCell.value = null;
     clearGridCellSelection();
     rememberAll();
@@ -4821,198 +4635,6 @@ async function deleteSelectedRecords(): Promise<void> {
   }
 }
 
-function chooseWorkbookImport(): void {
-  importFileInput.value?.click();
-}
-
-async function loadWorkbookImportPreview(sheetName = ""): Promise<void> {
-  const file = importFile.value;
-  const projectId = activeProjectId.value;
-  if (!file || !projectId) return;
-  importLoading.value = true;
-  try {
-    const preview = await previewWorkbookImport(projectId, file, sheetName);
-    if (activeProjectId.value !== projectId) return;
-    importPreview.value = preview;
-    importSheetName.value = preview.selected_sheet;
-    importDialogVisible.value = true;
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "Excel 导入预览失败");
-  } finally {
-    importLoading.value = false;
-  }
-}
-
-async function handleWorkbookFile(event: Event): Promise<void> {
-  const input = event.target as HTMLInputElement;
-  const file = input.files?.[0] ?? null;
-  input.value = "";
-  if (!file) return;
-  if (!file.name.toLowerCase().endsWith(".xlsx")) {
-    ElMessage.warning("请选择 .xlsx 文件");
-    return;
-  }
-  importFile.value = file;
-  importSheetName.value = "";
-  importPreview.value = null;
-  await loadWorkbookImportPreview();
-}
-
-async function changeImportSheet(sheetName: string): Promise<void> {
-  if (sheetName === importPreview.value?.selected_sheet) return;
-  await loadWorkbookImportPreview(sheetName);
-}
-
-async function confirmWorkbookImport(): Promise<void> {
-  const preview = importPreview.value;
-  if (!preview || !preview.rows.length || importHasErrors.value) return;
-  const projectId = activeProjectId.value;
-  const rows = preview.rows.map(
-    ({
-      action: _action,
-      errors: _errors,
-      warnings: _warnings,
-      suggestions: _suggestions,
-      ...row
-    }) => row,
-  );
-  const warningText = importWarningCount.value
-    ? `其中有 ${importWarningCount.value} 条验证警告，继续即表示确认这些警告。`
-    : "";
-  try {
-    await ElMessageBox.confirm(
-      `将新建 ${preview.create_count} 条、更新 ${preview.update_count} 条记录。${warningText}记录 UUID 是唯一匹配依据，确认导入？`,
-      "确认导入 Excel",
-      {
-        confirmButtonText: "确认导入",
-        cancelButtonText: "取消",
-        type: "warning",
-      },
-    );
-  } catch (error) {
-    if (error === "cancel" || error === "close") return;
-    throw error;
-  }
-
-  importLoading.value = true;
-  try {
-    const beforeById = new Map(
-      records.value.map((record) => [record.id, snapshotRecord(record)]),
-    );
-    const importRecordIds = [
-      ...new Set(
-        rows
-          .map((row) => row.record_id)
-          .filter((id): id is string => Boolean(id)),
-      ),
-    ];
-    const missingBefore = importRecordIds.filter((recordId) => !beforeById.has(recordId));
-    if (missingBefore.length) {
-      const fetched = await Promise.all(missingBefore.map((recordId) => getRecord(recordId)));
-      fetched.forEach((record) => beforeById.set(record.id, snapshotRecord(record)));
-    }
-    const result = await commitWorkbookImport(projectId, rows, importWarningCount.value > 0);
-    importDialogVisible.value = false;
-    importFile.value = null;
-    importPreview.value = null;
-    await loadRecords(projectId, { showLoading: false, preserveHistory: true });
-    const afterRecords = await Promise.all(
-      result.record_ids.map((recordId) => getRecord(recordId)),
-    );
-    pushHistory(
-      "导入 Excel 台账数据",
-      rows
-        .map((row) => row.record_id ? beforeById.get(row.record_id) : undefined)
-        .filter((record): record is ProjectRecord => Boolean(record)),
-      afterRecords.map(snapshotRecord),
-      projectId,
-    );
-    ElMessage.success(`导入完成：新建 ${result.created} 条，更新 ${result.updated} 条`);
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "Excel 导入失败");
-  } finally {
-    importLoading.value = false;
-  }
-}
-
-function openBulkDeleteDialog(): void {
-  Object.assign(bulkDeleteFilter, {
-    project_id: activeProjectId.value,
-    date_field: "experiment_date",
-    start_date: appliedSearch.date,
-    end_date: appliedSearch.date,
-  });
-  bulkDeletePreview.value = null;
-  bulkDeleteDialogVisible.value = true;
-}
-
-function invalidateBulkDeletePreview(): void {
-  bulkDeletePreview.value = null;
-}
-
-async function previewDateRangeDelete(): Promise<void> {
-  if (!bulkDeleteFilter.project_id) return;
-  try {
-    const start = normalizeDate(bulkDeleteFilter.start_date);
-    const end = normalizeDate(bulkDeleteFilter.end_date);
-    if (!start || !end) throw new Error("请选择开始日期和结束日期");
-    if (start > end) throw new Error("开始日期不能晚于结束日期");
-    bulkDeleteFilter.start_date = start;
-    bulkDeleteFilter.end_date = end;
-    bulkDeleteLoading.value = true;
-    bulkDeletePreview.value = await previewBulkDelete({ ...bulkDeleteFilter });
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "批量删除预览失败");
-  } finally {
-    bulkDeleteLoading.value = false;
-  }
-}
-
-async function confirmDateRangeDelete(): Promise<void> {
-  const preview = bulkDeletePreview.value;
-  if (!preview?.total) return;
-  if (preview.locked_count) {
-    ElMessage.warning(`范围内有 ${preview.locked_count} 条锁定记录，请先解锁后重新预览`);
-    return;
-  }
-  try {
-    await ElMessageBox.confirm(
-      `确认永久删除预览中的 ${preview.total} 条记录？系统会在执行前再次核对记录清单，删除后无法恢复。`,
-      "按日期批量删除",
-      {
-        confirmButtonText: "确认永久删除",
-        cancelButtonText: "取消",
-        type: "warning",
-        confirmButtonClass: "el-button--danger",
-      },
-    );
-  } catch (error) {
-    if (error === "cancel" || error === "close") return;
-    throw error;
-  }
-
-  bulkDeleteLoading.value = true;
-  try {
-    const result = await executeBulkDelete(
-      { ...bulkDeleteFilter },
-      preview.record_ids,
-    );
-    bulkDeleteDialogVisible.value = false;
-    bulkDeletePreview.value = null;
-    const deletedIds = new Set(result.deleted_records.map((record) => record.id));
-    records.value = records.value.filter((record) => !deletedIds.has(record.id));
-    recordTotal.value = Math.max(0, recordTotal.value - result.deleted);
-    activeGridCell.value = null;
-    clearGridCellSelection();
-    rememberAll();
-    pushHistory("按日期批量删除台账记录", result.deleted_records, [], bulkDeleteFilter.project_id);
-    ElMessage.success(`已删除 ${result.deleted} 条记录`);
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "按日期批量删除失败");
-  } finally {
-    bulkDeleteLoading.value = false;
-  }
-}
 async function toggleRecordLock(record: ProjectRecord): Promise<void> {
   const nextLocked = !record.locked;
   try {
@@ -5198,17 +4820,10 @@ watch(activeProjectId, async (projectId, previousProjectId) => {
     clearSelectionsAfterLedgerViewChange();
     draftRows.value = [];
     insertedGroupRegistry.clear();
-    selectionStartDate.value = "";
-    selectionEndDate.value = "";
-    importDialogVisible.value = false;
-    importFile.value = null;
-    importPreview.value = null;
     highlightDialogVisible.value = false;
     highlightTargetIds.value = [];
     highlightMode.value = "record";
     highlightCellTargets.value = [];
-    bulkDeleteDialogVisible.value = false;
-    bulkDeletePreview.value = null;
     persistedValues.clear();
     void router.replace({ query: { ...route.query, project: projectId } });
     await loadRecords(projectId, { preserveHistory: true });
@@ -5418,38 +5033,17 @@ onBeforeUnmount(() => {
               <el-option label="Microsoft Excel" value="word" :disabled="!nativeEngineAvailable('word')" />
               <el-option label="WPS" value="wps" :disabled="!nativeEngineAvailable('wps')" />
             </el-select>
-            <el-select v-model="previewScope" class="ledger-preview-scope" aria-label="预览范围">
+            <el-select v-model="previewScope" class="ledger-preview-scope" aria-label="打开范围">
               <el-option label="当前选区" value="selection" :disabled="!hasGridCellSelection" />
               <el-option label="当前台账" value="project" />
               <el-option label="整本台账" value="all" />
             </el-select>
             <el-button
               :loading="nativePreviewLoading"
-              :icon="Printer"
               :disabled="!nativeEngineAvailable(previewEngine)"
-              @click="openLedgerNative('preview')"
-            >
-              {{ nativeEngineLabel() }} 原生预览
-            </el-button>
-            <el-button
-              :loading="nativePreviewLoading"
-              :disabled="!nativeEngineAvailable(previewEngine)"
-              @click="openLedgerNative('open')"
+              @click="openLedgerNative"
             >
               使用 {{ nativeEngineLabel() }} 打开
-            </el-button>
-            <input
-              ref="importFileInput"
-              class="hidden-file-input"
-              type="file"
-              accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-              @change="handleWorkbookFile"
-            />
-            <el-button :icon="Upload" :loading="importLoading" @click="chooseWorkbookImport">
-              导入 Excel
-            </el-button>
-            <el-button type="danger" plain :icon="Delete" @click="openBulkDeleteDialog">
-              按日期批量删除
             </el-button>
           </div>
           <div v-if="searchScope === 'selected'" class="ledger-search-advanced">
@@ -5538,27 +5132,15 @@ onBeforeUnmount(() => {
       <strong v-if="hasGridCellSelection">已选 {{ gridCellSelectionCount }} 个单元格</strong>
       <strong v-else>已选 {{ selectedCount }} 条记录</strong>
       <div class="selection-quick-actions" aria-label="快速选择">
-        <el-button @click="selectAllVisible">全选当前页</el-button>
-        <el-button @click="selectAllFilteredRecords">选择全部筛选结果</el-button>
         <el-button @click="invertVisibleSelection">反选</el-button>
       </div>
-      <EditableDateInput
-        v-model="selectionStartDate"
-        class="selection-date"
-        placeholder="开始日期"
-      />
-      <span class="selection-date-separator">至</span>
-      <EditableDateInput
-        v-model="selectionEndDate"
-        class="selection-date"
-        placeholder="结束日期"
-      />
-      <el-button @click="selectByDateRange">按日期范围选择</el-button>
-      <el-button @click="updateSelectedStatus('已完成')">
-        已完成
-      </el-button>
-      <el-button @click="updateSelectedStatus('待实验')">
-        待实验
+      <el-button
+        type="danger"
+        plain
+        :icon="Delete"
+        @click="deleteSelectedRecords"
+      >
+        删除所选
       </el-button>
       <el-button
         :icon="Brush"
@@ -5576,11 +5158,11 @@ onBeforeUnmount(() => {
       >
         {{ hasGridCellSelection ? "清除单元格底色" : "清除底色" }}
       </el-button>
-      <el-button :icon="Lock" @click="updateSelectedLock(true)">
-        锁定
+      <el-button @click="updateSelectedStatus('已完成')">
+        已完成
       </el-button>
-      <el-button :icon="Unlock" @click="updateSelectedLock(false)">
-        解锁
+      <el-button @click="updateSelectedStatus('待实验')">
+        待实验
       </el-button>
       <el-button @click="updateSelectedReportStatus(true)">
         已生成报告
@@ -5589,12 +5171,13 @@ onBeforeUnmount(() => {
         待生成报告
       </el-button>
       <el-button
-        type="danger"
-        plain
-        :icon="Delete"
-        @click="deleteSelectedRecords"
+        :icon="Lock"
+        @click="updateSelectedLock(true)"
       >
-        删除所选
+        锁定
+      </el-button>
+      <el-button :icon="Unlock" @click="updateSelectedLock(false)">
+        解锁
       </el-button>
       <el-button :icon="Setting" class="manage-project-button" @click="managerVisible = true">
         管理检测项目与表头
@@ -5634,7 +5217,7 @@ onBeforeUnmount(() => {
         }"
         v-loading="loading"
         element-loading-text="正在切换或读取项目数据…"
-        element-loading-background="#ffffff"
+        element-loading-background="var(--app-loading-mask)"
         :data="tableRows"
         row-key="id"
         border
@@ -5677,7 +5260,6 @@ onBeforeUnmount(() => {
           class-name="ledger-editor-column"
           :label="field.label"
           :width="field.width"
-          :fixed="frozenFieldIds.has(field.id) ? 'left' : undefined"
           align="center"
           header-align="center"
           resizable
@@ -5767,7 +5349,7 @@ onBeforeUnmount(() => {
                 role="button"
                 tabindex="-1"
                 aria-label="拖动或双击自动填充"
-                title="拖动填充；双击向下自动填充"
+                title="拖动序列填充；按住 Ctrl 拖动复制；双击向下自动填充"
                 @pointerdown.stop.prevent="handleGridFillPointerDown"
               />
               <span v-if="fieldErrorFor(row, field)" class="cell-field-error">
@@ -5858,12 +5440,6 @@ onBeforeUnmount(() => {
             @click="setLedgerSort(columnToolsField, null)"
           >
             取消排序
-          </el-button>
-        </div>
-        <div class="ledger-column-tools-sort">
-          <el-button size="small" @click="freezeThroughField(columnToolsField)">冻结到此列</el-button>
-          <el-button size="small" :disabled="!frozenUntilFieldId" @click="clearFrozenFields">
-            取消冻结
           </el-button>
         </div>
         <div class="ledger-column-tools-filter-label">筛选</div>
@@ -6264,175 +5840,7 @@ onBeforeUnmount(() => {
     </template>
   </el-dialog>
 
-  <el-dialog
-    class="ledger-dialog"
-    v-model="importDialogVisible"
-    title="导入 Excel 台账"
-    width="980px"
-    destroy-on-close
-  >
-    <div v-loading="importLoading" class="import-dialog-body">
-      <div v-if="importPreview" class="import-summary">
-        <span>文件：{{ importPreview.filename }}</span>
-        <el-select
-          v-if="importPreview.available_sheets.length > 1"
-          v-model="importSheetName"
-          class="sheet-select"
-          @change="changeImportSheet"
-        >
-          <el-option
-            v-for="sheet in importPreview.available_sheets"
-            :key="sheet"
-            :label="sheet"
-            :value="sheet"
-          />
-        </el-select>
-        <el-tag type="success">新建 {{ importPreview.create_count }}</el-tag>
-        <el-tag type="warning">更新 {{ importPreview.update_count }}</el-tag>
-      </div>
-      <el-alert
-        v-if="importPreview?.errors.length"
-        type="error"
-        :closable="false"
-        :title="importPreview.errors.join('；')"
-        show-icon
-      />
-      <p class="dialog-note">
-        新版导出文件通过隐藏的记录 UUID 匹配并更新；没有 UUID 的旧版 Excel 每一行都新建独立记录，绝不按病理号合并。
-      </p>
-      <el-table
-        v-if="importPreview"
-        :data="importPreview.rows"
-        border
-        height="380"
-        empty-text="工作表中没有可导入的数据行"
-      >
-        <el-table-column prop="row_number" label="行" width="64" />
-        <el-table-column label="操作" width="82">
-          <template #default="{ row }">
-            <el-tag :type="row.action === 'create' ? 'success' : 'warning'" size="small">
-              {{ row.action === "create" ? "新建" : "更新" }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="pathology_number" label="病理号" min-width="160" />
-        <el-table-column prop="block_number" label="蜡块号" min-width="110" />
-        <el-table-column prop="status" label="状态" width="90" />
-        <el-table-column prop="experiment_date" label="实验日期" width="120" />
-        <el-table-column prop="experiment_number" label="实验编号" min-width="150" />
-        <el-table-column label="校验" min-width="240">
-          <template #default="{ row }">
-            <span v-if="row.errors.length" class="invalid-row-text">{{ row.errors.join("；") }}</span>
-            <span v-else-if="row.warnings.length" class="warning-row-text">
-              警告：{{ row.warnings.join("；") }}
-            </span>
-            <span v-else-if="row.suggestions.length" class="suggestion-row-text">
-              提示：{{ row.suggestions.join("；") }}
-            </span>
-            <span v-else class="valid-row-text">可导入</span>
-          </template>
-        </el-table-column>
-      </el-table>
-    </div>
-    <template #footer>
-      <el-button @click="importDialogVisible = false">取消</el-button>
-      <el-button
-        type="primary"
-        :loading="importLoading"
-        :disabled="!importPreview?.rows.length || importHasErrors"
-        @click="confirmWorkbookImport"
-      >
-        确认导入
-      </el-button>
-    </template>
-  </el-dialog>
 
-  <el-dialog
-    class="ledger-dialog"
-    v-model="bulkDeleteDialogVisible"
-    title="按日期批量删除记录"
-    width="900px"
-    destroy-on-close
-  >
-    <div v-loading="bulkDeleteLoading">
-      <el-form label-position="top" class="bulk-delete-form">
-        <el-form-item label="日期依据">
-          <el-select
-            v-model="bulkDeleteFilter.date_field"
-            @change="invalidateBulkDeletePreview"
-          >
-            <el-option label="台账实验日期" value="experiment_date" />
-            <el-option label="记录创建时间" value="created_at" />
-            <el-option label="记录更新时间" value="updated_at" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="开始日期">
-          <EditableDateInput
-            v-model="bulkDeleteFilter.start_date"
-            @change="invalidateBulkDeletePreview"
-          />
-        </el-form-item>
-        <el-form-item label="结束日期">
-          <EditableDateInput
-            v-model="bulkDeleteFilter.end_date"
-            @change="invalidateBulkDeletePreview"
-          />
-        </el-form-item>
-        <el-button type="primary" plain @click="previewDateRangeDelete">
-          预览删除范围
-        </el-button>
-      </el-form>
-      <el-alert
-        type="warning"
-        :closable="false"
-        show-icon
-        title="仅删除当前项目中落入日期范围的记录。预览后若记录清单变化，执行会被拒绝并要求重新预览。"
-      />
-      <div v-if="bulkDeletePreview" class="delete-preview-summary">
-        <strong>将删除 {{ bulkDeletePreview.total }} 条记录</strong>
-        <el-tag v-if="bulkDeletePreview.locked_count" type="danger">
-          含 {{ bulkDeletePreview.locked_count }} 条锁定记录，不能执行
-        </el-tag>
-        <span v-if="bulkDeletePreview.total > bulkDeletePreview.items.length">
-          表格仅展示前 {{ bulkDeletePreview.items.length }} 条
-        </span>
-      </div>
-      <el-table
-        v-if="bulkDeletePreview"
-        :data="bulkDeletePreview.items"
-        border
-        height="320"
-        empty-text="该范围内没有记录"
-      >
-        <el-table-column prop="pathology_number" label="病理号" min-width="160" />
-        <el-table-column prop="status" label="状态" width="90" />
-        <el-table-column label="匹配日期/时间" min-width="180">
-          <template #default="{ row }">
-            <span v-if="bulkDeleteFilter.date_field === 'experiment_date'">
-              {{ row.experiment_date || "—" }}
-            </span>
-            <span v-else>
-              {{ formatShanghaiDateTime(row[bulkDeleteFilter.date_field]) }}
-            </span>
-          </template>
-        </el-table-column>
-        <el-table-column label="锁定" width="80">
-          <template #default="{ row }">{{ row.locked ? "是" : "否" }}</template>
-        </el-table-column>
-      </el-table>
-    </div>
-    <template #footer>
-      <el-button @click="bulkDeleteDialogVisible = false">取消</el-button>
-      <el-button
-        type="danger"
-        :loading="bulkDeleteLoading"
-        :disabled="!bulkDeletePreview?.total || Boolean(bulkDeletePreview?.locked_count)"
-        @click="confirmDateRangeDelete"
-      >
-        确认永久删除
-      </el-button>
-    </template>
-  </el-dialog>
 </template>
 
 <style scoped>
@@ -6450,15 +5858,15 @@ onBeforeUnmount(() => {
   height: 32px;
   flex: 0 0 auto;
   border-radius: 10px;
-  background: #eaf7f2;
-  color: #167d73;
+  background: var(--app-primary-soft);
+  color: var(--app-primary-text);
 }
 
 .ledger-workspace-heading h1 {
   min-width: 0;
   overflow: hidden;
   margin: 0;
-  color: #243746;
+  color: var(--app-text);
   font-size: 16px;
   font-weight: 650;
   text-overflow: ellipsis;
@@ -6468,19 +5876,19 @@ onBeforeUnmount(() => {
 .ledger-workspace-count {
   flex-shrink: 0;
   margin-left: auto;
-  border: 1px solid #e3ecef;
+  border: 1px solid var(--app-border);
   border-radius: 999px;
-  background: #f7fafc;
+  background: var(--app-bg);
   padding: 4px 10px;
-  color: #526775;
+  color: var(--app-muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 
 .ledger-page > .page-card {
-  border-color: #e3ecef;
+  border-color: var(--app-border);
   border-radius: 14px;
-  box-shadow: 0 3px 14px rgb(36 55 70 / 3%);
+  box-shadow: 0 3px 14px rgb(45 42 38 / 3%);
 }
 
 .ledger-command-card .page-card-body {
@@ -6498,118 +5906,50 @@ onBeforeUnmount(() => {
 }
 
 .ledger-page :deep(.el-table) {
-  --el-table-border-color: #e3ecef;
-  --el-table-header-bg-color: #f3f8f6;
-  --el-table-header-text-color: #365450;
-  --el-table-row-hover-bg-color: #f3f9fb;
-  --el-table-current-row-bg-color: #eaf7f2;
+  --el-table-border-color: var(--app-border);
+  --el-table-header-bg-color: var(--app-surface-soft);
+  --el-table-header-text-color: var(--app-muted);
+  --el-table-row-hover-bg-color: var(--app-hover);
+  --el-table-current-row-bg-color: var(--app-primary-soft);
 }
 
 .ledger-context-menu button:focus-visible,
 .ledger-column-tools-trigger:focus-visible,
 .ledger-zoom-value:focus-visible {
-  outline: 2px solid #167d73;
+  outline: 2px solid var(--app-primary);
   outline-offset: -2px;
-  background: #eaf7f2;
+  background: var(--app-primary-soft);
 }
 
 /* Dialogs are teleported; scope the palette by the explicit page-specific class. */
 :global(.ledger-dialog) {
-  --app-primary: #167d73;
-  --app-muted: #526775;
-  --el-color-primary: #167d73;
-  --el-color-primary-light-3: #438e85;
-  --el-color-primary-light-5: #83b9ae;
-  --el-color-primary-light-7: #c6e5da;
-  --el-color-primary-light-8: #d9eee6;
-  --el-color-primary-light-9: #eaf7f2;
-  --el-color-primary-dark-2: #11695f;
-  --el-border-color: #cbdcd7;
   --el-border-radius-base: 8px;
-  --el-text-color-primary: #243746;
-  --el-text-color-regular: #526775;
   max-width: calc(100vw - 32px);
-  border: 1px solid #e3ecef;
+  border: 1px solid var(--app-border);
   border-radius: 18px;
-  background: #fff;
-  box-shadow: 0 20px 60px rgb(36 55 70 / 14%);
+  background: var(--app-bg);
+  box-shadow: 0 20px 60px rgb(45 42 38 / 14%);
   padding: 22px;
 }
 
 :global(.ledger-dialog .el-dialog__header) {
   margin-bottom: 18px;
   padding-bottom: 14px;
-  border-bottom: 1px solid #edf2f3;
+  border-bottom: 1px solid var(--app-border-light);
 }
 
 :global(.ledger-dialog .el-dialog__footer) {
   margin-top: 16px;
-  border-top: 1px solid #edf2f3;
+  border-top: 1px solid var(--app-border-light);
   padding-top: 16px;
-}
-
-.hidden-file-input {
-  display: none;
 }
 
 .readonly-cell {
   display: inline-flex;
   min-height: 32px;
   align-items: center;
-  color: #475467;
+  color: var(--app-muted);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-}
-
-.import-dialog-body {
-  min-height: 180px;
-}
-
-.import-summary,
-.delete-preview-summary {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-bottom: 12px;
-}
-
-.sheet-select {
-  width: 220px;
-}
-
-.valid-row-text {
-  color: #067647;
-}
-
-.invalid-row-text {
-  color: #b42318;
-}
-
-.warning-row-text {
-  color: #b54708;
-}
-
-.suggestion-row-text {
-  color: #475467;
-}
-
-.bulk-delete-form {
-  display: grid;
-  grid-template-columns: 180px minmax(180px, 1fr) minmax(180px, 1fr) auto;
-  align-items: end;
-  gap: 12px;
-}
-
-.bulk-delete-form :deep(.el-form-item) {
-  margin-bottom: 12px;
-}
-
-.bulk-delete-form > .el-button {
-  margin-bottom: 12px;
-}
-
-.delete-preview-summary {
-  margin-top: 14px;
 }
 
 .highlight-dialog-body {
@@ -6627,7 +5967,7 @@ onBeforeUnmount(() => {
 }
 
 .highlight-palette-title {
-  color: #344054;
+  color: var(--app-text);
   font-size: 13px;
   font-weight: 700;
 }
@@ -6642,7 +5982,7 @@ onBeforeUnmount(() => {
   position: relative;
   min-width: 0;
   height: 27px;
-  border: 1px solid #cfd4dc;
+  border: 1px solid var(--app-border-strong);
   border-radius: 3px;
   padding: 0;
   cursor: pointer;
@@ -6667,7 +6007,7 @@ onBeforeUnmount(() => {
   height: 18px;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  color: var(--app-bg);
   font-size: 14px;
   font-weight: 800;
   line-height: 1;
@@ -6688,7 +6028,7 @@ onBeforeUnmount(() => {
 .highlight-preview {
   width: 44px;
   height: 28px;
-  border: 1px solid #cfd4dc;
+  border: 1px solid var(--app-border-strong);
   border-radius: 6px;
   box-shadow: inset 0 0 0 1px rgb(255 255 255 / 60%);
 }
@@ -6699,23 +6039,8 @@ onBeforeUnmount(() => {
 }
 
 .ledger-page {
-  --app-primary: #167d73;
-  --app-primary-soft: #eaf7f2;
-  --app-border: #e3ecef;
-  --app-muted: #526775;
-  --el-color-primary: #167d73;
-  --el-color-primary-light-3: #438e85;
-  --el-color-primary-light-5: #83b9ae;
-  --el-color-primary-light-7: #c6e5da;
-  --el-color-primary-light-8: #d9eee6;
-  --el-color-primary-light-9: #eaf7f2;
-  --el-color-primary-dark-2: #11695f;
-  --el-border-color: #cbdcd7;
-  --el-border-color-light: #e3ecef;
   --el-border-radius-base: 8px;
-  --el-text-color-primary: #243746;
-  --el-text-color-regular: #526775;
-  color: #243746;
+  color: var(--app-text);
   display: flex;
   height: calc(100dvh - 68px);
   min-height: 0;
@@ -6761,10 +6086,10 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  border: 1px solid #e3ecef;
+  border: 1px solid var(--app-border);
   border-radius: 8px 8px 0 0;
-  color: #526775;
-  background: #fff;
+  color: var(--app-muted);
+  background: var(--app-bg);
   padding: 5px 10px;
   text-align: center;
   cursor: pointer;
@@ -6788,22 +6113,22 @@ onBeforeUnmount(() => {
   left: 12px;
   height: 2px;
   border-radius: 999px;
-  background: #167d73;
+  background: var(--app-primary);
   content: "";
   opacity: 0;
 }
 
 .project-tab:hover:not(.active) {
-  border-color: #cbdcd7;
-  color: #167d73;
-  background: #f3f9fb;
+  border-color: var(--app-border-strong);
+  color: var(--app-primary-text);
+  background: var(--app-hover);
   transform: translateY(-1px);
 }
 
 .project-tab.active {
-  border-color: #c6e5da;
-  color: #11695f;
-  background: #eaf7f2;
+  border-color: var(--app-primary-border);
+  color: var(--app-primary-hover);
+  background: var(--app-primary-soft);
   transform: translateY(-1px);
 }
 
@@ -6813,7 +6138,7 @@ onBeforeUnmount(() => {
 }
 
 .project-tab:focus-visible {
-  outline: 2px solid #167d73;
+  outline: 2px solid var(--app-primary);
   outline-offset: 2px;
 }
 
@@ -6839,7 +6164,7 @@ onBeforeUnmount(() => {
 }
 .ledger-filter-group,
 .ledger-operation-group {
-  border-top: 1px solid #edf2f3;
+  border-top: 1px solid var(--app-border-light);
   padding-top: 10px;
   padding-bottom: 3px;
   display: flex;
@@ -6904,7 +6229,7 @@ onBeforeUnmount(() => {
   border: 0;
   border-radius: 4px;
   background: transparent;
-  color: #98a2b3;
+  color: var(--app-subtle);
   cursor: pointer;
   padding: 0;
 }
@@ -6913,8 +6238,8 @@ onBeforeUnmount(() => {
 .ledger-column-tools-trigger.active,
 .ledger-column-tools-trigger.sorted,
 .ledger-column-tools-trigger.filtered {
-  background: #eaf7f2;
-  color: var(--app-primary);
+  background: var(--app-primary-soft);
+  color: var(--app-primary-text);
 }
 
 .ledger-column-tools-trigger :deep(.el-icon) {
@@ -6923,7 +6248,7 @@ onBeforeUnmount(() => {
 
 .ledger-sort-indicator {
   margin-left: -2px;
-  color: var(--app-primary);
+  color: var(--app-primary-text);
   font-size: 12px;
   font-weight: 700;
 }
@@ -6949,11 +6274,11 @@ onBeforeUnmount(() => {
   display: grid;
   max-width: 340px;
   gap: 3px;
-  border: 1px solid #a7cfc3;
+  border: 1px solid var(--app-primary-mid);
   border-radius: 8px;
-  background: #f1faf6;
-  box-shadow: 0 8px 24px rgb(36 55 70 / 10%);
-  color: #11695f;
+  background: var(--app-hover);
+  box-shadow: 0 8px 24px rgb(45 42 38 / 10%);
+  color: var(--app-primary-hover);
   font-size: 12px;
   line-height: 1.35;
   padding: 8px 10px;
@@ -6962,16 +6287,16 @@ onBeforeUnmount(() => {
 
 .ledger-column-tools-popover {
   width: 330px;
-  border: 1px solid #cbdcd7;
+  border: 1px solid var(--app-border-strong);
   border-radius: 12px;
-  background: #fff;
-  box-shadow: 0 8px 26px rgb(36 55 70 / 10%);
+  background: var(--app-bg);
+  box-shadow: 0 8px 26px rgb(45 42 38 / 10%);
   padding: 12px;
 }
 
 .ledger-column-tools-title {
   margin-bottom: 10px;
-  color: #182230;
+  color: var(--app-text);
   font-size: 14px;
   font-weight: 600;
 }
@@ -7020,10 +6345,10 @@ onBeforeUnmount(() => {
 .ledger-context-menu {
   width: 230px;
   overflow: hidden;
-  border: 1px solid #cbdcd7;
+  border: 1px solid var(--app-border-strong);
   border-radius: 12px;
-  background: #fff;
-  box-shadow: 0 8px 26px rgb(36 55 70 / 10%);
+  background: var(--app-bg);
+  box-shadow: 0 8px 26px rgb(45 42 38 / 10%);
   padding: 5px;
 }
 
@@ -7033,7 +6358,7 @@ onBeforeUnmount(() => {
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: #344054;
+  color: var(--app-text);
   cursor: pointer;
   font: inherit;
   padding: 8px 10px;
@@ -7041,8 +6366,8 @@ onBeforeUnmount(() => {
 }
 
 .ledger-context-menu button:hover:not(:disabled) {
-  background: #eaf7f2;
-  color: var(--app-primary);
+  background: var(--app-primary-soft);
+  color: var(--app-primary-text);
 }
 
 .ledger-context-menu button:disabled {
@@ -7053,7 +6378,7 @@ onBeforeUnmount(() => {
 .ledger-context-menu-separator {
   height: 1px;
   margin: 5px 4px;
-  background: #eaecf0;
+  background: var(--app-border);
 }
 
 .date-filter,
@@ -7103,7 +6428,7 @@ onBeforeUnmount(() => {
 }
 
 :deep(.search-focus-row > td) {
-  background: #e6f4ff !important;
+  background: var(--app-primary-soft) !important;
   transition: background-color 300ms ease;
 }
 
@@ -7127,7 +6452,7 @@ onBeforeUnmount(() => {
 }
 
 .export-panel {
-  border-color: #c6e5da;
+  border-color: var(--app-primary-border);
 }
 
 .field-label {
@@ -7141,16 +6466,16 @@ onBeforeUnmount(() => {
   align-items: center;
   flex-wrap: nowrap;
   gap: 8px;
-  border: 1px solid #d9eae4;
+  border: 1px solid var(--app-primary-border);
   border-radius: 12px;
-  background: #f3faf7;
+  background: var(--app-hover);
   overflow-x: auto;
   padding: 6px 10px;
   scrollbar-width: thin;
 }
 
 .selection-bar strong {
-  color: #11695f;
+  color: var(--app-primary-hover);
   flex: 0 0 auto;
   margin-right: 4px;
   font-size: 13px;
@@ -7171,15 +6496,6 @@ onBeforeUnmount(() => {
   color: var(--app-muted);
   font-size: 12px;
   white-space: nowrap;
-}
-
-.selection-date {
-  width: 132px;
-}
-
-.selection-date-separator {
-  color: var(--app-muted);
-  font-size: 13px;
 }
 
 .selection-bar > :deep(.el-button) {
@@ -7226,7 +6542,7 @@ onBeforeUnmount(() => {
   align-items: flex-end;
   gap: 4px;
   border-top: 1px solid var(--app-border);
-  background: #f7fafc;
+  background: var(--app-bg);
   padding: 5px 6px 0;
 }
 
@@ -7276,11 +6592,11 @@ onBeforeUnmount(() => {
 }
 
 .ledger-zoom-value:hover {
-  color: var(--app-primary);
+  color: var(--app-primary-text);
 }
 
 .row-lock {
-  color: #d48806;
+  color: var(--app-warning);
   font-size: 17px;
 }
 
@@ -7363,14 +6679,14 @@ onBeforeUnmount(() => {
   bottom: 5px;
   width: 6px;
   height: 6px;
-  border: 1px solid #fff;
+  border: 1px solid var(--app-bg);
   border-radius: 1px;
-  background: var(--app-primary, #1677ff);
+  background: var(--app-primary, var(--app-primary));
   content: "";
 }
 
 .grid-fill-handle:hover::after {
-  box-shadow: 0 0 0 1px rgb(22 119 255 / 35%);
+  box-shadow: 0 0 0 1px rgb(var(--app-primary-rgb) / 35%);
 }
 
 .grid-fill-preview-value {
@@ -7381,10 +6697,10 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  border: 1px dashed #60a5fa;
+  border: 1px dashed var(--app-primary-mid);
   border-radius: 4px;
-  background: rgb(239 246 255 / 92%);
-  color: #1d4ed8;
+  background: var(--app-primary-soft);
+  color: var(--app-primary-hover);
   font-size: 12px;
   line-height: 1.2;
   padding: 0 4px;
@@ -7426,7 +6742,7 @@ onBeforeUnmount(() => {
 }
 
 .cell-field-error {
-  color: #b42318;
+  color: var(--app-danger);
   font-size: 11px;
   line-height: 1.3;
   text-align: left;
@@ -7435,7 +6751,7 @@ onBeforeUnmount(() => {
 }
 
 .cell-field-invalid :deep(.el-input__wrapper) {
-  box-shadow: 0 0 0 1px #f04438 inset;
+  box-shadow: 0 0 0 1px var(--app-danger) inset;
 }
 
 .dialog-note {
@@ -7446,26 +6762,26 @@ onBeforeUnmount(() => {
 }
 
 :deep(.el-table .locked-row > td.el-table__cell) {
-  background: #fff;
+  background: var(--app-bg);
 }
 
 :deep(.el-table .locked-row .el-input__wrapper) {
-  background: #fff;
-  box-shadow: 0 0 0 1px #dcdfe6 inset;
+  background: var(--app-bg);
+  box-shadow: 0 0 0 1px var(--app-border-strong) inset;
 }
 
 :deep(.el-table .locked-row .el-input__inner) {
-  color: #303133;
-  -webkit-text-fill-color: #303133;
+  color: var(--app-text);
+  -webkit-text-fill-color: var(--app-text);
   cursor: text;
 }
 
 :deep(.el-table .draft-row > td.el-table__cell) {
-  background: #f8fbff;
+  background: var(--app-hover);
 }
 
 :deep(.el-table .draft-row:hover > td.el-table__cell) {
-  background: #f2f7ff !important;
+  background: var(--app-hover) !important;
 }
 
 :deep(.el-table .highlighted-row > td.el-table__cell),
@@ -7491,14 +6807,14 @@ onBeforeUnmount(() => {
 }
 
 :deep(.el-table td.grid-cell-selected) {
-  background: #eaf7f2 !important;
-  box-shadow: inset 0 0 0 1px #a7cfc3;
+  background: var(--app-primary-soft) !important;
+  box-shadow: inset 0 0 0 1px var(--app-primary-mid);
 }
 
 :deep(.el-table td.grid-cell-selected .el-input__wrapper),
 :deep(.el-table td.grid-cell-selected .el-select__wrapper),
 :deep(.el-table td.grid-cell-selected .el-textarea__inner) {
-  background-color: #eaf7f2 !important;
+  background-color: var(--app-primary-soft) !important;
 }
 
 :deep(.el-table td.grid-cell-active) {
@@ -7507,19 +6823,19 @@ onBeforeUnmount(() => {
 
 :deep(.el-table td.grid-cell-editing),
 :deep(.el-table td.grid-cell-editing:hover) {
-  background: #fff !important;
+  background: var(--app-cell-editing-bg) !important;
   box-shadow: inset 0 0 0 2px var(--app-primary);
 }
 
 :deep(.el-table td.grid-cell-editing .el-input__wrapper),
 :deep(.el-table td.grid-cell-editing .el-select__wrapper),
 :deep(.el-table td.grid-cell-editing .el-textarea__inner) {
-  background-color: #fff !important;
+  background-color: var(--app-cell-editing-bg) !important;
 }
 
 :deep(.el-table td.grid-cell-fill-preview) {
-  background: #d9eee6 !important;
-  box-shadow: inset 0 0 0 1px #83b9ae;
+  background: var(--app-primary-border) !important;
+  box-shadow: inset 0 0 0 1px var(--app-primary-mid);
 }
 
 :deep(.el-table .el-textarea__inner) {
@@ -7643,21 +6959,21 @@ onBeforeUnmount(() => {
 }
 
 :deep(.el-table th.el-table__cell) {
-  color: #365450;
-  background: #f3f8f6;
+  color: var(--app-muted);
+  background: var(--app-surface-soft);
   text-align: center;
   user-select: none;
   -webkit-user-select: none;
 }
 
 :deep(.el-table th.grid-header-selected) {
-  background: #eaf7f2 !important;
+  background: var(--app-primary-soft) !important;
   box-shadow: inset 0 -2px 0 var(--app-primary);
 }
 
 :deep(.el-table th.grid-header-partial) {
-  background: #f0f8f5 !important;
-  box-shadow: inset 0 -2px 0 #a7cfc3;
+  background: var(--app-hover) !important;
+  box-shadow: inset 0 -2px 0 var(--app-primary-mid);
 }
 
 :deep(.el-table .el-input__inner),
@@ -7672,7 +6988,7 @@ onBeforeUnmount(() => {
 
 :deep(.ledger-table-card .el-table__body-wrapper .el-scrollbar__thumb) {
   border-radius: 999px;
-  background: #98a2b3;
+  background: var(--app-subtle);
 }
 
 .cell-save-state {
@@ -7680,22 +6996,22 @@ onBeforeUnmount(() => {
   right: 4px;
   top: 2px;
   z-index: 3;
-  color: #667085;
+  color: var(--app-muted);
   font-size: 10px;
   line-height: 14px;
   pointer-events: none;
 }
 
 .cell-save-state.is-saving {
-  color: #2563eb;
+  color: var(--app-primary-text);
 }
 
 .cell-save-state.is-saved {
-  color: #16803c;
+  color: var(--app-success);
 }
 
 .cell-save-state.is-error {
-  color: #d92d20;
+  color: var(--app-danger);
   font-weight: 700;
 }
 
@@ -7704,7 +7020,7 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
-  color: #475467;
+  color: var(--app-muted);
   font-size: 12px;
 }
 
@@ -7715,10 +7031,10 @@ onBeforeUnmount(() => {
 }
 
 .replace-preview-panel {
-  border: 1px solid #d0d5dd;
+  border: 1px solid var(--app-border-strong);
   border-radius: 8px;
   padding: 12px;
-  background: #f8fafc;
+  background: var(--app-surface-soft);
 }
 
 .replace-preview-panel ul,
@@ -7742,20 +7058,20 @@ onBeforeUnmount(() => {
   border: 1px solid #f0b849;
   border-radius: 10px;
   padding: 16px;
-  background: #fffaf0;
+  background: var(--app-warning-soft);
   box-shadow: 0 12px 36px rgb(16 24 40 / 20%);
 }
 
 .validation-panel li.is-error {
-  color: #b42318;
+  color: var(--app-danger);
 }
 
 .validation-panel li.is-warning {
-  color: #b54708;
+  color: var(--app-warning);
 }
 
 .validation-panel li.is-suggestion {
-  color: #175cd3;
+  color: var(--app-primary-text);
 }
 
 .validation-panel-actions {
@@ -7784,7 +7100,6 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 680px) {
-  .bulk-delete-form,
   .two-column-dialog-form {
     grid-template-columns: 1fr;
   }

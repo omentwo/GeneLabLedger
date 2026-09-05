@@ -129,6 +129,8 @@ def _replace_xml(content: bytes, replacements: dict[str, str]) -> bytes:
 
 
 def render_docx(template_path: Path, output_path: Path, replacements: dict[str, str]) -> None:
+    if template_path.resolve() == output_path.resolve():
+        raise InvalidDocxTemplate("输出路径不能与模板路径相同")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with zipfile.ZipFile(template_path, "r") as source_archive:

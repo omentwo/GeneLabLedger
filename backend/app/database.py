@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import re
 import shutil
 from collections.abc import Generator
 from datetime import UTC, datetime
@@ -61,6 +63,14 @@ class Database:
 
     @staticmethod
     def _enable_sqlite_foreign_keys(dbapi_connection: object, _: object) -> None:
+        def strict_number(value):
+            pattern = r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
+            if value is None or not re.fullmatch(pattern, str(value).strip()):
+                return None
+            number = float(value)
+            return number if math.isfinite(number) else None
+
+        dbapi_connection.create_function("strict_number", 1, strict_number, deterministic=True)
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()

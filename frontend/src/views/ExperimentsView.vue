@@ -212,10 +212,11 @@ function addSelectedToQueue(): void {
     return;
   }
   const existing = new Set(queueItems.value.map((item) => item.id));
-  queueItems.value.push(...selectedCandidates.value.filter((record) => !existing.has(record.id)));
+  const added = selectedCandidates.value.filter((record) => !existing.has(record.id));
+  queueItems.value.push(...added);
   selectedCandidates.value = [];
   candidateTableRef.value?.clearSelection();
-  ElMessage.success(`已加入 ${queueItems.value.length} 条记录`);
+  ElMessage.success(`已加入 ${added.length} 条记录`);
 }
 
 function invertCandidates(): void {
@@ -536,9 +537,9 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  border: 1px solid #dcebe9;
+  border: 1px solid var(--app-border);
   border-radius: 10px;
-  background: linear-gradient(110deg, #f3faf6, #f5faff);
+  background: linear-gradient(110deg, var(--app-hover), var(--app-hover));
   padding: 10px 14px;
 }
 
@@ -547,7 +548,7 @@ onMounted(() => {
 .editor-note { margin: 4px 0 0; color: var(--app-muted); font-size: 12px; line-height: 1.6; }
 .prefix-field { display: grid; width: min(440px, 48vw); gap: 5px; color: var(--app-muted); font-size: 12px; }
 .numbering-count { color: var(--app-muted); font-size: 13px; }
-.numbering-count strong { color: var(--app-primary); font-size: 22px; font-variant-numeric: tabular-nums; }
+.numbering-count strong { color: var(--app-primary-text); font-size: 22px; font-variant-numeric: tabular-nums; }
 .experiment-workspace { display: grid; grid-template-columns: minmax(420px, 0.9fr) minmax(560px, 1.1fr); gap: 12px; }
 .candidate-card,
 .queue-card { min-width: 0; overflow: hidden; }
@@ -559,14 +560,14 @@ onMounted(() => {
 .add-column-row { max-width: 520px; margin-top: 12px; }
 .eligibility-list { display: grid; gap: 8px; margin-top: 14px; }
 .eligibility-row { display: flex; align-items: center; justify-content: space-between; border: 1px solid var(--app-border); border-radius: 8px; padding: 10px 12px; }
-code { border-radius: 4px; background: #f2f4f7; padding: 2px 5px; }
+code { border-radius: 4px; background: var(--app-surface-soft); padding: 2px 5px; }
 
 @media (max-width: 1280px) {
   .experiment-workspace { grid-template-columns: 1fr; }
   .prefix-field { width: min(100%, 520px); }
   .numbering-bar { align-items: stretch; flex-direction: column; }
 }
-.numbering-bar { background: #fff; }
+.numbering-bar { background: var(--app-bg); }
 @media (max-width: 640px) {
   .rule-card { flex-wrap: wrap; }
   .candidate-filter { grid-template-columns: minmax(0, 1fr); }
