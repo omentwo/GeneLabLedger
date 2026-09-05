@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Delete, EditPen, Plus } from "@element-plus/icons-vue";
+import { Trash2 as Delete, Pencil as EditPen, Plus } from "@lucide/vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { computed, reactive, ref, watch } from "vue";
 
@@ -276,6 +276,10 @@ watch(
 .template-field-editor { display: grid; gap: 8px; max-height: 320px; overflow-y: auto; }
 .template-field-row {
   display: grid;
+  padding: 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: #f8fcfa;
   grid-template-columns: minmax(0, 1fr) minmax(88px, 110px) minmax(96px, 120px) minmax(130px, 1fr) 48px;
   gap: 8px;
   align-items: center;
@@ -287,7 +291,7 @@ watch(
 
 @media (max-width: 600px) {
   .template-field-row {
-    grid-template-columns: minmax(0, 1fr) 86px 92px minmax(110px, 1fr) 42px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 6px;
   }
   .template-field-row :deep(.el-button) { width: 42px; }

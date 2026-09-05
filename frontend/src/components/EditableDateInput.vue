@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Calendar } from "@element-plus/icons-vue";
+import { Calendar } from "@lucide/vue";
 import { ref } from "vue";
 
 const props = withDefaults(
@@ -55,7 +55,7 @@ function applyPicker(event: Event): void {
           title="选择日期"
           @click.prevent="openPicker"
         >
-          <el-icon><Calendar /></el-icon>
+          <Calendar :size="16" :stroke-width="1.8" aria-hidden="true" />
         </button>
       </template>
     </el-input>
@@ -105,4 +105,3 @@ function applyPicker(event: Event): void {
   pointer-events: none;
 }
 </style>
-

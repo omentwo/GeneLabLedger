@@ -3,18 +3,33 @@
 @import "tailwindcss/utilities.css" layer(utilities);
 
 :root {
-  color: #182230;
-  background: #f7f8fa;
+  color: #243746;
+  background: #f7fafc;
   font-family:
     Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  --app-primary: #1677ff;
-  --app-primary-soft: #eaf3ff;
+  --app-primary: #167d73;
+  --app-primary-soft: #eaf7f2;
   --app-sidebar-width: 196px;
-  --app-border: #e4e7ec;
-  --app-muted: #667085;
+  --app-border: #e3ecef;
+  --app-muted: #526775;
   --app-card: #ffffff;
+  --el-color-primary: #167d73;
+  --el-color-primary-light-3: #519f95;
+  --el-color-primary-light-5: #8abeb5;
+  --el-color-primary-light-7: #c3dfd8;
+  --el-color-primary-light-8: #d9eee6;
+  --el-color-primary-light-9: #eaf7f2;
+  --el-color-primary-dark-2: #10645c;
+  --el-text-color-primary: #243746;
+  --el-text-color-regular: #526775;
+  --el-border-color: #dce7e9;
+  --el-border-color-light: #e3ecef;
+  --el-border-color-lighter: #edf3f4;
+  --el-fill-color-light: #f5faf8;
+  --el-bg-color-page: #f7fafc;
+  --el-border-radius-base: 8px;
 }
 
 * {
@@ -32,7 +47,7 @@ body,
 
 body {
   min-height: 100vh;
-  background: #f7f8fa;
+  background: #f7fafc;
 }
 
 button,
@@ -51,7 +66,7 @@ textarea {
   border: 1px solid var(--app-border);
   border-radius: 12px;
   background: var(--app-card);
-  box-shadow: 0 1px 2px rgb(16 24 40 / 3%);
+  box-shadow: 0 4px 20px rgb(32 78 70 / 3%);
 }
 
 .page-card-header {
@@ -105,4 +120,28 @@ textarea {
 
 .muted {
   color: var(--app-muted);
+}
+
+.workspace-page { min-width: 0; gap: 18px; }
+.workspace-heading { display: flex; align-items: center; gap: 13px; padding: 5px 2px 0; }
+.workspace-heading > svg { flex-shrink: 0; width: 44px; height: 44px; padding: 11px; color: var(--app-primary); border: 1px solid #d9eee6; border-radius: 14px; background: #eaf7f2; }
+.workspace-heading h1 { margin: 0; font-size: 23px; font-weight: 650; letter-spacing: -.6px; color: #243746; }
+.workspace-heading p { margin: 5px 0 0; color: var(--app-muted); font-size: 12px; line-height: 1.7; }
+.workspace-page .page-card { overflow: hidden; }
+.workspace-page .page-card-header { flex-wrap: wrap; padding: 13px 16px; }
+.workspace-page .page-card-body { padding: 16px; }
+.el-table { --el-table-header-bg-color: #f5faf8; --el-table-header-text-color: #526775; --el-table-row-hover-bg-color: #f2faf6; --el-table-current-row-bg-color: #eaf7f2; }
+.el-dialog { --el-dialog-border-radius: 16px; --el-dialog-box-shadow: 0 24px 80px rgb(32 78 70 / 14%); max-width: calc(100vw - 24px); }
+.el-dialog__header { padding-bottom: 16px; border-bottom: 1px solid var(--app-border); margin-bottom: 16px; }
+.el-dialog__title { font-weight: 650; }
+.el-dialog__footer { padding-top: 16px; }
+.el-popover.el-popper { max-width: calc(100vw - 24px); }
+.workspace-page button, .quick-entry-page button { transition: background-color .18s ease, border-color .18s ease, box-shadow .18s ease; }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--app-primary); outline-offset: 3px; }
+@media (max-width: 640px) {
+  .workspace-heading h1 { font-size: 20px; }
+  .workspace-page .page-card-header { align-items: flex-start; gap: 10px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .workspace-page *, .quick-entry-page * { transition: none !important; animation: none !important; }
 }

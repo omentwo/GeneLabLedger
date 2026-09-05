@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import {
-  Delete,
-  DocumentAdd,
+  Trash2 as Delete,
+  FilePlus2 as DocumentAdd,
+  Files,
   Plus,
   Printer,
-  Refresh,
-  UploadFilled,
-} from "@element-plus/icons-vue";
+  RefreshCw as Refresh,
+  Upload as UploadFilled,
+} from "@lucide/vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
@@ -508,7 +509,11 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="page-stack" v-loading="loading">
+  <div class="page-stack workspace-page" v-loading="loading">
+    <header class="workspace-heading">
+      <Files :stroke-width="1.6" aria-hidden="true" />
+      <div><h1>报告模板</h1><p>管理模板、映射字段，让记录自然衔接每一份报告。</p></div>
+    </header>
     <section class="report-intro">
       <div>
         <strong>占位符由您自由映射</strong>
@@ -820,10 +825,10 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  border: 1px solid #b9d3ff;
+  border: 1px solid #dcebe9;
   border-left: 4px solid var(--app-primary);
   border-radius: 10px;
-  background: #f8fbff;
+  background: linear-gradient(110deg, #f3faf6, #f5faff);
   padding: 12px 14px;
 }
 
@@ -867,13 +872,13 @@ onMounted(() => {
 }
 
 .template-item:hover {
-  border-color: #84adff;
+  border-color: #8abeb5;
 }
 
 .template-item.active {
   border-color: var(--app-primary);
   background: var(--app-primary-soft);
-  box-shadow: 0 0 0 1px var(--app-primary);
+  box-shadow: inset 3px 0 var(--app-primary);
 }
 
 .template-item div {
@@ -908,8 +913,8 @@ onMounted(() => {
 
 code {
   border-radius: 5px;
-  color: #0958d9;
-  background: #eaf3ff;
+  color: #167d73;
+  background: #eaf7f2;
   padding: 3px 6px;
 }
 
@@ -942,12 +947,23 @@ code {
 }
 
 .file-drop input {
-  display: none;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
 }
 
 @media (max-width: 1300px) {
   .report-layout {
     grid-template-columns: 240px minmax(0, 1fr);
   }
+}
+.file-drop:focus-within { outline: 2px solid var(--app-primary); outline-offset: 3px; }
+.template-item strong { overflow-wrap: anywhere; }
+@media (max-width: 960px) {
+  .report-layout { grid-template-columns: minmax(0, 1fr); }
+  .template-list { max-height: 280px; }
+  .report-intro { flex-wrap: wrap; gap: 10px; }
 }
 </style>

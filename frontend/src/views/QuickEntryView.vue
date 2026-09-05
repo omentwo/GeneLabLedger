@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import {
   ArrowLeft,
-  EditPen,
+  Dna,
+  Pencil as EditPen,
   Lock,
   Plus,
-  Refresh,
+  RefreshCw as Refresh,
   Search,
-  Setting,
-} from "@element-plus/icons-vue";
+  Settings2 as Setting,
+} from "@lucide/vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
@@ -739,11 +740,7 @@ onBeforeUnmount(() => {
   <div class="quick-entry-page">
     <header class="quick-entry-header">
       <div class="quick-entry-brand">
-        <svg viewBox="0 0 64 64" aria-hidden="true">
-          <rect x="2" y="2" width="60" height="60" rx="18" fill="#e8f3ff" stroke="#b9d7f5" stroke-width="2" />
-          <path d="M22 16c14 4 14 28 28 32M42 16c-14 4-14 28-28 32" fill="none" stroke="#1677ff" stroke-width="4" stroke-linecap="round" />
-          <path d="M24 22h16M22 32h20M24 42h16" stroke="#16a36a" stroke-width="3" stroke-linecap="round" />
-        </svg>
+        <Dna :stroke-width="1.7" aria-hidden="true" />
         <div>
           <strong>快速录入</strong>
           <span>独立置顶窗口</span>
@@ -991,8 +988,8 @@ onBeforeUnmount(() => {
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
-  background: #f5f7fa;
-  color: #182230;
+  background: #f7fafc;
+  color: #243746;
 }
 
 .quick-entry-header {
@@ -1015,6 +1012,11 @@ onBeforeUnmount(() => {
 }
 
 .quick-entry-brand svg {
+  padding: 7px;
+  color: #167d73;
+  background: #eaf7f2;
+  border: 1px solid #d9eee6;
+  border-radius: 11px;
   width: 36px;
   height: 36px;
   flex: 0 0 36px;
@@ -1049,7 +1051,7 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: #175cd3;
+  color: #167d73;
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
@@ -1059,8 +1061,8 @@ onBeforeUnmount(() => {
   width: 7px;
   height: 7px;
   border-radius: 999px;
-  background: #2e90fa;
-  box-shadow: 0 0 0 4px #eaf3ff;
+  background: #167d73;
+  box-shadow: 0 0 0 4px #eaf7f2;
 }
 
 .quick-entry-error {
@@ -1148,7 +1150,7 @@ onBeforeUnmount(() => {
 }
 
 .record-list-item:hover {
-  background: #f5f8ff;
+  background: #f2faf6;
 }
 
 .record-list-item:disabled {
@@ -1161,9 +1163,9 @@ onBeforeUnmount(() => {
 }
 
 .record-list-item.active {
-  background: #eaf3ff;
-  color: #175cd3;
-  box-shadow: inset 3px 0 #1677ff;
+  background: #eaf7f2;
+  color: #167d73;
+  box-shadow: inset 3px 0 #167d73;
 }
 
 .record-pathology {
@@ -1312,8 +1314,8 @@ onBeforeUnmount(() => {
 }
 
 .pinned-mark {
-  background: #eff8ff;
-  color: #175cd3;
+  background: #eaf7f2;
+  color: #167d73;
 }
 
 .entry-field {
@@ -1483,5 +1485,20 @@ onBeforeUnmount(() => {
     gap: 8px 14px;
     padding-block: 8px 14px;
   }
+}
+.record-pane, .entry-pane { border-color: #e3ecef; box-shadow: 0 4px 20px rgb(32 78 70 / 3%); }
+.record-pane-header { background: #f8fcfa; }
+.record-pane-header p, .record-pane-note, .record-meta, .entry-heading p,
+.entry-footer > span, .quick-entry-brand span, .field-selector-head,
+.required-mark, .pinned-mark, .field-selector-name small { font-size: 12px; }
+.record-pane-note, .record-meta, .entry-footer > span, .record-list-empty { color: #526775; }
+.entry-pane-header { background: linear-gradient(110deg, #fff, #f6fbf8); }
+.entry-field-label { color: #243746; }
+@media (max-width: 640px) {
+  .quick-entry-header { flex-wrap: wrap; }
+  .project-select { order: 3; width: 100%; }
+  .quick-entry-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: 200px minmax(380px, 1fr); overflow-y: auto; }
+  .entry-title-row h1 { max-width: 80vw; }
+  .field-selector-head, .field-selector-row { grid-template-columns: minmax(0, 1fr) 64px 64px; }
 }
 </style>

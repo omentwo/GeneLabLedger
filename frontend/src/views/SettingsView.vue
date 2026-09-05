@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { FolderOpened, RefreshRight } from "@element-plus/icons-vue";
+import { FolderOpen as FolderOpened, RotateCw as RefreshRight, Settings2 } from "@lucide/vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { computed, onMounted, reactive, ref } from "vue";
 
@@ -138,7 +138,11 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="grid gap-4">
+  <div class="grid gap-4 workspace-page settings-page">
+    <header class="workspace-heading">
+      <Settings2 :stroke-width="1.6" aria-hidden="true" />
+      <div><h1>数据与设置</h1><p>调整工作习惯，管理本机数据与显示偏好。</p></div>
+    </header>
     <section class="page-card overflow-hidden">
       <div class="page-card-header">
         <div>

@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import {
-  Calendar,
+  CalendarDays as Calendar,
   Check,
-  Delete,
-  FolderOpened,
+  Trash2 as Delete,
+  FolderOpen as FolderOpened,
+  Clock3,
   Plus,
-  Refresh,
-  VideoPlay,
-} from "@element-plus/icons-vue";
+  RefreshCw as Refresh,
+  Play as VideoPlay,
+} from "@lucide/vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { computed, onMounted, reactive, ref } from "vue";
 
@@ -295,7 +296,11 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="page-stack" v-loading="loading">
+  <div class="page-stack workspace-page" v-loading="loading">
+    <header class="workspace-heading">
+      <Clock3 :stroke-width="1.6" aria-hidden="true" />
+      <div><h1>自动导出</h1><p>安排导出计划，在本机运行期间有序留存数据。</p></div>
+    </header>
     <section class="auto-export-intro">
       <div>
         <strong>由本机后端定时执行</strong>
@@ -576,10 +581,10 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  border: 1px solid #b9d3ff;
+  border: 1px solid #dcebe9;
   border-left: 4px solid var(--app-primary);
   border-radius: 10px;
-  background: #f8fbff;
+  background: linear-gradient(110deg, #f3faf6, #f5faff);
   padding: 12px 14px;
 }
 
@@ -623,13 +628,13 @@ onMounted(() => {
 }
 
 .task-item:hover {
-  border-color: #84adff;
+  border-color: #8abeb5;
 }
 
 .task-item.active {
   border-color: var(--app-primary);
   background: var(--app-primary-soft);
-  box-shadow: 0 0 0 1px var(--app-primary);
+  box-shadow: inset 3px 0 var(--app-primary);
 }
 
 .task-title {
@@ -707,8 +712,8 @@ onMounted(() => {
 
 .directory-row .el-input,
 .cron-row .el-input {
-  min-width: 280px;
-  flex: 1;
+  min-width: 0;
+  flex: 1 1 220px;
 }
 
 .form-help {
@@ -750,5 +755,16 @@ onMounted(() => {
   .form-grid {
     grid-template-columns: repeat(2, minmax(160px, 1fr));
   }
+}
+.task-item small { font-size: 12px; line-height: 1.6; }
+@media (max-width: 960px) {
+  .auto-export-layout { grid-template-columns: minmax(0, 1fr); }
+  .task-list { max-height: 280px; }
+  .auto-export-intro { flex-wrap: wrap; gap: 10px; }
+}
+@media (max-width: 600px) {
+  .form-grid { grid-template-columns: minmax(0, 1fr); }
+  .span-2 { grid-column: auto; }
+  .history-heading { flex-wrap: wrap; }
 }
 </style>

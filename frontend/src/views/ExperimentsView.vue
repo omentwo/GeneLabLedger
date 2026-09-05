@@ -3,12 +3,13 @@ import {
   ArrowDown,
   ArrowUp,
   Check,
-  Delete,
+  Trash2 as Delete,
+  FlaskConical,
   Download,
   Plus,
-  Rank,
-  Setting,
-} from "@element-plus/icons-vue";
+  ArrowDownUp as Rank,
+  Settings2 as Setting,
+} from "@lucide/vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { computed, onMounted, ref } from "vue";
 
@@ -399,7 +400,11 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="page-stack" v-loading="loading">
+  <div class="page-stack workspace-page" v-loading="loading">
+    <header class="workspace-heading">
+      <FlaskConical :stroke-width="1.6" aria-hidden="true" />
+      <div><h1>实验编排</h1><p>从待实验记录到编号队列，让每一步安排清晰有序。</p></div>
+    </header>
     <section class="rule-card">
       <div>
         <strong>实验编号编排</strong>
@@ -531,9 +536,9 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  border: 1px solid #b9d3ff;
+  border: 1px solid #dcebe9;
   border-radius: 10px;
-  background: #f8fbff;
+  background: linear-gradient(110deg, #f3faf6, #f5faff);
   padding: 10px 14px;
 }
 
@@ -542,7 +547,7 @@ onMounted(() => {
 .editor-note { margin: 4px 0 0; color: var(--app-muted); font-size: 12px; line-height: 1.6; }
 .prefix-field { display: grid; width: min(440px, 48vw); gap: 5px; color: var(--app-muted); font-size: 12px; }
 .numbering-count { color: var(--app-muted); font-size: 13px; }
-.numbering-count strong { color: #175cd3; font-size: 18px; }
+.numbering-count strong { color: var(--app-primary); font-size: 22px; font-variant-numeric: tabular-nums; }
 .experiment-workspace { display: grid; grid-template-columns: minmax(420px, 0.9fr) minmax(560px, 1.1fr); gap: 12px; }
 .candidate-card,
 .queue-card { min-width: 0; overflow: hidden; }
@@ -560,5 +565,11 @@ code { border-radius: 4px; background: #f2f4f7; padding: 2px 5px; }
   .experiment-workspace { grid-template-columns: 1fr; }
   .prefix-field { width: min(100%, 520px); }
   .numbering-bar { align-items: stretch; flex-direction: column; }
+}
+.numbering-bar { background: #fff; }
+@media (max-width: 640px) {
+  .rule-card { flex-wrap: wrap; }
+  .candidate-filter { grid-template-columns: minmax(0, 1fr); }
+  .eligibility-row { flex-wrap: wrap; gap: 8px; }
 }
 </style>

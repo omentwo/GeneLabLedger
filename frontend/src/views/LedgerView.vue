@@ -2,20 +2,27 @@
 import {
   ArrowLeft,
   ArrowRight,
+  ArrowUp,
+  ArrowDown,
   Brush,
-  CopyDocument,
-  Delete,
-  Document,
+  Copy as CopyDocument,
+  Trash2 as Delete,
+  FileText as Document,
   Download,
   Lock,
   Minus,
   Plus,
-  Refresh,
+  RefreshCw as Refresh,
   Search,
-  Setting,
-  Unlock,
+  Settings2 as Setting,
+  LockOpen as Unlock,
   Upload,
-} from "@element-plus/icons-vue";
+  NotebookTabs,
+  Undo2,
+  Redo2,
+  Check,
+  Printer,
+} from "@lucide/vue";
 import { ElMessage, ElMessageBox, type TableColumnCtx } from "element-plus";
 import {
   computed,
@@ -5316,7 +5323,12 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="page-stack ledger-page" :class="{ 'global-search-mode': globalSearchActive }">
-    <section class="page-card">
+    <section class="page-card ledger-command-card">
+      <header class="ledger-workspace-heading">
+        <span class="ledger-workspace-mark" aria-hidden="true"><NotebookTabs :size="20" :stroke-width="1.7" /></span>
+        <h1>{{ globalSearchActive ? '跨项目检索' : (currentProject?.name || '台账') }}</h1>
+        <span class="ledger-workspace-count">{{ globalSearchActive ? globalSearchTotal : recordTotal }} 条记录</span>
+      </header>
       <div class="page-card-body">
         <div class="ledger-toolbar">
           <div class="ledger-filter-group">
@@ -5358,6 +5370,7 @@ onBeforeUnmount(() => {
           <div v-if="!globalSearchActive" class="ledger-operation-group">
             <el-button
               class="ledger-history-button"
+              :icon="Undo2"
               text
               :disabled="!canUndoHistory"
               :loading="historyBusy"
@@ -5367,6 +5380,7 @@ onBeforeUnmount(() => {
             </el-button>
             <el-button
               class="ledger-history-button"
+              :icon="Redo2"
               text
               :disabled="!canRedoHistory"
               :loading="historyBusy"
@@ -5411,6 +5425,7 @@ onBeforeUnmount(() => {
             </el-select>
             <el-button
               :loading="nativePreviewLoading"
+              :icon="Printer"
               :disabled="!nativeEngineAvailable(previewEngine)"
               @click="openLedgerNative('preview')"
             >
@@ -5685,10 +5700,11 @@ onBeforeUnmount(() => {
                 @dblclick.stop
                 @contextmenu.stop.prevent
               >
-                <Setting />
+                <Setting :size="14" :stroke-width="1.7" aria-hidden="true" />
               </button>
               <span v-if="ledgerSort?.fieldId === field.id" class="ledger-sort-indicator">
-                {{ ledgerSort.order === 'ascending' ? '↑' : '↓' }}
+                <ArrowUp v-if="ledgerSort.order === 'ascending'" :size="13" aria-label="升序" />
+                <ArrowDown v-else :size="13" aria-label="降序" />
               </span>
               <span v-if="ledgerFilters[field.id]" class="ledger-filter-indicator" />
             </div>
@@ -5787,6 +5803,7 @@ onBeforeUnmount(() => {
                 link
                 :icon="row.locked ? Unlock : Lock"
                 :title="row.locked ? '解锁记录' : '锁定记录'"
+                :aria-label="row.locked ? '解锁记录' : '锁定记录'"
                 @click="toggleRecordLock(row)"
               />
               <el-dropdown trigger="click">
@@ -6013,7 +6030,7 @@ onBeforeUnmount(() => {
             @current-change="changeLedgerPage"
           />
           <div class="ledger-zoom-control" aria-label="台账缩放">
-            <el-button text :icon="Minus" :disabled="historyReplayLoading" @click="zoomOut" />
+            <el-button text :icon="Minus" aria-label="缩小台账" :disabled="historyReplayLoading" @click="zoomOut" />
             <el-slider
               v-model="ledgerDisplaySettings.zoomPercent"
               class="ledger-zoom-slider"
@@ -6032,7 +6049,7 @@ onBeforeUnmount(() => {
             >
               {{ ledgerDisplaySettings.zoomPercent }}%
             </button>
-            <el-button text :icon="Plus" :disabled="historyReplayLoading" @click="zoomIn" />
+            <el-button text :icon="Plus" aria-label="放大台账" :disabled="historyReplayLoading" @click="zoomIn" />
             <el-button text :disabled="historyReplayLoading" @click="resetZoom">重置</el-button>
           </div>
         </div>
@@ -6053,7 +6070,7 @@ onBeforeUnmount(() => {
     @open-templates="templateManagerVisible = true"
   />
 
-  <el-dialog v-model="findReplaceVisible" title="查找替换" width="660px">
+  <el-dialog class="ledger-dialog" v-model="findReplaceVisible" title="查找替换" width="660px">
     <el-form label-position="top">
       <el-form-item label="指定表头">
         <el-select v-model="findReplaceForm.fieldId" filterable>
@@ -6127,7 +6144,7 @@ onBeforeUnmount(() => {
     </div>
   </div>
 
-  <el-dialog v-model="assignDialogVisible" title="复制为其他项目记录" width="480px">
+  <el-dialog class="ledger-dialog" v-model="assignDialogVisible" title="复制为其他项目记录" width="480px">
     <p class="dialog-note">
       目标项目会建立一个全新的记录 UUID。病理号只是普通字段，相同病理号之间不会联动。
     </p>
@@ -6155,6 +6172,7 @@ onBeforeUnmount(() => {
   </el-dialog>
 
   <el-dialog
+    class="ledger-dialog"
     v-model="highlightDialogVisible"
     :title="
       highlightMode === 'cell'
@@ -6190,7 +6208,7 @@ onBeforeUnmount(() => {
               @click="selectHighlightColor(item.color)"
             >
               <span v-if="isHighlightColorSelected(item.color)" class="highlight-swatch-mark">
-                ✓
+                <Check :size="16" :stroke-width="2" aria-hidden="true" />
               </span>
             </button>
           </template>
@@ -6212,7 +6230,7 @@ onBeforeUnmount(() => {
             @click="selectHighlightColor(item.color)"
           >
             <span v-if="isHighlightColorSelected(item.color)" class="highlight-swatch-mark">
-              ✓
+              <Check :size="16" :stroke-width="2" aria-hidden="true" />
             </span>
           </button>
         </div>
@@ -6247,6 +6265,7 @@ onBeforeUnmount(() => {
   </el-dialog>
 
   <el-dialog
+    class="ledger-dialog"
     v-model="importDialogVisible"
     title="导入 Excel 台账"
     width="980px"
@@ -6329,6 +6348,7 @@ onBeforeUnmount(() => {
   </el-dialog>
 
   <el-dialog
+    class="ledger-dialog"
     v-model="bulkDeleteDialogVisible"
     title="按日期批量删除记录"
     width="900px"
@@ -6416,6 +6436,118 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.ledger-workspace-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px 0;
+}
+
+.ledger-workspace-mark {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  border-radius: 10px;
+  background: #eaf7f2;
+  color: #167d73;
+}
+
+.ledger-workspace-heading h1 {
+  min-width: 0;
+  overflow: hidden;
+  margin: 0;
+  color: #243746;
+  font-size: 16px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ledger-workspace-count {
+  flex-shrink: 0;
+  margin-left: auto;
+  border: 1px solid #e3ecef;
+  border-radius: 999px;
+  background: #f7fafc;
+  padding: 4px 10px;
+  color: #526775;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ledger-page > .page-card {
+  border-color: #e3ecef;
+  border-radius: 14px;
+  box-shadow: 0 3px 14px rgb(36 55 70 / 3%);
+}
+
+.ledger-command-card .page-card-body {
+  padding: 12px 14px;
+}
+
+.ledger-toolbar :deep(.el-button + .el-button),
+.selection-bar :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.selection-bar > *,
+.ledger-filter-group > .date-filter {
+  flex-shrink: 0;
+}
+
+.ledger-page :deep(.el-table) {
+  --el-table-border-color: #e3ecef;
+  --el-table-header-bg-color: #f3f8f6;
+  --el-table-header-text-color: #365450;
+  --el-table-row-hover-bg-color: #f3f9fb;
+  --el-table-current-row-bg-color: #eaf7f2;
+}
+
+.ledger-context-menu button:focus-visible,
+.ledger-column-tools-trigger:focus-visible,
+.ledger-zoom-value:focus-visible {
+  outline: 2px solid #167d73;
+  outline-offset: -2px;
+  background: #eaf7f2;
+}
+
+/* Dialogs are teleported; scope the palette by the explicit page-specific class. */
+:global(.ledger-dialog) {
+  --app-primary: #167d73;
+  --app-muted: #526775;
+  --el-color-primary: #167d73;
+  --el-color-primary-light-3: #438e85;
+  --el-color-primary-light-5: #83b9ae;
+  --el-color-primary-light-7: #c6e5da;
+  --el-color-primary-light-8: #d9eee6;
+  --el-color-primary-light-9: #eaf7f2;
+  --el-color-primary-dark-2: #11695f;
+  --el-border-color: #cbdcd7;
+  --el-border-radius-base: 8px;
+  --el-text-color-primary: #243746;
+  --el-text-color-regular: #526775;
+  max-width: calc(100vw - 32px);
+  border: 1px solid #e3ecef;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 20px 60px rgb(36 55 70 / 14%);
+  padding: 22px;
+}
+
+:global(.ledger-dialog .el-dialog__header) {
+  margin-bottom: 18px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid #edf2f3;
+}
+
+:global(.ledger-dialog .el-dialog__footer) {
+  margin-top: 16px;
+  border-top: 1px solid #edf2f3;
+  padding-top: 16px;
+}
+
 .hidden-file-input {
   display: none;
 }
@@ -6567,11 +6699,28 @@ onBeforeUnmount(() => {
 }
 
 .ledger-page {
+  --app-primary: #167d73;
+  --app-primary-soft: #eaf7f2;
+  --app-border: #e3ecef;
+  --app-muted: #526775;
+  --el-color-primary: #167d73;
+  --el-color-primary-light-3: #438e85;
+  --el-color-primary-light-5: #83b9ae;
+  --el-color-primary-light-7: #c6e5da;
+  --el-color-primary-light-8: #d9eee6;
+  --el-color-primary-light-9: #eaf7f2;
+  --el-color-primary-dark-2: #11695f;
+  --el-border-color: #cbdcd7;
+  --el-border-color-light: #e3ecef;
+  --el-border-radius-base: 8px;
+  --el-text-color-primary: #243746;
+  --el-text-color-regular: #526775;
+  color: #243746;
   display: flex;
   height: calc(100dvh - 68px);
   min-height: 0;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   overflow: hidden;
 }
 
@@ -6607,16 +6756,15 @@ onBeforeUnmount(() => {
   isolation: isolate;
   display: flex;
   min-width: 80px;
-  max-width: 164px;
+  max-width: 200px;
   min-height: 28px;
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  border: 1px solid #d9e1ed;
-  border-bottom-color: #c7d1df;
-  border-radius: 9px 9px 3px 3px;
-  color: #64748b;
-  background: linear-gradient(180deg, #ffffff 0%, #eef2f7 100%);
+  border: 1px solid #e3ecef;
+  border-radius: 8px 8px 0 0;
+  color: #526775;
+  background: #fff;
   padding: 5px 10px;
   text-align: center;
   cursor: pointer;
@@ -6630,13 +6778,7 @@ onBeforeUnmount(() => {
 }
 
 .project-tab::before {
-  position: absolute;
-  z-index: -1;
-  inset: 0;
-  background: linear-gradient(118deg, #07152f 0%, #0b4fd6 58%, #6d28d9 100%);
-  content: "";
-  opacity: 0;
-  transition: opacity 160ms ease;
+  content: none;
 }
 
 .project-tab::after {
@@ -6646,28 +6788,22 @@ onBeforeUnmount(() => {
   left: 12px;
   height: 2px;
   border-radius: 999px;
-  background: linear-gradient(90deg, transparent, #67e8f9 35%, #c4b5fd 70%, transparent);
-  box-shadow: 0 0 9px rgb(103 232 249 / 75%);
+  background: #167d73;
   content: "";
   opacity: 0;
 }
 
 .project-tab:hover:not(.active) {
-  border-color: #60a5fa;
-  color: #1d4ed8;
-  background: linear-gradient(180deg, #ffffff 0%, #edf6ff 100%);
-  box-shadow: 0 -3px 10px rgb(37 99 235 / 10%);
+  border-color: #cbdcd7;
+  color: #167d73;
+  background: #f3f9fb;
   transform: translateY(-1px);
 }
 
 .project-tab.active {
-  border-color: #2563eb;
-  border-bottom-color: #312e81;
-  color: #ffffff;
-  background: #0b4fd6;
-  box-shadow:
-    0 -5px 16px rgb(37 99 235 / 28%),
-    inset 0 1px 0 rgb(255 255 255 / 24%);
+  border-color: #c6e5da;
+  color: #11695f;
+  background: #eaf7f2;
   transform: translateY(-1px);
 }
 
@@ -6677,7 +6813,7 @@ onBeforeUnmount(() => {
 }
 
 .project-tab:focus-visible {
-  outline: 2px solid #22d3ee;
+  outline: 2px solid #167d73;
   outline-offset: 2px;
 }
 
@@ -6686,9 +6822,9 @@ onBeforeUnmount(() => {
   z-index: 1;
   max-width: 100%;
   overflow: hidden;
-  font-size: 8px;
-  font-weight: 800;
-  letter-spacing: 0.1em;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0;
   line-height: 1.2;
   text-overflow: ellipsis;
 }
@@ -6703,6 +6839,9 @@ onBeforeUnmount(() => {
 }
 .ledger-filter-group,
 .ledger-operation-group {
+  border-top: 1px solid #edf2f3;
+  padding-top: 10px;
+  padding-bottom: 3px;
   display: flex;
   min-width: 0;
   align-items: center;
@@ -6774,7 +6913,7 @@ onBeforeUnmount(() => {
 .ledger-column-tools-trigger.active,
 .ledger-column-tools-trigger.sorted,
 .ledger-column-tools-trigger.filtered {
-  background: #dbeafe;
+  background: #eaf7f2;
   color: var(--app-primary);
 }
 
@@ -6810,11 +6949,11 @@ onBeforeUnmount(() => {
   display: grid;
   max-width: 340px;
   gap: 3px;
-  border: 1px solid #93c5fd;
+  border: 1px solid #a7cfc3;
   border-radius: 8px;
-  background: rgb(239 246 255 / 96%);
-  box-shadow: 0 8px 24px rgb(15 23 42 / 18%);
-  color: #1e3a8a;
+  background: #f1faf6;
+  box-shadow: 0 8px 24px rgb(36 55 70 / 10%);
+  color: #11695f;
   font-size: 12px;
   line-height: 1.35;
   padding: 8px 10px;
@@ -6823,10 +6962,10 @@ onBeforeUnmount(() => {
 
 .ledger-column-tools-popover {
   width: 330px;
-  border: 1px solid #d0d5dd;
-  border-radius: 8px;
+  border: 1px solid #cbdcd7;
+  border-radius: 12px;
   background: #fff;
-  box-shadow: 0 12px 30px rgb(16 24 40 / 18%);
+  box-shadow: 0 8px 26px rgb(36 55 70 / 10%);
   padding: 12px;
 }
 
@@ -6881,10 +7020,10 @@ onBeforeUnmount(() => {
 .ledger-context-menu {
   width: 230px;
   overflow: hidden;
-  border: 1px solid #d0d5dd;
-  border-radius: 8px;
+  border: 1px solid #cbdcd7;
+  border-radius: 12px;
   background: #fff;
-  box-shadow: 0 12px 30px rgb(16 24 40 / 20%);
+  box-shadow: 0 8px 26px rgb(36 55 70 / 10%);
   padding: 5px;
 }
 
@@ -6902,7 +7041,7 @@ onBeforeUnmount(() => {
 }
 
 .ledger-context-menu button:hover:not(:disabled) {
-  background: #eff6ff;
+  background: #eaf7f2;
   color: var(--app-primary);
 }
 
@@ -6988,7 +7127,7 @@ onBeforeUnmount(() => {
 }
 
 .export-panel {
-  border-color: #b9d3ff;
+  border-color: #c6e5da;
 }
 
 .field-label {
@@ -7002,15 +7141,16 @@ onBeforeUnmount(() => {
   align-items: center;
   flex-wrap: nowrap;
   gap: 8px;
-  border: 1px solid #d6e4ff;
-  border-radius: 10px;
-  background: #f3f8ff;
+  border: 1px solid #d9eae4;
+  border-radius: 12px;
+  background: #f3faf7;
   overflow-x: auto;
   padding: 6px 10px;
   scrollbar-width: thin;
 }
 
 .selection-bar strong {
+  color: #11695f;
   flex: 0 0 auto;
   margin-right: 4px;
   font-size: 13px;
@@ -7086,7 +7226,7 @@ onBeforeUnmount(() => {
   align-items: flex-end;
   gap: 4px;
   border-top: 1px solid var(--app-border);
-  background: #f8fafc;
+  background: #f7fafc;
   padding: 5px 6px 0;
 }
 
@@ -7351,14 +7491,14 @@ onBeforeUnmount(() => {
 }
 
 :deep(.el-table td.grid-cell-selected) {
-  background: #eaf3ff !important;
-  box-shadow: inset 0 0 0 1px #93c5fd;
+  background: #eaf7f2 !important;
+  box-shadow: inset 0 0 0 1px #a7cfc3;
 }
 
 :deep(.el-table td.grid-cell-selected .el-input__wrapper),
 :deep(.el-table td.grid-cell-selected .el-select__wrapper),
 :deep(.el-table td.grid-cell-selected .el-textarea__inner) {
-  background-color: #eaf3ff !important;
+  background-color: #eaf7f2 !important;
 }
 
 :deep(.el-table td.grid-cell-active) {
@@ -7378,8 +7518,8 @@ onBeforeUnmount(() => {
 }
 
 :deep(.el-table td.grid-cell-fill-preview) {
-  background: #dbeafe !important;
-  box-shadow: inset 0 0 0 1px #60a5fa;
+  background: #d9eee6 !important;
+  box-shadow: inset 0 0 0 1px #83b9ae;
 }
 
 :deep(.el-table .el-textarea__inner) {
@@ -7503,21 +7643,21 @@ onBeforeUnmount(() => {
 }
 
 :deep(.el-table th.el-table__cell) {
-  color: #182230;
-  background: #f2f4f7;
+  color: #365450;
+  background: #f3f8f6;
   text-align: center;
   user-select: none;
   -webkit-user-select: none;
 }
 
 :deep(.el-table th.grid-header-selected) {
-  background: #eaf3ff !important;
+  background: #eaf7f2 !important;
   box-shadow: inset 0 -2px 0 var(--app-primary);
 }
 
 :deep(.el-table th.grid-header-partial) {
-  background: #f2f7ff !important;
-  box-shadow: inset 0 -2px 0 #93c5fd;
+  background: #f0f8f5 !important;
+  box-shadow: inset 0 -2px 0 #a7cfc3;
 }
 
 :deep(.el-table .el-input__inner),
@@ -7623,5 +7763,37 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
   align-items: flex-start;
   gap: 8px;
+}
+
+@media (max-width: 1200px) {
+  .ledger-bottom-bar {
+    flex-wrap: wrap;
+    flex-basis: auto;
+  }
+
+  .ledger-zoom-footer {
+    flex: 1 0 100%;
+    overflow-x: auto;
+    justify-content: flex-start;
+    padding: 4px 2px;
+  }
+
+  .ledger-zoom-footer > * {
+    flex-shrink: 0;
+  }
+}
+
+@media (max-width: 680px) {
+  .bulk-delete-form,
+  .two-column-dialog-form {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .project-tab,
+  .highlight-color-swatch {
+    transition: none;
+  }
 }
 </style>

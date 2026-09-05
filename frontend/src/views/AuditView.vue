@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Search } from "@element-plus/icons-vue";
+import { Search, ClipboardList } from "@lucide/vue";
 import { onMounted, ref } from "vue";
 
 import { listAuditLogs } from "@/api/system";
@@ -83,7 +83,11 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="page-stack">
+  <div class="page-stack workspace-page">
+    <header class="workspace-heading">
+      <ClipboardList :stroke-width="1.6" aria-hidden="true" />
+      <div><h1>日志审计</h1><p>回溯每一次操作，让数据变更有迹可循。</p></div>
+    </header>
     <section class="page-card">
       <div class="page-card-header">
         <div>
@@ -199,4 +203,7 @@ code {
   white-space: normal;
   overflow-wrap: anywhere;
 }
+.pagination-row { overflow-x: auto; }
+@media (max-width: 640px) { .pagination-row { justify-content: flex-start; } }
+pre { padding: 12px; border-radius: 8px; background: #f5faf8; color: #243746; }
 </style>

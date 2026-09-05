@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import {
-  Calendar,
-  Clock,
-  DataAnalysis,
-  Document,
-  Expand,
-  Fold,
-  List,
-  Notebook,
-  Setting,
-} from "@element-plus/icons-vue";
+  CalendarDays as Calendar,
+  Clock3 as Clock,
+  ChartNoAxesCombined as DataAnalysis,
+  FileText as Document,
+  PanelLeftOpen as Expand,
+  PanelLeftClose as Fold,
+  ClipboardList as List,
+  NotebookTabs as Notebook,
+  Settings2 as Setting,
+  Dna,
+  Server,
+} from "@lucide/vue";
 import { ElMessage } from "element-plus";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { RouterLink, RouterView } from "vue-router";
@@ -194,10 +196,17 @@ onBeforeUnmount(() => {
 
     <div class="app-content">
       <aside
-        class="app-sidebar flex flex-col border-r border-slate-200 bg-white px-2.5 py-3 shadow-[1px_0_0_rgba(15,23,42,0.02)]"
+        class="app-sidebar"
         :class="{ 'is-collapsed': isSidebarCollapsed }"
       >
         <div class="sidebar-brand">
+          <span v-if="!isSidebarCollapsed" class="sidebar-brand-mark" aria-hidden="true">
+            <Dna :size="24" :stroke-width="1.7" />
+          </span>
+          <div v-if="!isSidebarCollapsed" class="sidebar-brand-title">
+            <strong>基因检测台账</strong>
+            <span>实验工作空间</span>
+          </div>
           <button
             class="sidebar-toggle"
             type="button"
@@ -207,50 +216,37 @@ onBeforeUnmount(() => {
             :title="isSidebarCollapsed ? '展开侧边栏' : '收起侧边栏'"
             @click="toggleSidebar"
           >
-            <el-icon aria-hidden="true">
-              <Expand v-if="isSidebarCollapsed" />
-              <Fold v-else />
-            </el-icon>
+            <Expand v-if="isSidebarCollapsed" :size="18" :stroke-width="1.7" aria-hidden="true" />
+            <Fold v-else :size="18" :stroke-width="1.7" aria-hidden="true" />
           </button>
 
-          <svg
-            class="size-8 shrink-0"
-            viewBox="0 0 64 64"
-            role="img"
-            aria-label="基因检测台账"
-          >
-            <rect x="2" y="2" width="60" height="60" rx="18" fill="#e8f3ff" stroke="#b9d7f5" stroke-width="2" />
-            <path d="M22 16c14 4 14 28 28 32M42 16c-14 4-14 28-28 32" fill="none" stroke="#1677ff" stroke-width="4" stroke-linecap="round" />
-            <path d="M24 22h16M22 32h20M24 42h16" stroke="#16a36a" stroke-width="3" stroke-linecap="round" />
-            <circle cx="22" cy="16" r="3" fill="#f59e0b" />
-            <circle cx="42" cy="16" r="3" fill="#f59e0b" />
-          </svg>
-          <div class="sidebar-brand-title whitespace-nowrap text-[13px] font-bold leading-tight tracking-tight text-slate-900">
-            基因检测台账
-          </div>
         </div>
 
-        <nav id="primary-navigation" class="grid gap-1.5" aria-label="主导航">
+        <div v-if="!isSidebarCollapsed" class="sidebar-section-label">工作导航</div>
+        <nav id="primary-navigation" class="sidebar-navigation" aria-label="主导航">
           <RouterLink
             v-for="item in navigation"
             :key="item.to"
             :to="item.to"
-            class="sidebar-nav-link flex min-h-11 items-center gap-3 rounded-lg px-3 text-sm font-semibold text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 [&.router-link-active]:bg-blue-50 [&.router-link-active]:text-blue-600"
-            :class="{ 'justify-center px-0': isSidebarCollapsed }"
+            class="sidebar-nav-link"
+            :aria-label="item.label"
             :title="isSidebarCollapsed ? item.label : undefined"
           >
-            <el-icon class="text-base"><component :is="item.icon" /></el-icon>
+            <component :is="item.icon" :size="20" :stroke-width="1.7" aria-hidden="true" />
             <span v-if="!isSidebarCollapsed">{{ item.label }}</span>
           </RouterLink>
         </nav>
 
         <div
-          class="sidebar-status mt-auto flex items-center gap-2 px-3 pt-4 text-xs text-slate-500"
+          class="sidebar-status"
+          role="status"
+          :aria-label="appStore.backendOnline ? '本机后端已连接' : '正在连接后端'"
           :title="isSidebarCollapsed ? (appStore.backendOnline ? '本机后端已连接' : '正在连接后端') : undefined"
         >
-          <span
-            class="size-2 rounded-full bg-slate-300"
-            :class="appStore.backendOnline ? 'bg-emerald-500 ring-4 ring-emerald-50' : ''"
+          <Server
+            :size="18"
+            :stroke-width="1.7"
+            :class="{ 'is-online': appStore.backendOnline }"
             aria-hidden="true"
           />
           <span v-if="!isSidebarCollapsed">{{ appStore.backendOnline ? "本机后端已连接" : "正在连接后端" }}</span>
@@ -268,7 +264,7 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .app-shell {
-  --app-sidebar-expanded-width: 196px;
+  --app-sidebar-expanded-width: 224px;
   --app-sidebar-collapsed-width: 72px;
   --app-sidebar-current-width: var(--app-sidebar-expanded-width);
   display: flex;
@@ -390,11 +386,18 @@ onBeforeUnmount(() => {
 }
 
 .app-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-right: 1px solid #e3ecef;
+  background: #fff;
+  padding: 20px 12px 16px;
   position: sticky;
   top: 36px;
   height: calc(100vh - 36px);
   min-width: 0;
   overflow-x: hidden;
+  overflow-y: auto;
   transition: padding 180ms ease;
 }
 
@@ -402,8 +405,50 @@ onBeforeUnmount(() => {
   display: flex;
   min-height: 64px;
   align-items: center;
-  gap: 10px;
-  padding: 0 8px 16px;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 0 0 18px;
+  border-bottom: 1px solid #edf2f3;
+}
+
+.sidebar-brand-mark {
+  display: grid;
+  place-items: center;
+  flex: 0 0 36px;
+  height: 40px;
+  border-radius: 12px;
+  background: #eaf7f2;
+  color: #167d73;
+}
+
+.sidebar-brand-title {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  flex: 1;
+  white-space: nowrap;
+}
+
+.sidebar-brand-title strong {
+  color: #243746;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.sidebar-brand-title span,
+.sidebar-section-label {
+  color: #627985;
+  font-size: 12px;
+}
+
+.sidebar-section-label {
+  padding: 16px 12px 6px;
+  letter-spacing: 0.08em;
+}
+
+.sidebar-navigation {
+  display: grid;
+  gap: 7px;
 }
 
 .sidebar-toggle {
@@ -416,7 +461,7 @@ onBeforeUnmount(() => {
   border: 0;
   border-radius: 10px;
   background: transparent;
-  color: #667085;
+  color: #526775;
   cursor: pointer;
   outline: none;
   padding: 0;
@@ -425,20 +470,68 @@ onBeforeUnmount(() => {
 
 .sidebar-toggle:hover,
 .sidebar-toggle:focus-visible {
-  background: #f2f4f7;
-  color: #182230;
-}
-
-.sidebar-toggle .el-icon {
-  font-size: 18px;
+  background: #eaf7f2;
+  color: #167d73;
 }
 
 .sidebar-nav-link {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 46px;
   min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 10px 12px;
+  color: #526775;
+  font-size: 14px;
+  font-weight: 550;
+  text-decoration: none;
+  transition: background-color 180ms ease, color 180ms ease, border-color 180ms ease;
 }
 
-.sidebar-nav-link .el-icon {
+.sidebar-nav-link > svg {
   flex: 0 0 auto;
+}
+
+.sidebar-nav-link:hover {
+  background: #f3f9fb;
+  color: #243746;
+}
+
+.sidebar-nav-link.router-link-active {
+  background: #eaf7f2;
+  border-color: #d5ece3;
+  color: #167d73;
+  font-weight: 650;
+}
+
+.sidebar-nav-link:focus-visible,
+.sidebar-toggle:focus-visible {
+  outline: 2px solid #167d73;
+  outline-offset: 2px;
+}
+
+.sidebar-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  margin-top: auto;
+  border-top: 1px solid #e3ecef;
+  padding: 18px 10px 4px;
+  color: #526775;
+  font-size: 12px;
+}
+
+.sidebar-status > svg {
+  flex-shrink: 0;
+  color: #627985;
+}
+
+.sidebar-status > svg.is-online {
+  color: #167d73;
 }
 
 .sidebar-nav-link span {
@@ -464,11 +557,17 @@ onBeforeUnmount(() => {
 .app-sidebar.is-collapsed .sidebar-nav-link {
   width: 44px;
   justify-self: center;
+  justify-content: center;
+  padding-inline: 0;
 }
 
 @media (max-width: 760px) {
   .app-shell {
-    --app-sidebar-expanded-width: 168px;
+    --app-sidebar-expanded-width: 200px;
+  }
+
+  .sidebar-brand-mark {
+    display: none;
   }
 
   .window-control {
@@ -477,6 +576,15 @@ onBeforeUnmount(() => {
 
   .window-titlebar-drag {
     padding-inline: 8px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-content,
+  .app-sidebar,
+  .sidebar-nav-link,
+  .sidebar-toggle {
+    transition: none;
   }
 }
 </style>

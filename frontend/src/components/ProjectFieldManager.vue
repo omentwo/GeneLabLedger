@@ -2,14 +2,15 @@
 import {
   ArrowDown,
   ArrowUp,
-  CopyDocument,
-  Delete,
-  Document,
-  DocumentAdd,
-  EditPen,
+  Copy as CopyDocument,
+  Trash2 as Delete,
+  FileText as Document,
+  FilePlus2 as DocumentAdd,
+  Pencil as EditPen,
+  Dna,
   Plus,
-  Setting,
-} from "@element-plus/icons-vue";
+  Settings2 as Setting,
+} from "@lucide/vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { computed, reactive, ref, watch } from "vue";
 
@@ -562,7 +563,7 @@ watch(
             :key="project.id"
             :index="project.id"
           >
-            <span class="project-symbol" aria-hidden="true">🧬</span>
+              <Dna class="project-symbol" :size="18" aria-hidden="true" />
             <span class="project-list-name">{{ project.name }}</span>
             <span class="project-count">{{ project.fields.length }}</span>
             <span class="project-order-actions">
@@ -1031,14 +1032,15 @@ watch(
 }
 
 .project-panel :deep(.el-menu-item.is-active) {
-  border-color: #b2ddff;
-  color: #1570ef;
-  background: #eff8ff;
+  border-color: #bddfd4;
+  color: #167d73;
+  background: #eaf7f2;
 }
 
 .project-symbol {
   margin-right: 8px;
-  font-size: 18px;
+  flex-shrink: 0;
+  color: var(--app-primary);
 }
 
 .project-count {
@@ -1174,4 +1176,10 @@ watch(
   gap: 8px;
   align-items: center;
 }
+@media (max-width: 800px) {
+  .manager-layout { grid-template-columns: minmax(0, 1fr); min-height: 0; gap: 16px; }
+  .project-panel { max-height: 280px; border-right: 0; border-bottom: 1px solid var(--app-border); padding: 0 0 16px; }
+  .field-heading, .field-heading-actions { flex-wrap: wrap; }
+}
+@media (max-width: 600px) { .two-column-form { grid-template-columns: minmax(0, 1fr); } }
 </style>
