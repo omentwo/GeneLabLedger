@@ -143,6 +143,10 @@ import {
   type LedgerSortState,
 } from "@/utils/ledgerTableView";
 import { summarizeLedgerSelection } from "@/utils/ledgerSelectionStats";
+import {
+  LedgerRecordCache,
+  ledgerRecordQueryKey,
+} from "@/utils/ledgerRecordCache";
 import { exportWorkbook } from "@/utils/workbook";
 
 const route = useRoute();
@@ -470,6 +474,19 @@ const insertedGroupRegistry: LedgerInsertedGroupRegistry = new Map();
 let draftSequence = 0;
 let loadSequence = 0;
 let recordsAbortController: AbortController | null = null;
+const ledgerRecordCache = new LedgerRecordCache();
+type PrefetchedRecordPage = {
+  result: Awaited<ReturnType<typeof queryRecords>>;
+  generation: number;
+};
+const recordPrefetchInFlight = new Map<
+  string,
+  Promise<PrefetchedRecordPage>
+>();
+const projectRecordCacheGenerations = new Map<string, number>();
+let projectPrefetchTimer: number | null = null;
+let adjacentProjectPrefetchTimer: number | null = null;
+let ledgerDisposed = false;
 let removeQuickEntryChangedListener: (() => void) | undefined;
 const currentPage = ref(1);
 const pageSize = 200;
@@ -479,6 +496,19 @@ const selectedRecordCache = new Map<string, ProjectRecord>();
 let ledgerInitialized = false;
 let projectLoadPromise: Promise<void> | null = null;
 let ledgerLayoutSaveQueue: Promise<void> = Promise.resolve();
+
+function projectRecordCacheGeneration(projectId: string): number {
+  return projectRecordCacheGenerations.get(projectId) ?? 0;
+}
+
+function invalidateProjectRecordCache(projectId: string): void {
+  if (!projectId) return;
+  ledgerRecordCache.invalidateProject(projectId);
+  projectRecordCacheGenerations.set(
+    projectId,
+    projectRecordCacheGeneration(projectId) + 1,
+  );
+}
 
 const currentProject = computed(() => appStore.projectById(activeProjectId.value));
 // Keep the table schema on the previous project while the next project's
@@ -2611,6 +2641,26 @@ function scrollTableToBottom(): void {
   });
 }
 
+function nextAnimationFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => resolve());
+  });
+}
+
+async function scrollTableToBottomOnce(
+  shouldApply: () => boolean = () => true,
+): Promise<boolean> {
+  clearBottomScrollTimers();
+  await nextTick();
+  await nextAnimationFrame();
+  if (!shouldApply()) return false;
+  tableRef.value?.setScrollTop?.(Number.MAX_SAFE_INTEGER);
+  await nextAnimationFrame();
+  if (!shouldApply()) return false;
+  tableRef.value?.setScrollTop?.(Number.MAX_SAFE_INTEGER);
+  return true;
+}
+
 function autosizeTextareaKey(rowId: string, fieldId: string): string {
   return `${rowId}:${fieldId}`;
 }
@@ -2625,17 +2675,24 @@ function setAutosizeTextareaRef(instance: unknown, rowId: string, fieldId: strin
   }
 }
 
-async function remeasureVisibleTextareas(fieldId?: string): Promise<void> {
+async function remeasureVisibleTextareas(
+  fieldId?: string,
+  shouldApply: () => boolean = () => true,
+): Promise<void> {
   await nextTick();
+  if (!shouldApply()) return;
   autosizeTextareaRefs.forEach((instance, key) => {
     if (!fieldId || key.endsWith(`:${fieldId}`)) instance.resizeTextarea();
   });
   await nextTick();
+  if (!shouldApply()) return;
   tableRef.value?.doLayout();
 }
 
-function refreshTableLayout(): void {
-  void remeasureVisibleTextareas();
+async function refreshTableLayout(
+  shouldApply: () => boolean = () => true,
+): Promise<void> {
+  await remeasureVisibleTextareas(undefined, shouldApply);
 }
 
 function appendDraftRow(scrollToBottom = true): void {
@@ -2683,17 +2740,22 @@ function globalMatchedValue(record: ProjectRecord): string {
   return candidates.find((value) => value.includes(term)) ?? "";
 }
 
-function scrollToFocusedRecord(): void {
-  if (!focusRecordId.value) return;
-  void nextTick(() => {
-    const row = ledgerTableCardRef.value?.querySelector<HTMLElement>(
-      ".search-focus-row",
-    );
-    row?.scrollIntoView({ block: "center" });
-    window.setTimeout(() => {
-      focusRecordId.value = "";
-    }, 2200);
-  });
+async function scrollToFocusedRecord(
+  shouldApply: () => boolean = () => true,
+): Promise<boolean> {
+  if (!focusRecordId.value) return false;
+  const targetRecordId = focusRecordId.value;
+  await nextTick();
+  if (!shouldApply() || focusRecordId.value !== targetRecordId) return false;
+  const row = ledgerTableCardRef.value?.querySelector<HTMLElement>(
+    ".search-focus-row",
+  );
+  window.setTimeout(() => {
+    if (focusRecordId.value === targetRecordId) focusRecordId.value = "";
+  }, 2200);
+  if (!row) return false;
+  row.scrollIntoView({ block: "center" });
+  return true;
 }
 
 function setValue(
@@ -2873,6 +2935,7 @@ function setSaving(recordId: string, saving: boolean): void {
 }
 
 function replaceRecord(updated: ProjectRecord): void {
+  invalidateProjectRecordCache(updated.project_id);
   const index = records.value.findIndex((record) => record.id === updated.id);
   if (index >= 0) records.value.splice(index, 1, updated);
   const selectedIndex = selectedRecords.value.findIndex((record) => record.id === updated.id);
@@ -2907,6 +2970,7 @@ function replaceRecordPreservingPending(
   const selectedIndex = selectedRecords.value.findIndex((record) => record.id === updated.id);
   if (selectedIndex >= 0) selectedRecords.value.splice(selectedIndex, 1, merged);
   if (selectedRecordIds.value.has(updated.id)) selectedRecordCache.set(updated.id, merged);
+  invalidateProjectRecordCache(updated.project_id);
 }
 
 function reconcileCellAfterCompletedSave(
@@ -2998,6 +3062,8 @@ function reconcileOperationResult(result: {
   records: ProjectRecord[];
   deleted_ids: string[];
 }): void {
+  invalidateProjectRecordCache(activeProjectId.value);
+  result.records.forEach((record) => invalidateProjectRecordCache(record.project_id));
   const deletedIds = new Set(result.deleted_ids);
   records.value = records.value.filter((record) => !deletedIds.has(record.id));
   result.records.forEach((record) => {
@@ -3186,6 +3252,7 @@ function finishPersistedDraft(
   projectId: string,
   notify: boolean,
 ): void {
+    invalidateProjectRecordCache(projectId);
     if (editingGridSnapshot.value?.rowId === record.id) {
       editingGridCell.value = null;
       editingGridSnapshot.value = null;
@@ -3568,7 +3635,13 @@ async function redoLedger(): Promise<void> {
 
 async function loadRecords(
   projectId = activeProjectId.value,
-  options: { showLoading?: boolean; preserveHistory?: boolean; preserveSelection?: boolean } = {},
+  options: {
+    showLoading?: boolean;
+    preserveHistory?: boolean;
+    preserveSelection?: boolean;
+    stabilizeTable?: boolean;
+    preferCache?: boolean;
+  } = {},
 ): Promise<void> {
   if (!options.preserveHistory) ledgerHistory.clear();
   const isGlobalScope = appliedSearch.scope !== "current";
@@ -3583,7 +3656,13 @@ async function loadRecords(
   recordsAbortController?.abort();
   const controller = new AbortController();
   recordsAbortController = controller;
-  if (showLoading) loading.value = true;
+  const currentQuery = isGlobalScope ? null : buildRecordQuery(projectId);
+  const currentQueryKey = currentQuery ? ledgerRecordQueryKey(currentQuery) : "";
+  const queryCacheGeneration = projectRecordCacheGeneration(projectId);
+  const cacheHit = options.preferCache && currentQuery
+    ? ledgerRecordCache.get(currentQueryKey)
+    : null;
+  if (showLoading && !cacheHit) loading.value = true;
   try {
     let loaded: ProjectRecord[] = [];
     let total = 0;
@@ -3606,10 +3685,15 @@ async function loadRecords(
         offset += page.items.length;
         if (!page.items.length || offset >= page.total) break;
       }
+    } else if (cacheHit) {
+      total = cacheHit.snapshot.total;
+      loaded = cacheHit.snapshot.records;
     } else {
-      const page = await queryRecords(buildRecordQuery(projectId), controller.signal);
+      const page = await queryRecords(currentQuery!, controller.signal);
+      if (projectRecordCacheGeneration(projectId) !== queryCacheGeneration) return;
       total = page.total;
       loaded = page.items;
+      ledgerRecordCache.set(currentQueryKey, projectId, { records: loaded, total });
     }
     if (requestSequence !== loadSequence || projectId !== activeProjectId.value) return;
     if (isGlobalScope) {
@@ -3633,8 +3717,19 @@ async function loadRecords(
     selectedRecords.value = [];
     if (!options.preserveSelection) clearRecordSelection();
     if (!isGlobalScope) rememberAll();
-    await nextTick();
-    tableRef.value?.doLayout();
+    const requestIsCurrent = () => (
+      requestSequence === loadSequence
+      && projectId === activeProjectId.value
+      && !controller.signal.aborted
+    );
+    if (options.stabilizeTable && !isGlobalScope) {
+      await refreshTableLayout(requestIsCurrent);
+    } else {
+      await nextTick();
+      if (!requestIsCurrent()) return;
+      tableRef.value?.doLayout();
+    }
+    if (!requestIsCurrent()) return;
     if (!isGlobalScope && options.preserveSelection && selectedRecordIds.value.size) {
       records.value.forEach((record) => {
         if (selectedRecordIds.value.has(record.id)) {
@@ -3643,7 +3738,16 @@ async function loadRecords(
         }
       });
     }
-    if (!isGlobalScope) scrollToFocusedRecord();
+    if (!isGlobalScope) {
+      const scrolledToFocus = await scrollToFocusedRecord(requestIsCurrent);
+      if (options.stabilizeTable && !scrolledToFocus) {
+        await scrollTableToBottomOnce(requestIsCurrent);
+      }
+    }
+    if (cacheHit?.stale && currentQuery) {
+      void revalidateCachedRecordQuery(projectId, currentQuery, currentQueryKey);
+    }
+    if (options.preferCache) scheduleAdjacentProjectPrefetch(projectId);
   } catch (error) {
     if (requestSequence !== loadSequence || controller.signal.aborted) return;
     ElMessage.error(error instanceof Error ? error.message : "台账读取失败");
@@ -3655,9 +3759,19 @@ async function loadRecords(
   }
 }
 
-function buildRecordQuery(projectId = activeProjectId.value): RecordComplexQuery {
+function buildRecordQuery(
+  projectId = activeProjectId.value,
+  view: {
+    filters?: LedgerFilterMap;
+    sort?: LedgerSortState;
+    page?: number;
+  } = {},
+): RecordComplexQuery {
+  const filters = view.filters ?? ledgerFilters.value;
+  const sort = view.sort === undefined ? ledgerSort.value : view.sort;
+  const page = view.page ?? currentPage.value;
   const fieldFilters: RecordFieldFilter[] = [];
-  Object.entries(ledgerFilters.value).forEach(([fieldId, filter]) => {
+  Object.entries(filters).forEach(([fieldId, filter]) => {
     if (!filter) return;
     if (filter.kind === "text") {
       fieldFilters.push({ field_id: fieldId, operator: "contains", value: filter.value });
@@ -3685,15 +3799,134 @@ function buildRecordQuery(projectId = activeProjectId.value): RecordComplexQuery
     experiment_date_from: appliedSearch.date || null,
     experiment_date_to: appliedSearch.date || null,
     field_filters: fieldFilters,
-    sort: ledgerSort.value
+    sort: sort
       ? {
-          field_id: ledgerSort.value.fieldId,
-          direction: ledgerSort.value.order === "descending" ? "desc" : "asc",
+          field_id: sort.fieldId,
+          direction: sort.order === "descending" ? "desc" : "asc",
         }
       : null,
     limit: pageSize,
-    offset: (currentPage.value - 1) * pageSize,
+    offset: (page - 1) * pageSize,
   };
+}
+
+function projectRecordQuery(projectId: string, page = 1): RecordComplexQuery | null {
+  const project = appStore.projectById(projectId);
+  if (!project) return null;
+  const layout = resolveLedgerProjectLayout(
+    ledgerLayoutSettings.value,
+    projectId,
+    project.fields,
+  );
+  return buildRecordQuery(projectId, {
+    filters: layout.filters,
+    sort: layout.sort,
+    page,
+  });
+}
+
+function fetchAndCacheRecordQuery(
+  projectId: string,
+  query: RecordComplexQuery,
+  key = ledgerRecordQueryKey(query),
+): Promise<PrefetchedRecordPage> {
+  const pending = recordPrefetchInFlight.get(key);
+  if (pending) return pending;
+  const generation = projectRecordCacheGeneration(projectId);
+  const request = queryRecords(query)
+    .then((result) => {
+      if (!ledgerDisposed && projectRecordCacheGeneration(projectId) === generation) {
+        ledgerRecordCache.set(key, projectId, {
+          records: result.items,
+          total: result.total,
+        });
+      }
+      return { result, generation };
+    })
+    .finally(() => {
+      if (recordPrefetchInFlight.get(key) === request) recordPrefetchInFlight.delete(key);
+    });
+  recordPrefetchInFlight.set(key, request);
+  return request;
+}
+
+function recordPageVersion(items: ProjectRecord[], total: number): string {
+  return `${total}:${items.map((record) => `${record.id}:${record.updated_at}`).join("|")}`;
+}
+
+function hasPendingLedgerWork(): boolean {
+  if (editingGridCell.value || draftRows.value.length || selectedRecordIds.value.size) return true;
+  return [...cellSaveStates.value.values()].some((state) => (
+    state.status === "dirty" || state.status === "saving" || state.status === "error"
+  ));
+}
+
+async function revalidateCachedRecordQuery(
+  projectId: string,
+  query: RecordComplexQuery,
+  key: string,
+): Promise<void> {
+  try {
+    const prefetched = await fetchAndCacheRecordQuery(projectId, query, key);
+    if (projectRecordCacheGeneration(projectId) !== prefetched.generation) return;
+    const { result } = prefetched;
+    const stillCurrent = () => (
+      !ledgerDisposed
+      && activeProjectId.value === projectId
+      && appliedSearch.scope === "current"
+      && ledgerRecordQueryKey(buildRecordQuery(projectId)) === key
+    );
+    if (!stillCurrent() || hasPendingLedgerWork()) return;
+    if (recordPageVersion(records.value, recordTotal.value)
+      === recordPageVersion(result.items, result.total)) return;
+    const scrollPosition = captureLedgerTableScroll();
+    records.value = result.items;
+    recordTotal.value = result.total;
+    tableProjectId.value = projectId;
+    rememberAll();
+    await refreshTableLayout(stillCurrent);
+    if (stillCurrent()) restoreLedgerTableScroll(scrollPosition);
+  } catch {
+    // Prefetch and stale-data revalidation are best-effort and never block the table.
+  }
+}
+
+function prefetchProjectRecords(projectId: string): void {
+  if (!projectId || projectId === activeProjectId.value || appliedSearch.scope !== "current") return;
+  const query = projectRecordQuery(projectId);
+  if (!query) return;
+  const key = ledgerRecordQueryKey(query);
+  if (ledgerRecordCache.isFresh(key)) return;
+  void fetchAndCacheRecordQuery(projectId, query, key).catch(() => undefined);
+}
+
+function cancelProjectPrefetch(): void {
+  if (projectPrefetchTimer === null) return;
+  window.clearTimeout(projectPrefetchTimer);
+  projectPrefetchTimer = null;
+}
+
+function scheduleProjectPrefetch(projectId: string): void {
+  cancelProjectPrefetch();
+  projectPrefetchTimer = window.setTimeout(() => {
+    projectPrefetchTimer = null;
+    prefetchProjectRecords(projectId);
+  }, 100);
+}
+
+function scheduleAdjacentProjectPrefetch(projectId: string): void {
+  if (adjacentProjectPrefetchTimer !== null) {
+    window.clearTimeout(adjacentProjectPrefetchTimer);
+  }
+  adjacentProjectPrefetchTimer = window.setTimeout(() => {
+    adjacentProjectPrefetchTimer = null;
+    const index = appStore.projects.findIndex((project) => project.id === projectId);
+    if (index < 0) return;
+    [appStore.projects[index - 1]?.id, appStore.projects[index + 1]?.id]
+      .forEach((id) => {
+        if (id) prefetchProjectRecords(id);
+      });
+  }, 0);
 }
 
 function changeLedgerPage(page: number): void {
@@ -4037,6 +4270,7 @@ async function clearSelectedHighlight(): Promise<void> {
 
 async function handleManagerChanged(): Promise<void> {
   const changedProjectId = activeProjectId.value;
+  invalidateProjectRecordCache(changedProjectId);
   await appStore.reloadProjects();
   const bridge = desktopBridge();
   if (bridge?.windowKind === "main" && changedProjectId) {
@@ -4615,6 +4849,7 @@ async function deleteSelectedRecords(): Promise<void> {
     const deletedRecords = targets
       .filter((record) => deletedIds.has(record.id))
       .map(snapshotRecord);
+    targets.forEach((record) => invalidateProjectRecordCache(record.project_id));
     records.value = records.value.filter((record) => !deletedIds.has(record.id));
     recordTotal.value = Math.max(0, recordTotal.value - deletedIds.size);
     clearRecordSelection();
@@ -4656,6 +4891,7 @@ async function confirmAssign(): Promise<void> {
   if (!operationRecord.value || !assignProjectId.value) return;
   try {
     const assigned = await assignRecordProject(operationRecord.value.id, assignProjectId.value);
+    invalidateProjectRecordCache(assigned.project_id);
     // The source record stays in the current project; the operation creates a
     // new record in the target project.  Keeping the target project on the
     // history entry lets undo/redo switch there automatically.
@@ -4690,6 +4926,7 @@ async function removeRecord(record: ProjectRecord): Promise<void> {
     nextSelectedRecordIds.delete(record.id);
     selectedRecordIds.value = nextSelectedRecordIds;
     selectedRecordCache.delete(record.id);
+    invalidateProjectRecordCache(record.project_id);
     records.value = records.value.filter((item) => item.id !== record.id);
     recordTotal.value = Math.max(0, recordTotal.value - 1);
     activeGridCell.value = null;
@@ -4812,6 +5049,12 @@ watch(
 watch(activeProjectId, async (projectId, previousProjectId) => {
   if (!ledgerInitialized || !projectId || projectId === previousProjectId) return;
   const load = (async () => {
+    clearBottomScrollTimers();
+    cancelProjectPrefetch();
+    if (adjacentProjectPrefetchTimer !== null) {
+      window.clearTimeout(adjacentProjectPrefetchTimer);
+      adjacentProjectPrefetchTimer = null;
+    }
     stopGridCellDrag(false);
     closeLedgerOverlays();
     applyLedgerProjectLayout(projectId);
@@ -4826,10 +5069,11 @@ watch(activeProjectId, async (projectId, previousProjectId) => {
     highlightCellTargets.value = [];
     persistedValues.clear();
     void router.replace({ query: { ...route.query, project: projectId } });
-    await loadRecords(projectId, { preserveHistory: true });
-    await nextTick();
-    refreshTableLayout();
-    scrollTableToBottom();
+    await loadRecords(projectId, {
+      preserveHistory: true,
+      stabilizeTable: true,
+      preferCache: true,
+    });
   })();
   projectLoadPromise = load;
   try {
@@ -4860,10 +5104,8 @@ async function initializeLedger(): Promise<void> {
   appliedSearch.projectIds = [];
   await router.replace({ query: { ...route.query, project: initialProjectId } });
   applyLedgerProjectLayout(initialProjectId);
-  await loadRecords(initialProjectId);
-  await nextTick();
-  refreshTableLayout();
-  scrollTableToBottom();
+  await loadRecords(initialProjectId, { stabilizeTable: true });
+  scheduleAdjacentProjectPrefetch(initialProjectId);
 }
 
 function handleLedgerDocumentPointerDown(event: PointerEvent): void {
@@ -4894,6 +5136,7 @@ onMounted(() => {
   const bridge = desktopBridge();
   if (bridge?.windowKind === "main") {
     removeQuickEntryChangedListener = bridge.onQuickEntryChanged((payload) => {
+      invalidateProjectRecordCache(payload.projectId);
       if (payload.projectId !== activeProjectId.value) return;
       void loadRecords(payload.projectId, {
         showLoading: false,
@@ -4909,6 +5152,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  ledgerDisposed = true;
   ledgerHistory.clear();
   document.removeEventListener("click", handleSelectionClickCapture, true);
   document.removeEventListener("pointerdown", handleLedgerDocumentPointerDown);
@@ -4922,6 +5166,14 @@ onBeforeUnmount(() => {
   stopSelectionDrag();
   recordsAbortController?.abort();
   recordsAbortController = null;
+  cancelProjectPrefetch();
+  if (adjacentProjectPrefetchTimer !== null) {
+    window.clearTimeout(adjacentProjectPrefetchTimer);
+    adjacentProjectPrefetchTimer = null;
+  }
+  ledgerRecordCache.clear();
+  recordPrefetchInFlight.clear();
+  projectRecordCacheGenerations.clear();
   editingGridCell.value = null;
   editingGridSnapshot.value = null;
   activeGridCell.value = null;
@@ -5218,6 +5470,7 @@ onBeforeUnmount(() => {
         v-loading="loading"
         element-loading-text="正在切换或读取项目数据…"
         element-loading-background="var(--app-loading-mask)"
+        element-loading-custom-class="ledger-loading-mask"
         :data="tableRows"
         row-key="id"
         border
@@ -5302,41 +5555,44 @@ onBeforeUnmount(() => {
               :data-field-index="columnIndex"
               :tabindex="isGridCellEditing({ rowIndex: $index, columnIndex }) ? -1 : 0"
             >
-              <EditableDateInput
-                v-if="field.data_type === 'date' || field.system_key === 'experiment_date'"
-                :model-value="valueFor(row, field)"
-                :readonly="row.locked || !isGridCellEditing({ rowIndex: $index, columnIndex })"
-                @update:model-value="setValue(row, field, $event)"
-                @change="saveField(row, field)"
-              />
-              <EditableChoiceInput
-                v-else-if="field.options.length || field.data_type === 'select'"
-                :model-value="valueFor(row, field)"
-                :options="fieldOptions(field)"
-                :readonly="row.locked || !isGridCellEditing({ rowIndex: $index, columnIndex })"
-                @update:model-value="setValue(row, field, $event)"
-                @change="saveField(row, field)"
-              />
-              <el-input
-                v-else-if="!field.is_core"
-                :ref="(instance: unknown) => setAutosizeTextareaRef(instance, row.id, field.id)"
-                type="textarea"
-                :autosize="{ minRows: 1, maxRows: 5 }"
-                resize="none"
-                :model-value="valueFor(row, field)"
-                :readonly="row.locked || !isGridCellEditing({ rowIndex: $index, columnIndex })"
-                :inputmode="field.data_type === 'number' ? 'decimal' : undefined"
-                @update:model-value="setValue(row, field, String($event))"
-                @change="saveField(row, field)"
-              />
-              <el-input
-                v-else
-                :model-value="valueFor(row, field)"
-                :readonly="row.locked || !isGridCellEditing({ rowIndex: $index, columnIndex })"
-                :inputmode="field.data_type === 'number' ? 'decimal' : undefined"
-                @update:model-value="setValue(row, field, String($event))"
-                @change="saveField(row, field)"
-              />
+              <template v-if="isGridCellEditing({ rowIndex: $index, columnIndex })">
+                <EditableDateInput
+                  v-if="field.data_type === 'date' || field.system_key === 'experiment_date'"
+                  :model-value="valueFor(row, field)"
+                  :readonly="row.locked"
+                  @update:model-value="setValue(row, field, $event)"
+                  @change="saveField(row, field)"
+                />
+                <EditableChoiceInput
+                  v-else-if="field.options.length || field.data_type === 'select'"
+                  :model-value="valueFor(row, field)"
+                  :options="fieldOptions(field)"
+                  :readonly="row.locked"
+                  @update:model-value="setValue(row, field, $event)"
+                  @change="saveField(row, field)"
+                />
+                <el-input
+                  v-else-if="!field.is_core"
+                  :ref="(instance: unknown) => setAutosizeTextareaRef(instance, row.id, field.id)"
+                  type="textarea"
+                  :autosize="{ minRows: 1, maxRows: 5 }"
+                  resize="none"
+                  :model-value="valueFor(row, field)"
+                  :readonly="row.locked"
+                  :inputmode="field.data_type === 'number' ? 'decimal' : undefined"
+                  @update:model-value="setValue(row, field, String($event))"
+                  @change="saveField(row, field)"
+                />
+                <el-input
+                  v-else
+                  :model-value="valueFor(row, field)"
+                  :readonly="row.locked"
+                  :inputmode="field.data_type === 'number' ? 'decimal' : undefined"
+                  @update:model-value="setValue(row, field, String($event))"
+                  @change="saveField(row, field)"
+                />
+              </template>
+              <span v-else class="cell-field-value">{{ valueFor(row, field) }}</span>
               <span
                 v-if="gridFillPreviewValue($index, columnIndex) !== null"
                 class="grid-fill-preview-value"
@@ -5581,6 +5837,9 @@ onBeforeUnmount(() => {
             role="tab"
             :aria-selected="project.id === activeProjectId"
             :title="project.name"
+            @pointerenter="scheduleProjectPrefetch(project.id)"
+            @pointerleave="cancelProjectPrefetch"
+            @focus="scheduleProjectPrefetch(project.id)"
             @click="selectProject(project.id)"
           >
             <span>{{ project.name }}</span>
@@ -5911,6 +6170,10 @@ onBeforeUnmount(() => {
   --el-table-header-text-color: var(--app-muted);
   --el-table-row-hover-bg-color: var(--app-hover);
   --el-table-current-row-bg-color: var(--app-primary-soft);
+}
+
+.ledger-table-card :deep(.ledger-loading-mask) {
+  transition-duration: 60ms;
 }
 
 .ledger-context-menu button:focus-visible,
@@ -6717,6 +6980,22 @@ onBeforeUnmount(() => {
 
 .cell-field-editing {
   cursor: text;
+}
+
+.cell-field-value {
+  box-sizing: border-box;
+  display: block;
+  width: var(--ledger-editor-width, 100%);
+  min-height: var(--ledger-editor-height, 32px);
+  max-height: 100px;
+  overflow: hidden;
+  padding: max(1px, calc((var(--ledger-editor-height, 32px) - 20px) / 2)) 8px;
+  font-family: var(--ledger-font-family, inherit);
+  font-size: var(--ledger-font-size, 14px);
+  line-height: 20px;
+  overflow-wrap: anywhere;
+  text-align: center;
+  white-space: pre-wrap;
 }
 
 .cell-field:not(.cell-field-editing) :deep(*) {
