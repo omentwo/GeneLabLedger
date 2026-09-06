@@ -147,6 +147,11 @@ import {
   LedgerRecordCache,
   ledgerRecordQueryKey,
 } from "@/utils/ledgerRecordCache";
+import {
+  readLastLedgerProjectId,
+  rememberLastLedgerProjectId,
+  resolveInitialLedgerProjectId,
+} from "@/utils/ledgerProjectPreference";
 import { exportWorkbook } from "@/utils/workbook";
 
 const route = useRoute();
@@ -5048,6 +5053,7 @@ watch(
 
 watch(activeProjectId, async (projectId, previousProjectId) => {
   if (!ledgerInitialized || !projectId || projectId === previousProjectId) return;
+  rememberLastLedgerProjectId(projectId);
   const load = (async () => {
     clearBottomScrollTimers();
     cancelProjectPrefetch();
@@ -5088,11 +5094,11 @@ async function initializeLedger(): Promise<void> {
   await loadLedgerLayoutSettings();
   const queryProject =
     typeof route.query.project === "string" ? route.query.project : "";
-  const initialProjectId = appStore.projects.some(
-    (project) => project.id === queryProject,
-  )
-    ? queryProject
-    : (appStore.projects[0]?.id ?? "");
+  const initialProjectId = resolveInitialLedgerProjectId(
+    queryProject,
+    readLastLedgerProjectId(),
+    appStore.projects.map((project) => project.id),
+  );
   activeProjectId.value = initialProjectId;
   await nextTick();
   ledgerInitialized = true;
@@ -5100,6 +5106,7 @@ async function initializeLedger(): Promise<void> {
     records.value = [];
     return;
   }
+  rememberLastLedgerProjectId(initialProjectId);
   appliedSearch.scope = "current";
   appliedSearch.projectIds = [];
   await router.replace({ query: { ...route.query, project: initialProjectId } });
