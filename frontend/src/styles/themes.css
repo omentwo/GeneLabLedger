@@ -181,6 +181,103 @@
   --el-color-info-dark-2: #0b5b96;
 }
 
+/* Spreadsheet-office palette: Excel-like greens, WPS-like clarity, neutral grid surfaces. */
+:root[data-theme="office"] {
+  --app-primary: #217346;
+  --app-primary-hover: #185c37;
+  --app-primary-text: #185c37;
+  --app-brand: #107c41;
+  --app-primary-soft: #e8f3ec;
+  --app-primary-border: #b8d8c5;
+  --app-primary-mid: #6da989;
+  --app-bg: #f3f6f4;
+  --app-card: #ffffff;
+  --app-surface-soft: #f6f8f7;
+  --app-hover: #edf5f0;
+  --app-text: #242a27;
+  --app-muted: #59635e;
+  --app-subtle: #77817c;
+  --app-disabled: #aeb7b2;
+  --app-border: #d8dfdb;
+  --app-border-light: #e8ecea;
+  --app-border-strong: #bec9c3;
+  --app-accent-soft: #e8f3ec;
+  --app-chart-primary: #217346;
+  --app-chart-secondary: #70ad47;
+  --app-chart-third: #4472c4;
+  --app-chart-fourth: #ed7d31;
+  --app-chart-fifth: #a5a5a5;
+  --app-success: #217346;
+  --app-success-text: #185c37;
+  --app-danger: #c43d3d;
+  --app-danger-soft: #fbecec;
+  --app-warning: #b36b00;
+  --app-warning-text: #855000;
+  --app-warning-soft: #fff4df;
+  --app-live: #33a852;
+  --app-nav-bg: #185c37;
+  --app-nav-text: #dcebe3;
+  --app-nav-muted: #b8d2c3;
+  --app-nav-line: #2d704c;
+  --app-nav-hover: #206b43;
+  --app-nav-active: #2c7d50;
+  --app-nav-heading: #ffffff;
+  --app-nav-active-text: #ffffff;
+  --app-nav-focus: #b7e3c8;
+  --app-nav-active-border: #79b993;
+  --app-on-primary: #ffffff;
+  --app-on-warning: #ffffff;
+  --app-on-success: #ffffff;
+  --app-primary-rgb: 33 115 70;
+  --app-loading-mask: rgb(243 246 244 / 86%);
+  --app-cell-editing-bg: #f8fff9;
+  --el-bg-color: var(--app-card);
+  --el-bg-color-overlay: var(--app-card);
+  --el-fill-color-blank: var(--app-card);
+  --el-color-primary: #217346;
+  --el-color-primary-light-3: #64a17e;
+  --el-color-primary-light-5: #90b9a2;
+  --el-color-primary-light-7: #bdd5c7;
+  --el-color-primary-light-8: #d3e3da;
+  --el-color-primary-light-9: #e9f1ed;
+  --el-color-primary-dark-2: #185c37;
+  --el-color-success: #217346;
+  --el-color-success-light-3: #64a17e;
+  --el-color-success-light-5: #90b9a2;
+  --el-color-success-light-7: #bdd5c7;
+  --el-color-success-light-8: #d3e3da;
+  --el-color-success-light-9: #e9f1ed;
+  --el-color-success-dark-2: #185c37;
+  --el-color-warning: #b36b00;
+  --el-color-warning-light-3: #ca984d;
+  --el-color-warning-light-5: #d9b580;
+  --el-color-warning-light-7: #e8d3b3;
+  --el-color-warning-light-8: #f0e1cc;
+  --el-color-warning-light-9: #f7f0e6;
+  --el-color-warning-dark-2: #8f5600;
+  --el-color-danger: #c43d3d;
+  --el-color-danger-light-3: #d47777;
+  --el-color-danger-light-5: #e19e9e;
+  --el-color-danger-light-7: #edc5c5;
+  --el-color-danger-light-8: #f3d8d8;
+  --el-color-danger-light-9: #f9ebeb;
+  --el-color-danger-dark-2: #9d3131;
+  --el-color-error: #c43d3d;
+  --el-color-error-light-3: #d47777;
+  --el-color-error-light-5: #e19e9e;
+  --el-color-error-light-7: #edc5c5;
+  --el-color-error-light-8: #f3d8d8;
+  --el-color-error-light-9: #f9ebeb;
+  --el-color-error-dark-2: #9d3131;
+  --el-color-info: #59635e;
+  --el-color-info-light-3: #8b928f;
+  --el-color-info-light-5: #acb1ae;
+  --el-color-info-light-7: #cdd0ce;
+  --el-color-info-light-8: #dedfdf;
+  --el-color-info-light-9: #eef0ef;
+  --el-color-info-dark-2: #474f4b;
+}
+
 /*
  * Dark themes. Element Plus ladders follow the dark-mode convention: light-N
  * mixes the hue into the theme background (soft tints stay dark), dark-2 goes

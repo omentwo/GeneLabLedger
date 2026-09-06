@@ -27,7 +27,7 @@ describe("color theme preference", () => {
     expect(document.documentElement.dataset.theme).toBe("paper");
   });
 
-  it.each(["indigo", "sky", "noir", "biolum", "paper"] as const)("applies and restores %s before mounting", (theme) => {
+  it.each(["indigo", "sky", "office", "noir", "biolum", "paper"] as const)("applies and restores %s before mounting", (theme) => {
     expect(setTheme(theme)).toBe(true);
     expect(currentTheme.value).toBe(theme);
     expect(document.documentElement.dataset.theme).toBe(theme);

@@ -3,6 +3,7 @@ import {
   ArrowDown,
   ArrowUp,
   Check,
+  Eraser,
   Trash2 as Delete,
   FlaskConical,
   Download,
@@ -22,6 +23,11 @@ import {
   compareExperimentPathologyNumbers,
   experimentPathologyNumber,
 } from "@/utils/experimentScheduling";
+import {
+  createExperimentProjectOrderSetting,
+  EXPERIMENT_PROJECT_ORDER_KEY,
+  normalizeExperimentProjectOrder,
+} from "@/utils/experimentProjectOrder";
 import { exportWorkbook } from "@/utils/workbook";
 
 type QueueColumnSource =
@@ -69,7 +75,7 @@ const selectedCandidates = ref<ProjectRecord[]>([]);
 const candidateSearch = ref("");
 const candidateProjectId = ref("");
 const prefixDraft = ref("");
-const sortRule = ref<"project" | "manual" | "pathology">("pathology");
+const sortRule = ref<"project" | "manual" | "pathology">("project");
 const queueColumns = ref<QueueColumn[]>(defaultQueueColumns.map((column) => ({ ...column })));
 const candidateColumns = ref<QueueColumn[]>(
   defaultCandidateColumns.map((column) => ({ ...column })),
@@ -77,6 +83,11 @@ const candidateColumns = ref<QueueColumn[]>(
 const queueEditorVisible = ref(false);
 const candidateEditorVisible = ref(false);
 const eligibilityVisible = ref(false);
+const projectOrderVisible = ref(false);
+const projectOrderSaving = ref(false);
+const experimentProjectOrder = ref<string[]>([]);
+const projectOrderDraft = ref<string[]>([]);
+const projectOrderSettingValue = ref<unknown>(null);
 const newQueueColumnName = ref("");
 const newCandidateColumnName = ref("");
 const candidateTableRef = ref<CandidateTableRef>();
@@ -85,6 +96,17 @@ const queuedRecordIds = computed(() => new Set(queueItems.value.map((item) => it
 const experimentProjects = computed(() =>
   appStore.projects.filter((project) => project.experiment_enabled),
 );
+const orderedExperimentProjects = computed(() => {
+  const ids = normalizeExperimentProjectOrder(
+    experimentProjectOrder.value,
+    experimentProjects.value.map((project) => project.id),
+  );
+  const projectsById = new Map(experimentProjects.value.map((project) => [project.id, project]));
+  return ids.flatMap((id) => {
+    const project = projectsById.get(id);
+    return project ? [project] : [];
+  });
+});
 const pendingCandidates = computed(() => {
   const keyword = candidateSearch.value.trim().toLocaleLowerCase();
   return records.value.filter((record) => {
@@ -155,6 +177,18 @@ function previewNumber(index: number): string {
   return prefix ? `${prefix}-${index + 1}` : "";
 }
 
+function clearNumberingQueue(): void {
+  if (!queueItems.value.length) {
+    ElMessage.warning("当前编号队列为空");
+    return;
+  }
+  const clearedCount = queueItems.value.length;
+  queueItems.value = [];
+  selectedCandidates.value = [];
+  candidateTableRef.value?.clearSelection();
+  ElMessage.success(`已将 ${clearedCount} 条记录放回待实验记录列表，台账数据未修改`);
+}
+
 function queueCellValue(record: ProjectRecord, column: QueueColumn, rowIndex: number): string | number {
   const source = inferSource(column);
   if (source === "sequence") return rowIndex + 1;
@@ -192,13 +226,19 @@ async function loadPage(): Promise<void> {
   loading.value = true;
   try {
     if (!appStore.projects.length) await appStore.bootstrap();
-    const [queueSetting, candidateSetting] = await Promise.all([
+    const [queueSetting, candidateSetting, projectOrderSetting] = await Promise.all([
       getSetting<QueueColumn[]>("queue_columns"),
       getSetting<QueueColumn[]>("candidate_columns"),
+      getSetting<unknown>(EXPERIMENT_PROJECT_ORDER_KEY),
       loadAllRecords(),
     ]);
     queueColumns.value = normalizeColumns(queueSetting.value, defaultQueueColumns);
     candidateColumns.value = normalizeColumns(candidateSetting.value, defaultCandidateColumns);
+    projectOrderSettingValue.value = projectOrderSetting.value;
+    experimentProjectOrder.value = normalizeExperimentProjectOrder(
+      projectOrderSetting.value,
+      experimentProjects.value.map((project) => project.id),
+    );
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "实验编排初始化失败");
   } finally {
@@ -231,7 +271,9 @@ function invertCandidates(): void {
 function applySort(): void {
   const next = queueItems.value.slice();
   if (sortRule.value === "project") {
-    const projectOrder = new Map(appStore.projects.map((project, index) => [project.id, index]));
+    const projectOrder = new Map(
+      orderedExperimentProjects.value.map((project, index) => [project.id, index]),
+    );
     next.sort(
       (a, b) =>
         (projectOrder.get(a.project_id) ?? 9999) - (projectOrder.get(b.project_id) ?? 9999) ||
@@ -242,6 +284,57 @@ function applySort(): void {
   }
   queueItems.value = next;
   ElMessage.success(sortRule.value === "manual" ? "已保持当前手动顺序" : "编号顺序已更新");
+}
+
+function openProjectOrderEditor(): void {
+  projectOrderDraft.value = orderedExperimentProjects.value.map((project) => project.id);
+  projectOrderVisible.value = true;
+}
+
+function moveProjectOrder(index: number, offset: -1 | 1): void {
+  const destination = index + offset;
+  if (destination < 0 || destination >= projectOrderDraft.value.length) return;
+  const next = projectOrderDraft.value.slice();
+  const [projectId] = next.splice(index, 1);
+  if (!projectId) return;
+  next.splice(destination, 0, projectId);
+  projectOrderDraft.value = next;
+}
+
+function resetProjectOrder(): void {
+  projectOrderDraft.value = experimentProjects.value.map((project) => project.id);
+}
+
+async function saveProjectOrder(): Promise<void> {
+  const normalized = normalizeExperimentProjectOrder(
+    createExperimentProjectOrderSetting(projectOrderDraft.value),
+    experimentProjects.value.map((project) => project.id),
+  );
+  const nextSetting = createExperimentProjectOrderSetting(normalized);
+  projectOrderSaving.value = true;
+  try {
+    const saved = await putSetting(
+      EXPERIMENT_PROJECT_ORDER_KEY,
+      nextSetting,
+      { expectedValue: projectOrderSettingValue.value },
+    );
+    projectOrderSettingValue.value = saved.value;
+    experimentProjectOrder.value = normalized;
+    projectOrderVisible.value = false;
+    if (sortRule.value === "project") {
+      const projectOrder = new Map(normalized.map((projectId, index) => [projectId, index]));
+      queueItems.value = queueItems.value.slice().sort(
+        (a, b) =>
+          (projectOrder.get(a.project_id) ?? 9999) - (projectOrder.get(b.project_id) ?? 9999) ||
+          compareExperimentPathologyNumbers(a, b),
+      );
+    }
+    ElMessage.success("实验项目顺序已保存并应用");
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "实验项目顺序保存失败");
+  } finally {
+    projectOrderSaving.value = false;
+  }
 }
 
 function moveQueueItem(index: number, offset: -1 | 1): void {
@@ -473,12 +566,15 @@ onMounted(() => {
           <el-button :icon="Setting" @click="queueEditorVisible = true">编辑表头</el-button>
         </div>
         <div class="page-card-body queue-toolbar">
-          <el-select v-model="sortRule" style="width: 160px">
-            <el-option label="按病理号排序" value="pathology" />
+          <el-select v-model="sortRule" style="width: 190px">
             <el-option label="按项目集中排序" value="project" />
+            <el-option label="按病理号排序" value="pathology" />
             <el-option label="保持手动顺序" value="manual" />
           </el-select>
           <el-button :icon="Rank" @click="applySort">应用排序</el-button>
+          <el-button :icon="Setting" @click="openProjectOrderEditor">项目顺序</el-button>
+          <span v-if="sortRule === 'project'" class="sort-hint">按自定义项目顺序，项目内按病理号</span>
+          <el-button type="danger" plain :icon="Eraser" :disabled="queueItems.length === 0" @click="clearNumberingQueue">清空编号队列</el-button>
           <el-button :icon="Download" @click="exportQueue">导出 Excel</el-button>
           <el-button type="success" :icon="Check" @click="applyNumbering">编排完成并回写编号</el-button>
         </div>
@@ -528,6 +624,26 @@ onMounted(() => {
     <div class="eligibility-list"><div v-for="project in appStore.projects" :key="project.id" class="eligibility-row"><span>{{ project.name }}</span><el-switch :model-value="project.experiment_enabled" active-text="显示" inactive-text="隐藏" @change="setProjectEligibility(project.id, Boolean($event))" /></div></div>
     <template #footer><el-button type="primary" @click="eligibilityVisible = false">完成</el-button></template>
   </el-dialog>
+
+  <el-dialog v-model="projectOrderVisible" title="实验项目排序" width="560px" destroy-on-close>
+    <p class="editor-note">此顺序仅用于实验编号编排，不会改变台账项目的显示顺序；同一项目内继续按病理号排序。</p>
+    <div v-if="projectOrderDraft.length" class="project-order-list">
+      <div v-for="(projectId, index) in projectOrderDraft" :key="projectId" class="project-order-row">
+        <span class="project-order-index">{{ index + 1 }}</span>
+        <strong>{{ appStore.projectById(projectId)?.name || "已删除项目" }}</strong>
+        <div class="project-order-actions">
+          <el-button link :icon="ArrowUp" :disabled="index === 0" :aria-label="`上移${appStore.projectById(projectId)?.name || '项目'}`" @click="moveProjectOrder(index, -1)" />
+          <el-button link :icon="ArrowDown" :disabled="index === projectOrderDraft.length - 1" :aria-label="`下移${appStore.projectById(projectId)?.name || '项目'}`" @click="moveProjectOrder(index, 1)" />
+        </div>
+      </div>
+    </div>
+    <el-empty v-else description="当前没有启用实验编排的项目" :image-size="72" />
+    <template #footer>
+      <el-button :disabled="projectOrderSaving" @click="resetProjectOrder">恢复台账顺序</el-button>
+      <el-button :disabled="projectOrderSaving" @click="projectOrderVisible = false">取消</el-button>
+      <el-button type="primary" :loading="projectOrderSaving" @click="saveProjectOrder">保存并应用</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <style scoped>
@@ -557,9 +673,14 @@ onMounted(() => {
 .queue-actions,
 .add-column-row { display: flex; align-items: center; gap: 8px; }
 .queue-toolbar { flex-wrap: wrap; }
+.sort-hint { color: var(--app-muted); font-size: 12px; }
 .add-column-row { max-width: 520px; margin-top: 12px; }
 .eligibility-list { display: grid; gap: 8px; margin-top: 14px; }
 .eligibility-row { display: flex; align-items: center; justify-content: space-between; border: 1px solid var(--app-border); border-radius: 8px; padding: 10px 12px; }
+.project-order-list { display: grid; gap: 8px; margin-top: 14px; max-height: min(520px, 60vh); overflow-y: auto; }
+.project-order-row { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; align-items: center; gap: 10px; border: 1px solid var(--app-border); border-radius: 8px; padding: 8px 10px; }
+.project-order-index { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 6px; background: var(--app-primary-soft); color: var(--app-primary-text); font-size: 12px; font-variant-numeric: tabular-nums; }
+.project-order-actions { display: flex; align-items: center; gap: 4px; }
 code { border-radius: 4px; background: var(--app-surface-soft); padding: 2px 5px; }
 
 @media (max-width: 1280px) {

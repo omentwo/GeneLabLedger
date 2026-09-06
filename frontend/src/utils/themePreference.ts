@@ -5,6 +5,7 @@ export const THEME_OPTIONS = [
   { id: "paper", name: "纸感暖灰", description: "暖灰层次，低调操作，纸面阅读感。", colors: ["#faf9f5", "#f0eee8", "#8b8680"] },
   { id: "indigo", name: "靛蓝工作台", description: "深墨蓝导航，靛蓝重点，雾灰背景。", colors: ["#202a44", "#4f5cc0", "#f4f5f9"] },
   { id: "sky", name: "天蓝清爽", description: "黑白底色，天蓝点缀，彩色图表。", colors: ["#3ea4ec", "#0e72bc", "#ffffff"] },
+  { id: "office", name: "表格办公绿", description: "深绿导航与清晰网格，接近 Excel、WPS 表格的办公观感。", colors: ["#185c37", "#217346", "#f3f6f4"] },
   { id: "noir", name: "暗室冷青", description: "近黑冷灰沉浸底色，冷青主色，青柠荧光强调。", colors: ["#121519", "#23b8d4", "#a3e635"] },
   { id: "biolum", name: "深渊冷光", description: "冷调黑曜多层画布，荧光青绿高对比，同位素琥珀警戒。", colors: ["#060709", "#00d2ff", "#00ff9d"] },
 ] as const;
