@@ -10,17 +10,25 @@ export const QUICK_ENTRY_SETTINGS_KEY = "quick_entry_settings";
 export const QUICK_ENTRY_FIELD_WIDTH_MIN = 160;
 export const QUICK_ENTRY_FIELD_WIDTH_MAX = 600;
 export const QUICK_ENTRY_FIELD_WIDTH_DEFAULT = 320;
+export const QUICK_ENTRY_FONT_SIZE_MIN = 12;
+export const QUICK_ENTRY_FONT_SIZE_MAX = 20;
+export const QUICK_ENTRY_FONT_SIZE_DEFAULT = 14;
+export const QUICK_ENTRY_INPUT_HEIGHT_MIN = 28;
+export const QUICK_ENTRY_INPUT_HEIGHT_MAX = 56;
+export const QUICK_ENTRY_INPUT_HEIGHT_DEFAULT = 32;
 
 export interface QuickEntryProjectSettings {
   selectedFieldIds: string[];
   pinnedFieldIds: string[];
   fieldWidth: number;
   quickCreateFieldWidth: number;
+  fontSize: number;
+  inputHeight: number;
   autoAdvanceAfterUpdate: boolean;
 }
 
 export interface QuickEntrySettingsDocument {
-  version: 3;
+  version: 4;
   projects: Record<string, QuickEntryProjectSettings>;
 }
 
@@ -83,12 +91,24 @@ export function normalizeQuickEntrySettings(value: unknown): QuickEntrySettingsD
             QUICK_ENTRY_FIELD_WIDTH_MIN,
             QUICK_ENTRY_FIELD_WIDTH_MAX,
           ),
+          fontSize: clampedDimension(
+            settings.fontSize,
+            QUICK_ENTRY_FONT_SIZE_DEFAULT,
+            QUICK_ENTRY_FONT_SIZE_MIN,
+            QUICK_ENTRY_FONT_SIZE_MAX,
+          ),
+          inputHeight: clampedDimension(
+            settings.inputHeight,
+            QUICK_ENTRY_INPUT_HEIGHT_DEFAULT,
+            QUICK_ENTRY_INPUT_HEIGHT_MIN,
+            QUICK_ENTRY_INPUT_HEIGHT_MAX,
+          ),
           autoAdvanceAfterUpdate: settings.autoAdvanceAfterUpdate !== false,
         },
       ]];
     }),
   );
-  return { version: 3, projects };
+  return { version: 4, projects };
 }
 
 export function isMandatoryQuickEntryField(field: FieldDefinition): boolean {
@@ -140,6 +160,18 @@ export function resolveQuickEntryProjectSettings(
       QUICK_ENTRY_FIELD_WIDTH_DEFAULT,
       QUICK_ENTRY_FIELD_WIDTH_MIN,
       QUICK_ENTRY_FIELD_WIDTH_MAX,
+    ),
+    fontSize: clampedDimension(
+      saved?.fontSize,
+      QUICK_ENTRY_FONT_SIZE_DEFAULT,
+      QUICK_ENTRY_FONT_SIZE_MIN,
+      QUICK_ENTRY_FONT_SIZE_MAX,
+    ),
+    inputHeight: clampedDimension(
+      saved?.inputHeight,
+      QUICK_ENTRY_INPUT_HEIGHT_DEFAULT,
+      QUICK_ENTRY_INPUT_HEIGHT_MIN,
+      QUICK_ENTRY_INPUT_HEIGHT_MAX,
     ),
     autoAdvanceAfterUpdate: saved?.autoAdvanceAfterUpdate !== false,
   };

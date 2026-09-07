@@ -73,13 +73,15 @@ describe("quick entry field settings", () => {
         broken: null,
       },
     })).toEqual({
-      version: 3,
+      version: 4,
       projects: {
         "project-1": {
           selectedFieldIds: ["pathology"],
           pinnedFieldIds: [],
           fieldWidth: 320,
           quickCreateFieldWidth: 320,
+          fontSize: 14,
+          inputHeight: 32,
           autoAdvanceAfterUpdate: true,
         },
       },
@@ -94,6 +96,8 @@ describe("quick entry field settings", () => {
         pinnedFieldIds: ["hidden", "pathology", "removed"],
         fieldWidth: 999,
         quickCreateFieldWidth: 150,
+        fontSize: 99,
+        inputHeight: 12,
         autoAdvanceAfterUpdate: false,
       },
     )).toEqual({
@@ -101,6 +105,8 @@ describe("quick entry field settings", () => {
       pinnedFieldIds: ["hidden"],
       fieldWidth: 600,
       quickCreateFieldWidth: 160,
+      fontSize: 20,
+      inputHeight: 28,
       autoAdvanceAfterUpdate: false,
     });
   });
@@ -114,6 +120,8 @@ describe("quick entry field settings", () => {
       pinnedFieldIds: ["number"],
       fieldWidth: 320,
       quickCreateFieldWidth: 320,
+      fontSize: 14,
+      inputHeight: 32,
       autoAdvanceAfterUpdate: true,
     });
   });
@@ -127,6 +135,8 @@ describe("quick entry field settings", () => {
       pinnedFieldIds: [],
       fieldWidth: 320,
       quickCreateFieldWidth: 320,
+      fontSize: 14,
+      inputHeight: 32,
       autoAdvanceAfterUpdate: true,
     });
   });

@@ -32,6 +32,12 @@ import {
   QUICK_ENTRY_FIELD_WIDTH_DEFAULT,
   QUICK_ENTRY_FIELD_WIDTH_MAX,
   QUICK_ENTRY_FIELD_WIDTH_MIN,
+  QUICK_ENTRY_FONT_SIZE_DEFAULT,
+  QUICK_ENTRY_FONT_SIZE_MAX,
+  QUICK_ENTRY_FONT_SIZE_MIN,
+  QUICK_ENTRY_INPUT_HEIGHT_DEFAULT,
+  QUICK_ENTRY_INPUT_HEIGHT_MAX,
+  QUICK_ENTRY_INPUT_HEIGHT_MIN,
   buildQuickEntryChanges,
   isMandatoryQuickEntryField,
   normalizeQuickEntrySettings,
@@ -66,6 +72,8 @@ const selectedFieldDraft = ref<string[]>([]);
 const pinnedFieldDraft = ref<string[]>([]);
 const fieldWidthDraft = ref(QUICK_ENTRY_FIELD_WIDTH_DEFAULT);
 const quickCreateFieldWidthDraft = ref(QUICK_ENTRY_FIELD_WIDTH_DEFAULT);
+const fontSizeDraft = ref(QUICK_ENTRY_FONT_SIZE_DEFAULT);
+const inputHeightDraft = ref(QUICK_ENTRY_INPUT_HEIGHT_DEFAULT);
 const draggingFieldId = ref("");
 const dragOverFieldId = ref("");
 const autoAdvanceDraft = ref(true);
@@ -77,6 +85,8 @@ const fieldSettings = ref<QuickEntryProjectSettings>({
   pinnedFieldIds: [],
   fieldWidth: QUICK_ENTRY_FIELD_WIDTH_DEFAULT,
   quickCreateFieldWidth: QUICK_ENTRY_FIELD_WIDTH_DEFAULT,
+  fontSize: QUICK_ENTRY_FONT_SIZE_DEFAULT,
+  inputHeight: QUICK_ENTRY_INPUT_HEIGHT_DEFAULT,
   autoAdvanceAfterUpdate: true,
 });
 const contextDefaults = new Map<string, QuickEntryFieldDefaults>();
@@ -265,7 +275,7 @@ async function loadSettings(): Promise<void> {
     const result = await getSetting<unknown>(QUICK_ENTRY_SETTINGS_KEY);
     settingsDocument.value = normalizeQuickEntrySettings(result.value);
   } catch (error) {
-    ElMessage.warning(error instanceof Error ? error.message : "快捷表头设置读取失败");
+    ElMessage.warning(error instanceof Error ? error.message : "快速录入设置读取失败");
   }
 }
 
@@ -452,6 +462,8 @@ function openFieldSettings(): void {
   pinnedFieldDraft.value = [...fieldSettings.value.pinnedFieldIds];
   fieldWidthDraft.value = fieldSettings.value.fieldWidth;
   quickCreateFieldWidthDraft.value = fieldSettings.value.quickCreateFieldWidth;
+  fontSizeDraft.value = fieldSettings.value.fontSize;
+  inputHeightDraft.value = fieldSettings.value.inputHeight;
   autoAdvanceDraft.value = fieldSettings.value.autoAdvanceAfterUpdate;
   fieldDialogVisible.value = true;
 }
@@ -473,6 +485,13 @@ function setDraftFieldSelected(field: FieldDefinition, selected: boolean): void 
 function entryFieldStyle(): Record<string, string> {
   return {
     "--quick-field-width": `${fieldSettings.value.fieldWidth}px`,
+  };
+}
+
+function quickEntryPageStyle(): Record<string, string> {
+  return {
+    "--quick-entry-font-size": `${fieldSettings.value.fontSize}px`,
+    "--quick-entry-input-height": `${fieldSettings.value.inputHeight}px`,
   };
 }
 
@@ -539,6 +558,8 @@ async function saveFieldSettings(): Promise<void> {
       pinnedFieldIds: pinnedFieldDraft.value,
       fieldWidth: fieldWidthDraft.value,
       quickCreateFieldWidth: quickCreateFieldWidthDraft.value,
+      fontSize: fontSizeDraft.value,
+      inputHeight: inputHeightDraft.value,
       autoAdvanceAfterUpdate: autoAdvanceDraft.value,
     },
   );
@@ -565,7 +586,7 @@ async function saveFieldSettings(): Promise<void> {
     }
   }
   const nextDocument: QuickEntrySettingsDocument = {
-    version: 3,
+    version: 4,
     projects: {
       ...settingsDocument.value.projects,
       [projectId]: resolved,
@@ -580,9 +601,9 @@ async function saveFieldSettings(): Promise<void> {
       entryValues[field.id] = baselineValues[field.id] ?? quickEntryDefaultValue(field);
     });
     fieldDialogVisible.value = false;
-    ElMessage.success("快捷表头设置已保存");
+    ElMessage.success("快速录入设置已保存");
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "快捷表头设置保存失败");
+    ElMessage.error(error instanceof Error ? error.message : "快速录入设置保存失败");
   } finally {
     settingsSaving.value = false;
   }
@@ -816,7 +837,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="quick-entry-page">
+  <div class="quick-entry-page" :style="quickEntryPageStyle()">
     <header class="quick-entry-header">
       <div class="quick-entry-brand">
         <Dna :stroke-width="1.7" aria-hidden="true" />
@@ -952,7 +973,7 @@ onBeforeUnmount(() => {
             v-if="activeRecord"
             class="entry-form"
             label-position="top"
-            size="small"
+            size="default"
             @submit.prevent
           >
             <el-form-item
@@ -1037,18 +1058,20 @@ onBeforeUnmount(() => {
 
     <el-dialog
       v-model="fieldDialogVisible"
-      title="快捷表头、顺序与输入框宽度"
+      title="快捷表头、顺序与显示尺寸"
       width="min(820px, 94vw)"
       append-to-body
       destroy-on-close
     >
       <p class="field-dialog-note">
-        “快捷录入”决定修改表单中显示哪些表头；修改记录与新增记录的输入框宽度可分别设置。
+        “快捷录入”决定修改表单中显示哪些表头；字体大小、输入框高度和宽度按项目保存。
       </p>
       <div class="field-dialog-toolbar">
         <el-button size="small" @click="selectAllFields">全部选择</el-button>
         <el-button size="small" @click="restoreRecommendedFields">恢复项目推荐</el-button>
         <el-checkbox v-model="autoAdvanceDraft">修改后自动进入下一条</el-checkbox>
+      </div>
+      <div class="display-size-controls">
         <span class="unified-size-controls">
           <b>修改记录输入框宽度</b>
           <el-input-number
@@ -1072,6 +1095,32 @@ onBeforeUnmount(() => {
             size="small"
             controls-position="right"
             aria-label="新增记录输入框宽度"
+          />
+          <span>px</span>
+        </span>
+        <span class="unified-size-controls">
+          <b>字体大小</b>
+          <el-input-number
+            v-model="fontSizeDraft"
+            :min="QUICK_ENTRY_FONT_SIZE_MIN"
+            :max="QUICK_ENTRY_FONT_SIZE_MAX"
+            :step="1"
+            size="small"
+            controls-position="right"
+            aria-label="快速录入字体大小"
+          />
+          <span>px</span>
+        </span>
+        <span class="unified-size-controls">
+          <b>输入框高度</b>
+          <el-input-number
+            v-model="inputHeightDraft"
+            :min="QUICK_ENTRY_INPUT_HEIGHT_MIN"
+            :max="QUICK_ENTRY_INPUT_HEIGHT_MAX"
+            :step="1"
+            size="small"
+            controls-position="right"
+            aria-label="快速录入输入框高度"
           />
           <span>px</span>
         </span>
@@ -1132,6 +1181,26 @@ onBeforeUnmount(() => {
   overflow: hidden;
   background: var(--app-bg);
   color: var(--app-text);
+  font-size: var(--quick-entry-font-size, 14px);
+}
+
+.quick-entry-page :deep(.el-input) {
+  --el-input-height: var(--quick-entry-input-height, 32px);
+  font-size: var(--quick-entry-font-size, 14px);
+}
+
+.quick-entry-page :deep(.el-select) {
+  --el-input-height: var(--quick-entry-input-height, 32px);
+}
+
+.quick-entry-page :deep(.el-select__wrapper) {
+  min-height: var(--quick-entry-input-height, 32px);
+  font-size: var(--quick-entry-font-size, 14px);
+}
+
+.quick-entry-page :deep(.el-textarea__inner) {
+  min-height: var(--quick-entry-input-height, 32px) !important;
+  font-size: var(--quick-entry-font-size, 14px);
 }
 
 .quick-entry-header {
@@ -1170,12 +1239,12 @@ onBeforeUnmount(() => {
 }
 
 .quick-entry-brand strong {
-  font-size: 15px;
+  font-size: calc(var(--quick-entry-font-size, 14px) + 2px);
 }
 
 .quick-entry-brand span {
   color: var(--app-muted);
-  font-size: 11px;
+  font-size: calc(var(--quick-entry-font-size, 14px) - 1px);
 }
 
 .project-select {
@@ -1194,7 +1263,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 6px;
   color: var(--app-primary-text);
-  font-size: 12px;
+  font-size: calc(var(--quick-entry-font-size, 14px) - 1px);
   font-weight: 600;
   white-space: nowrap;
 }
@@ -1246,7 +1315,7 @@ onBeforeUnmount(() => {
 
 .record-pane-header h2 {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--quick-entry-font-size, 14px);
 }
 
 .record-pane-header p {
@@ -1307,7 +1376,7 @@ onBeforeUnmount(() => {
 
 .record-pathology {
   overflow: hidden;
-  font-size: 11px;
+  font-size: calc(var(--quick-entry-font-size, 14px) - 1px);
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1317,7 +1386,7 @@ onBeforeUnmount(() => {
   display: block;
   overflow: hidden;
   color: var(--app-muted);
-  font-size: 9px;
+  font-size: calc(var(--quick-entry-font-size, 14px) - 1px);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1329,7 +1398,7 @@ onBeforeUnmount(() => {
 .record-list-empty {
   padding: 28px 10px;
   color: var(--app-subtle);
-  font-size: 12px;
+  font-size: calc(var(--quick-entry-font-size, 14px) - 1px);
   text-align: center;
 }
 
@@ -1365,7 +1434,7 @@ onBeforeUnmount(() => {
   max-width: min(360px, 45vw);
   overflow: hidden;
   margin: 0;
-  font-size: 17px;
+  font-size: calc(var(--quick-entry-font-size, 14px) + 4px);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1377,7 +1446,7 @@ onBeforeUnmount(() => {
 .entry-heading p {
   margin: 5px 0 0;
   color: var(--app-muted);
-  font-size: 11px;
+  font-size: calc(var(--quick-entry-font-size, 14px) - 1px);
 }
 
 .entry-toolbar {
@@ -1425,7 +1494,7 @@ onBeforeUnmount(() => {
   height: auto;
   min-width: 0;
   padding-bottom: 4px;
-  line-height: 18px;
+  line-height: 1.35;
 }
 
 .entry-field-label {
@@ -1435,15 +1504,16 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 3px 6px;
   color: var(--app-text);
+  font-size: var(--quick-entry-font-size, 14px);
   font-weight: 600;
-  line-height: 18px;
+  line-height: 1.35;
 }
 
 .required-mark,
 .pinned-mark {
   border-radius: 999px;
   padding: 1px 6px;
-  font-size: 10px;
+  font-size: calc(var(--quick-entry-font-size, 14px) - 2px);
   font-weight: 500;
 }
 
@@ -1479,14 +1549,14 @@ onBeforeUnmount(() => {
 .quick-create-form label {
   display: block;
   margin-bottom: 10px;
-  font-size: 15px;
+  font-size: calc(var(--quick-entry-font-size, 14px) + 2px);
   font-weight: 700;
 }
 
 .quick-create-form p {
   margin: 10px 0 0;
   color: var(--app-muted);
-  font-size: 12px;
+  font-size: calc(var(--quick-entry-font-size, 14px) - 1px);
   line-height: 1.6;
 }
 
@@ -1504,7 +1574,7 @@ onBeforeUnmount(() => {
 
 .entry-footer > span {
   color: var(--app-subtle);
-  font-size: 11px;
+  font-size: calc(var(--quick-entry-font-size, 14px) - 1px);
 }
 
 .entry-footer > div {
@@ -1519,7 +1589,7 @@ onBeforeUnmount(() => {
 .field-dialog-note {
   margin: -2px 0 12px;
   color: var(--app-muted);
-  font-size: 12px;
+  font-size: calc(var(--quick-entry-font-size, 14px) - 1px);
   line-height: 1.6;
 }
 
@@ -1533,6 +1603,17 @@ onBeforeUnmount(() => {
 
 .field-dialog-toolbar .el-button + .el-button {
   margin-left: 0;
+}
+
+.display-size-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 14px;
+  margin-bottom: 12px;
+  border: 1px solid var(--app-border-light);
+  border-radius: 9px;
+  background: var(--app-surface-soft);
+  padding: 10px 12px;
 }
 
 .field-selector {
@@ -1558,7 +1639,7 @@ onBeforeUnmount(() => {
   top: 0;
   background: var(--app-surface-soft);
   color: var(--app-muted);
-  font-size: 11px;
+  font-size: calc(var(--quick-entry-font-size, 14px) - 1px);
   font-weight: 700;
 }
 
@@ -1584,7 +1665,7 @@ onBeforeUnmount(() => {
 .field-selector-name {
   min-width: 0;
   overflow: hidden;
-  font-size: 13px;
+  font-size: var(--quick-entry-font-size, 14px);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1592,7 +1673,7 @@ onBeforeUnmount(() => {
 .field-selector-name small {
   margin-left: 5px;
   color: var(--app-danger);
-  font-size: 10px;
+  font-size: calc(var(--quick-entry-font-size, 14px) - 2px);
 }
 
 .field-drag-handle {
@@ -1609,16 +1690,22 @@ onBeforeUnmount(() => {
 }
 
 .unified-size-controls {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 125px auto;
   align-items: center;
   gap: 5px;
-  margin-left: auto;
   color: var(--app-muted);
-  font-size: 12px;
+  font-size: calc(var(--quick-entry-font-size, 14px) - 1px);
 }
 
 .unified-size-controls :deep(.el-input-number) {
   width: 125px;
+}
+
+@media (max-width: 680px) {
+  .display-size-controls {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 820px) {
@@ -1679,8 +1766,12 @@ onBeforeUnmount(() => {
 .record-pane, .entry-pane { border-color: var(--app-border); box-shadow: 0 4px 20px rgb(30 41 59 / 3%); }
 .record-pane-header { background: var(--app-surface-soft); }
 .record-pane-header p, .record-pane-note, .record-meta, .entry-heading p,
-.entry-footer > span, .quick-entry-brand span, .field-selector-head,
-.required-mark, .pinned-mark, .field-selector-name small { font-size: 12px; }
+.entry-footer > span, .quick-entry-brand span, .field-selector-head {
+  font-size: calc(var(--quick-entry-font-size, 14px) - 1px);
+}
+.required-mark, .pinned-mark, .field-selector-name small {
+  font-size: calc(var(--quick-entry-font-size, 14px) - 2px);
+}
 .record-pane-note, .record-meta, .entry-footer > span, .record-list-empty { color: var(--app-muted); }
 .entry-pane-header { background: linear-gradient(110deg, var(--app-bg), var(--app-surface-soft)); }
 .entry-field-label { color: var(--app-text); }
