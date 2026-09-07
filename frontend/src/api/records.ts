@@ -15,6 +15,8 @@ import type {
   RecordOperationApplyInput,
   RecordOperationApplyResult,
   RecordReplacePreview,
+  RecordReorderByDatePreview,
+  RecordReorderByDateResult,
   RecordUpdateInput,
 } from "@/types/api";
 
@@ -149,6 +151,44 @@ export function updateRecord(
   return apiRequest<ProjectRecord>(`/records/${recordId}`, {
     method: "PATCH",
     body: jsonBody(payload),
+  });
+}
+
+export function quickCreateRecord(
+  projectId: string,
+  combinedPathologyNumber: string,
+): Promise<ProjectRecord> {
+  return apiRequest<ProjectRecord>("/records/quick-create", {
+    method: "POST",
+    body: jsonBody({
+      project_id: projectId,
+      combined_pathology_number: combinedPathologyNumber,
+    }),
+  });
+}
+
+export function previewReorderByDate(
+  projectId: string,
+  experimentDate: string,
+): Promise<RecordReorderByDatePreview> {
+  return apiRequest<RecordReorderByDatePreview>("/records/reorder-by-date/preview", {
+    method: "POST",
+    body: jsonBody({ project_id: projectId, experiment_date: experimentDate }),
+  });
+}
+
+export function applyReorderByDate(
+  projectId: string,
+  experimentDate: string,
+  expectedOrderHash: string,
+): Promise<RecordReorderByDateResult> {
+  return apiRequest<RecordReorderByDateResult>("/records/reorder-by-date/apply", {
+    method: "POST",
+    body: jsonBody({
+      project_id: projectId,
+      experiment_date: experimentDate,
+      expected_order_hash: expectedOrderHash,
+    }),
   });
 }
 

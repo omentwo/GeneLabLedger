@@ -2,6 +2,7 @@
 import {
   ArrowLeft,
   Dna,
+  GripVertical,
   Pencil as EditPen,
   Lock,
   Plus,
@@ -15,10 +16,9 @@ import { useRoute, useRouter } from "vue-router";
 
 import {
   commitCellBatch,
-  createRecord,
   listRecords,
   previewCellBatch,
-  validateNewRecord,
+  quickCreateRecord,
 } from "@/api/records";
 import { getSetting, putSetting } from "@/api/system";
 import EditableChoiceInput from "@/components/EditableChoiceInput.vue";
@@ -29,10 +29,13 @@ import type { QuickEntryOpenContext } from "@/types/electron";
 import { desktopBridge } from "@/utils/desktop";
 import {
   QUICK_ENTRY_SETTINGS_KEY,
+  QUICK_ENTRY_FIELD_WIDTH_DEFAULT,
+  QUICK_ENTRY_FIELD_WIDTH_MAX,
+  QUICK_ENTRY_FIELD_WIDTH_MIN,
   buildQuickEntryChanges,
-  buildQuickEntryCreatePayload,
   isMandatoryQuickEntryField,
   normalizeQuickEntrySettings,
+  parseCombinedPathologyNumber,
   quickEntryDefaultValue,
   quickEntryFieldValue,
   resolveQuickEntryProjectSettings,
@@ -61,10 +64,20 @@ const baselineValues = reactive<Record<string, string>>({});
 const fieldDialogVisible = ref(false);
 const selectedFieldDraft = ref<string[]>([]);
 const pinnedFieldDraft = ref<string[]>([]);
+const fieldWidthDraft = ref(QUICK_ENTRY_FIELD_WIDTH_DEFAULT);
+const quickCreateFieldWidthDraft = ref(QUICK_ENTRY_FIELD_WIDTH_DEFAULT);
+const draggingFieldId = ref("");
+const dragOverFieldId = ref("");
+const autoAdvanceDraft = ref(true);
+const combinedPathologyInput = ref("");
+const combinedPathologyInputRef = ref<{ focus: () => void } | null>(null);
 const settingsDocument = ref<QuickEntrySettingsDocument>(normalizeQuickEntrySettings(null));
 const fieldSettings = ref<QuickEntryProjectSettings>({
   selectedFieldIds: [],
   pinnedFieldIds: [],
+  fieldWidth: QUICK_ENTRY_FIELD_WIDTH_DEFAULT,
+  quickCreateFieldWidth: QUICK_ENTRY_FIELD_WIDTH_DEFAULT,
+  autoAdvanceAfterUpdate: true,
 });
 const contextDefaults = new Map<string, QuickEntryFieldDefaults>();
 let recordsLoadSequence = 0;
@@ -97,9 +110,21 @@ const projectFields = computed(() =>
 );
 const selectedFieldIdSet = computed(() => new Set(fieldSettings.value.selectedFieldIds));
 const pinnedFieldIdSet = computed(() => new Set(fieldSettings.value.pinnedFieldIds));
+const fieldById = computed(() => new Map(projectFields.value.map((field) => [field.id, field])));
 const entryFields = computed(() =>
-  projectFields.value.filter((field) => selectedFieldIdSet.value.has(field.id)),
+  fieldSettings.value.selectedFieldIds.flatMap((fieldId) => {
+    const field = fieldById.value.get(fieldId);
+    return field ? [field] : [];
+  }),
 );
+const fieldDialogFields = computed(() => {
+  const selected = selectedFieldDraft.value.flatMap((fieldId) => {
+    const field = fieldById.value.get(fieldId);
+    return field ? [field] : [];
+  });
+  const selectedSet = new Set(selectedFieldDraft.value);
+  return [...selected, ...projectFields.value.filter((field) => !selectedSet.has(field.id))];
+});
 const filteredRecords = computed(() => {
   const term = recordSearch.value.trim().toLocaleLowerCase();
   if (!term) return unreportedRecords.value;
@@ -112,6 +137,7 @@ const formReadonly = computed(
   () => saving.value || isLocked.value || activeRecordUnavailable.value,
 );
 const isDirty = computed(() =>
+  (!activeRecord.value && Boolean(combinedPathologyInput.value.trim())) ||
   projectFields.value.some(
     (field) => (entryValues[field.id] ?? "") !== (baselineValues[field.id] ?? ""),
   ),
@@ -123,6 +149,10 @@ function replaceValues(target: Record<string, string>, values: Record<string, st
 }
 
 function focusPathology(): void {
+  if (!activeRecord.value) {
+    void nextTick(() => combinedPathologyInputRef.value?.focus());
+    return;
+  }
   const pathologyField = projectFields.value.find(
     (field) => field.system_key === "pathology_number",
   );
@@ -172,6 +202,7 @@ function resetCreateForm(preservePinned = false): void {
     }),
   );
   activeRecord.value = null;
+  combinedPathologyInput.value = "";
   activeRecordUnavailable.value = false;
   replaceValues(entryValues, values);
   replaceValues(baselineValues, values);
@@ -419,6 +450,9 @@ function openFieldSettings(): void {
   if (saving.value || settingsSaving.value) return;
   selectedFieldDraft.value = [...fieldSettings.value.selectedFieldIds];
   pinnedFieldDraft.value = [...fieldSettings.value.pinnedFieldIds];
+  fieldWidthDraft.value = fieldSettings.value.fieldWidth;
+  quickCreateFieldWidthDraft.value = fieldSettings.value.quickCreateFieldWidth;
+  autoAdvanceDraft.value = fieldSettings.value.autoAdvanceAfterUpdate;
   fieldDialogVisible.value = true;
 }
 
@@ -428,23 +462,57 @@ function draftIncludes(collection: string[], fieldId: string): boolean {
 
 function setDraftFieldSelected(field: FieldDefinition, selected: boolean): void {
   if (!selected && isMandatoryQuickEntryField(field)) return;
-  const next = new Set(selectedFieldDraft.value);
-  if (selected) next.add(field.id);
-  else next.delete(field.id);
-  selectedFieldDraft.value = projectFields.value
-    .filter((item) => next.has(item.id))
-    .map((item) => item.id);
+  if (selected && !selectedFieldDraft.value.includes(field.id)) {
+    selectedFieldDraft.value = [...selectedFieldDraft.value, field.id];
+  } else if (!selected) {
+    selectedFieldDraft.value = selectedFieldDraft.value.filter((id) => id !== field.id);
+  }
   if (!selected) pinnedFieldDraft.value = pinnedFieldDraft.value.filter((id) => id !== field.id);
 }
 
-function setDraftFieldPinned(field: FieldDefinition, pinned: boolean): void {
-  if (field.system_key === "pathology_number" || !selectedFieldDraft.value.includes(field.id)) return;
-  const next = new Set(pinnedFieldDraft.value);
-  if (pinned) next.add(field.id);
-  else next.delete(field.id);
-  pinnedFieldDraft.value = projectFields.value
-    .filter((item) => next.has(item.id))
-    .map((item) => item.id);
+function entryFieldStyle(): Record<string, string> {
+  return {
+    "--quick-field-width": `${fieldSettings.value.fieldWidth}px`,
+  };
+}
+
+function quickCreateFieldStyle(): Record<string, string> {
+  return {
+    "--quick-create-field-width": `${fieldSettings.value.quickCreateFieldWidth}px`,
+  };
+}
+
+function startFieldDrag(event: DragEvent, fieldId: string): void {
+  if (!selectedFieldDraft.value.includes(fieldId)) return;
+  draggingFieldId.value = fieldId;
+  event.dataTransfer?.setData("text/plain", fieldId);
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+}
+
+function dragOverField(event: DragEvent, fieldId: string): void {
+  if (!draggingFieldId.value || !selectedFieldDraft.value.includes(fieldId)) return;
+  event.preventDefault();
+  dragOverFieldId.value = fieldId;
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+}
+
+function dropField(event: DragEvent, targetFieldId: string): void {
+  event.preventDefault();
+  const sourceFieldId = draggingFieldId.value || event.dataTransfer?.getData("text/plain") || "";
+  if (!sourceFieldId || sourceFieldId === targetFieldId) {
+    endFieldDrag();
+    return;
+  }
+  const next = selectedFieldDraft.value.filter((fieldId) => fieldId !== sourceFieldId);
+  const targetIndex = next.indexOf(targetFieldId);
+  if (targetIndex >= 0) next.splice(targetIndex, 0, sourceFieldId);
+  selectedFieldDraft.value = next;
+  endFieldDrag();
+}
+
+function endFieldDrag(): void {
+  draggingFieldId.value = "";
+  dragOverFieldId.value = "";
 }
 
 function selectAllFields(): void {
@@ -469,6 +537,9 @@ async function saveFieldSettings(): Promise<void> {
     {
       selectedFieldIds: selectedFieldDraft.value,
       pinnedFieldIds: pinnedFieldDraft.value,
+      fieldWidth: fieldWidthDraft.value,
+      quickCreateFieldWidth: quickCreateFieldWidthDraft.value,
+      autoAdvanceAfterUpdate: autoAdvanceDraft.value,
     },
   );
   const nextSelected = new Set(resolved.selectedFieldIds);
@@ -494,7 +565,7 @@ async function saveFieldSettings(): Promise<void> {
     }
   }
   const nextDocument: QuickEntrySettingsDocument = {
-    version: 1,
+    version: 3,
     projects: {
       ...settingsDocument.value.projects,
       [projectId]: resolved,
@@ -535,38 +606,28 @@ async function confirmWarnings(issues: RecordValidationIssue[]): Promise<boolean
   }
 }
 
-function notifyMain(recordId: string, action: "create" | "update"): void {
+async function notifyMain(recordId: string, action: "create" | "update"): Promise<void> {
   if (!bridge) return;
-  void bridge
-    .notifyQuickEntryChanged({ projectId: activeProjectId.value, recordId, action })
-    .catch((error) => console.error("快速录入变更通知失败", error));
+  try {
+    await bridge.notifyQuickEntryChanged({ projectId: activeProjectId.value, recordId, action });
+  } catch (error) {
+    console.error("快速录入变更通知失败", error);
+  }
 }
 
 async function saveNewRecord(): Promise<void> {
   const project = currentProject.value;
   if (!project) return;
-  const payload = buildQuickEntryCreatePayload(
-    project.id,
-    projectFields.value,
-    fieldSettings.value.selectedFieldIds,
-    entryValues,
-  );
-  const validation = await validateNewRecord(payload);
-  const errors = validation.issues.filter((issue) => issue.severity === "error");
-  const warnings = validation.issues.filter((issue) => issue.severity === "warning");
-  if (errors.length) {
-    await ElMessageBox.alert(issueSummary(errors), "无法保存", { type: "error" });
-    return;
-  }
-  if (!(await confirmWarnings(warnings))) return;
-  const created = await createRecord(payload);
+  const parsed = parseCombinedPathologyNumber(combinedPathologyInput.value);
+  combinedPathologyInput.value = parsed.normalized;
+  const created = await quickCreateRecord(project.id, parsed.normalized);
   unreportedRecords.value = unreportedQuickEntryRecords([
     ...unreportedRecords.value,
     created,
   ]);
   recordSearch.value = "";
-  notifyMain(created.id, "create");
-  resetCreateForm(true);
+  await notifyMain(created.id, "create");
+  resetCreateForm(false);
   await scrollRecordIntoView(created.id);
   ElMessage.success("记录已保存，可继续录入下一条");
 }
@@ -582,6 +643,8 @@ async function saveExistingRecord(): Promise<void> {
     ElMessage.warning("该记录已锁定，不能修改");
     return;
   }
+  const currentIndex = filteredRecords.value.findIndex((item) => item.id === record.id);
+  const nextRecordId = currentIndex >= 0 ? filteredRecords.value[currentIndex + 1]?.id : undefined;
   const changes = buildQuickEntryChanges(
     record,
     projectFields.value,
@@ -619,8 +682,24 @@ async function saveExistingRecord(): Promise<void> {
   } else {
     await loadUnreportedRecords(record.project_id);
   }
-  notifyMain(record.id, "update");
+  await notifyMain(record.id, "update");
   ElMessage.success(`病理号 ${updated?.pathology_number ?? record.pathology_number} 已更新`);
+  if (fieldSettings.value.autoAdvanceAfterUpdate && nextRecordId) {
+    const nextRecord = unreportedRecords.value.find((item) => item.id === nextRecordId);
+    if (nextRecord) {
+      loadRecordIntoForm(nextRecord);
+      await scrollRecordIntoView(nextRecord.id);
+      focusPathology();
+    }
+  } else if (fieldSettings.value.autoAdvanceAfterUpdate && currentIndex >= 0) {
+    ElMessage.info("已到最后一条记录");
+  }
+}
+
+function handleCombinedPathologyKeydown(event: KeyboardEvent): void {
+  if (event.isComposing || event.key !== "Enter") return;
+  event.preventDefault();
+  void saveEntry();
 }
 
 async function saveEntry(): Promise<void> {
@@ -838,12 +917,12 @@ onBeforeUnmount(() => {
               <el-tag v-if="isDirty" type="info" effect="plain">未保存</el-tag>
             </div>
             <p>
-              {{ activeRecord ? '只保存下方已选择表头的改动。' : '保存后保留标记为“连续保留”的内容。' }}
+              {{ activeRecord ? '只保存下方已选择表头的改动，成功后自动进入下一条。' : '输入“病理号-蜡块号”，按 Enter 即可连续创建。' }}
             </p>
           </div>
           <div class="entry-toolbar">
             <el-button :icon="Setting" :disabled="saving" @click="openFieldSettings">
-              选择快捷表头（{{ entryFields.length }}）
+              快捷表头与尺寸（{{ entryFields.length }}）
             </el-button>
             <el-button :icon="Plus" type="primary" plain :disabled="saving" @click="startCreate">
               新增记录
@@ -869,8 +948,18 @@ onBeforeUnmount(() => {
         />
 
         <el-scrollbar class="entry-form-scroll">
-          <el-form class="entry-form" label-position="top" size="small">
-            <el-form-item v-for="field in entryFields" :key="field.id">
+          <el-form
+            v-if="activeRecord"
+            class="entry-form"
+            label-position="top"
+            size="small"
+            @submit.prevent
+          >
+            <el-form-item
+              v-for="field in entryFields"
+              :key="field.id"
+              :style="entryFieldStyle()"
+            >
               <template #label>
                 <span class="entry-field-label">
                   <span>{{ field.label }}</span>
@@ -911,6 +1000,20 @@ onBeforeUnmount(() => {
               </div>
             </el-form-item>
           </el-form>
+          <div v-else class="quick-create-form" :style="quickCreateFieldStyle()">
+            <label for="combined-pathology-number">病理号-蜡块号</label>
+            <el-input
+              id="combined-pathology-number"
+              ref="combinedPathologyInputRef"
+              v-model="combinedPathologyInput"
+              size="large"
+              clearable
+              autofocus
+              placeholder="例如 A-20260907-3"
+              @keydown="handleCombinedPathologyKeydown"
+            />
+            <p>系统会按最后一个连接符拆分；前半部分写入病理号，最后一段写入蜡块号。</p>
+          </div>
         </el-scrollbar>
 
         <footer class="entry-footer">
@@ -925,7 +1028,7 @@ onBeforeUnmount(() => {
               :disabled="isLocked || activeRecordUnavailable"
               @click="saveEntry"
             >
-              {{ activeRecord ? '保存修改（Ctrl+Enter）' : '保存并下一条（Ctrl+Enter）' }}
+              {{ activeRecord ? '保存修改（Ctrl+Enter）' : '创建并继续（Enter）' }}
             </el-button>
           </div>
         </footer>
@@ -934,26 +1037,71 @@ onBeforeUnmount(() => {
 
     <el-dialog
       v-model="fieldDialogVisible"
-      title="选择快捷表头"
-      width="640px"
+      title="快捷表头、顺序与输入框宽度"
+      width="min(820px, 94vw)"
       append-to-body
       destroy-on-close
     >
       <p class="field-dialog-note">
-        “快捷录入”决定表单中显示哪些表头；“连续保留”仅用于新增记录，病理号每次都会清空。
+        “快捷录入”决定修改表单中显示哪些表头；修改记录与新增记录的输入框宽度可分别设置。
       </p>
       <div class="field-dialog-toolbar">
         <el-button size="small" @click="selectAllFields">全部选择</el-button>
         <el-button size="small" @click="restoreRecommendedFields">恢复项目推荐</el-button>
+        <el-checkbox v-model="autoAdvanceDraft">修改后自动进入下一条</el-checkbox>
+        <span class="unified-size-controls">
+          <b>修改记录输入框宽度</b>
+          <el-input-number
+            v-model="fieldWidthDraft"
+            :min="QUICK_ENTRY_FIELD_WIDTH_MIN"
+            :max="QUICK_ENTRY_FIELD_WIDTH_MAX"
+            :step="10"
+            size="small"
+            controls-position="right"
+            aria-label="修改记录输入框宽度"
+          />
+          <span>px</span>
+        </span>
+        <span class="unified-size-controls">
+          <b>新增记录输入框宽度</b>
+          <el-input-number
+            v-model="quickCreateFieldWidthDraft"
+            :min="QUICK_ENTRY_FIELD_WIDTH_MIN"
+            :max="QUICK_ENTRY_FIELD_WIDTH_MAX"
+            :step="10"
+            size="small"
+            controls-position="right"
+            aria-label="新增记录输入框宽度"
+          />
+          <span>px</span>
+        </span>
       </div>
       <div class="field-selector">
         <div class="field-selector-head">
-          <span>表头</span>
+          <span>表头与顺序</span>
           <span>快捷录入</span>
-          <span>连续保留</span>
         </div>
-        <div v-for="field in projectFields" :key="field.id" class="field-selector-row">
+        <div
+          v-for="field in fieldDialogFields"
+          :key="field.id"
+          class="field-selector-row"
+          :class="{
+            'is-dragging': draggingFieldId === field.id,
+            'is-drag-over': dragOverFieldId === field.id,
+          }"
+          @dragover="dragOverField($event, field.id)"
+          @drop="dropField($event, field.id)"
+        >
           <span class="field-selector-name">
+            <span
+              v-if="draftIncludes(selectedFieldDraft, field.id)"
+              class="field-drag-handle"
+              draggable="true"
+              title="拖动调整顺序"
+              aria-label="拖动调整表头顺序"
+              @dragstart="startFieldDrag($event, field.id)"
+              @dragend="endFieldDrag"
+            ><GripVertical :size="16" /></span>
             {{ field.label }}
             <small v-if="isMandatoryQuickEntryField(field)">必选</small>
           </span>
@@ -962,12 +1110,6 @@ onBeforeUnmount(() => {
             :disabled="isMandatoryQuickEntryField(field)"
             aria-label="用于快捷录入"
             @change="setDraftFieldSelected(field, Boolean($event))"
-          />
-          <el-checkbox
-            :model-value="draftIncludes(pinnedFieldDraft, field.id)"
-            :disabled="field.system_key === 'pathology_number' || !draftIncludes(selectedFieldDraft, field.id)"
-            aria-label="新增后连续保留"
-            @change="setDraftFieldPinned(field, Boolean($event))"
           />
         </div>
       </div>
@@ -1075,7 +1217,7 @@ onBeforeUnmount(() => {
   display: grid;
   min-height: 0;
   flex: 1;
-  grid-template-columns: minmax(210px, 27%) minmax(0, 1fr);
+  grid-template-columns: minmax(100px, 110px) minmax(0, 1fr);
   gap: 12px;
   padding: 12px;
 }
@@ -1099,29 +1241,24 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 14px 8px;
+  padding: 10px 6px 7px;
 }
 
 .record-pane-header h2 {
   margin: 0;
-  font-size: 14px;
+  font-size: 12px;
 }
 
 .record-pane-header p {
-  margin: 3px 0 0;
-  color: var(--app-muted);
-  font-size: 11px;
+  display: none;
 }
 
 .record-search {
-  padding: 0 12px;
+  padding: 0 5px;
 }
 
 .record-pane-note {
-  margin: 7px 13px 9px;
-  color: var(--app-subtle);
-  font-size: 10px;
-  line-height: 1.4;
+  display: none;
 }
 
 .record-list {
@@ -1145,7 +1282,7 @@ onBeforeUnmount(() => {
   background: transparent;
   color: inherit;
   cursor: pointer;
-  padding: 9px 10px;
+  padding: 7px 5px;
   text-align: left;
 }
 
@@ -1170,18 +1307,19 @@ onBeforeUnmount(() => {
 
 .record-pathology {
   overflow: hidden;
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .record-meta {
-  display: flex;
-  align-items: center;
-  gap: 5px;
+  display: block;
+  overflow: hidden;
   color: var(--app-muted);
-  font-size: 10px;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .record-meta .el-icon {
@@ -1266,10 +1404,10 @@ onBeforeUnmount(() => {
 
 .entry-form {
   box-sizing: border-box;
-  display: grid;
+  display: flex;
   width: 100%;
-  max-width: 920px;
-  grid-template-columns: minmax(0, 1fr);
+  max-width: 560px;
+  flex-wrap: wrap;
   align-items: start;
   gap: 10px 16px;
   margin-inline: auto;
@@ -1277,7 +1415,8 @@ onBeforeUnmount(() => {
 }
 
 .entry-form :deep(.el-form-item) {
-  width: 100%;
+  width: min(var(--quick-field-width, 320px), 100%);
+  flex: 0 0 min(var(--quick-field-width, 320px), 100%);
   min-width: 0;
   margin-bottom: 0;
 }
@@ -1332,6 +1471,25 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 
+.quick-create-form {
+  width: min(var(--quick-create-field-width, 320px), calc(100% - 32px));
+  margin: 56px auto;
+}
+
+.quick-create-form label {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.quick-create-form p {
+  margin: 10px 0 0;
+  color: var(--app-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .entry-footer {
   display: flex;
   min-height: 58px;
@@ -1367,6 +1525,8 @@ onBeforeUnmount(() => {
 
 .field-dialog-toolbar {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 7px;
   margin-bottom: 10px;
 }
@@ -1385,7 +1545,7 @@ onBeforeUnmount(() => {
 .field-selector-head,
 .field-selector-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 100px 100px;
+  grid-template-columns: minmax(150px, 1fr) 78px;
   align-items: center;
   gap: 8px;
   min-height: 42px;
@@ -1409,6 +1569,16 @@ onBeforeUnmount(() => {
 
 .field-selector-row {
   border-top: 1px solid var(--app-border-light);
+  transition: background-color 120ms ease, box-shadow 120ms ease;
+}
+
+.field-selector-row.is-dragging {
+  opacity: 0.45;
+}
+
+.field-selector-row.is-drag-over {
+  background: var(--app-primary-soft);
+  box-shadow: inset 0 2px var(--app-primary);
 }
 
 .field-selector-name {
@@ -1425,10 +1595,30 @@ onBeforeUnmount(() => {
   font-size: 10px;
 }
 
-@container quick-entry-form (min-width: 620px) {
-  .entry-form {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+.field-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  color: var(--app-muted);
+  cursor: grab;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+.field-drag-handle:active {
+  cursor: grabbing;
+}
+
+.unified-size-controls {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.unified-size-controls :deep(.el-input-number) {
+  width: 125px;
 }
 
 @media (max-width: 820px) {
@@ -1447,7 +1637,7 @@ onBeforeUnmount(() => {
   }
 
   .quick-entry-layout {
-    grid-template-columns: 190px minmax(0, 1fr);
+    grid-template-columns: 100px minmax(0, 1fr);
     gap: 8px;
     padding: 8px;
   }
@@ -1497,8 +1687,8 @@ onBeforeUnmount(() => {
 @media (max-width: 640px) {
   .quick-entry-header { flex-wrap: wrap; }
   .project-select { order: 3; width: 100%; }
-  .quick-entry-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: 200px minmax(380px, 1fr); overflow-y: auto; }
+  .quick-entry-layout { grid-template-columns: 100px minmax(0, 1fr); }
   .entry-title-row h1 { max-width: 80vw; }
-  .field-selector-head, .field-selector-row { grid-template-columns: minmax(0, 1fr) 64px 64px; }
+  .field-selector-head, .field-selector-row { grid-template-columns: minmax(120px, 1fr) 64px; }
 }
 </style>

@@ -12,15 +12,17 @@ const APP_TITLE = "基因检测台账";
 const CONFIG_FILENAME = "desktop-settings.json";
 const BACKEND_EXECUTABLE = "GeneLabLedgerBackend.exe";
 const MAX_EXPORT_BYTES = 256 * 1024 * 1024;
-const QUICK_ENTRY_MIN_WIDTH = 700;
+const QUICK_ENTRY_MIN_WIDTH = 620;
 const QUICK_ENTRY_MIN_HEIGHT = 460;
-const QUICK_ENTRY_DEFAULT_WIDTH = 940;
+const QUICK_ENTRY_DEFAULT_WIDTH = 820;
 const QUICK_ENTRY_DEFAULT_HEIGHT = 680;
 
 let mainWindow = null;
 let quickEntryWindow = null;
 let quickEntryRendererReady = false;
 let quickEntryPendingContext = null;
+let quickEntryChangeRevision = 0;
+const pendingQuickEntryProjectChanges = new Map();
 let backendProcess = null;
 let backendUrl = "";
 let backendShutdownToken = "";
@@ -607,13 +609,39 @@ function registerDesktopHandlers() {
       typeof payload?.recordId === "string" ? payload.recordId.trim().slice(0, 160) : "";
     const action = payload?.action === "update" ? "update" : "create";
     if (!projectId || !recordId) throw new Error("快速录入变更通知无效");
+    const revision = ++quickEntryChangeRevision;
+    pendingQuickEntryProjectChanges.set(projectId, revision);
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("gene-ledger:quick-entry-changed", {
         projectId,
         recordId,
         action,
+        revision,
       });
     }
+  });
+
+  ipcMain.handle("gene-ledger:get-pending-quick-entry-changes", (event) => {
+    assertTrustedIpcSender(event);
+    return [...pendingQuickEntryProjectChanges.entries()].map(([projectId, revision]) => ({
+      projectId,
+      revision,
+    }));
+  });
+
+  ipcMain.handle("gene-ledger:acknowledge-quick-entry-changes", (event, changes) => {
+    assertTrustedIpcSender(event);
+    if (!Array.isArray(changes)) return;
+    changes.forEach((change) => {
+      const projectId =
+        typeof change?.projectId === "string" ? change.projectId.trim().slice(0, 160) : "";
+      const revision = Number(change?.revision);
+      if (!projectId || !Number.isSafeInteger(revision) || revision <= 0) return;
+      const pendingRevision = pendingQuickEntryProjectChanges.get(projectId);
+      if (pendingRevision !== undefined && pendingRevision <= revision) {
+        pendingQuickEntryProjectChanges.delete(projectId);
+      }
+    });
   });
 
   ipcMain.handle("gene-ledger:quick-entry-fields-changed", (event, payload) => {

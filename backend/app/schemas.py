@@ -383,6 +383,51 @@ class RecordCreate(BaseModel):
         return self
 
 
+class RecordQuickCreate(BaseModel):
+    project_id: str = Field(min_length=1, max_length=36)
+    combined_pathology_number: str = Field(min_length=3, max_length=241)
+
+    @field_validator("project_id", "combined_pathology_number")
+    @classmethod
+    def clean_quick_create_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class RecordReorderByDatePreview(BaseModel):
+    project_id: str = Field(min_length=1, max_length=36)
+    experiment_date: date
+
+
+class RecordReorderByDateApply(RecordReorderByDatePreview):
+    expected_order_hash: str = Field(min_length=64, max_length=64)
+
+
+class RecordReorderProjectPreview(BaseModel):
+    project_id: str
+    project_name: str
+    record_count: int
+    changed_count: int
+    before: list[str]
+    after: list[str]
+
+
+class RecordReorderByDatePreviewRead(BaseModel):
+    experiment_date: date
+    affected_projects: int
+    affected_records: int
+    changed_records: int
+    locked_records: list[str]
+    expected_order_hash: str
+    projects: list[RecordReorderProjectPreview]
+
+
+class RecordReorderByDateResult(BaseModel):
+    experiment_date: date
+    affected_projects: int
+    affected_records: int
+    changed_records: int
+
+
 class RecordUpdate(BaseModel):
     pathology_number: str | None = Field(default=None, min_length=1, max_length=160)
     block_number: str | None = Field(default=None, max_length=80)

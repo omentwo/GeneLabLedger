@@ -25,6 +25,10 @@ contextBridge.exposeInMainWorld("geneLedgerDesktop", {
   focusMainWindow: () => ipcRenderer.invoke("gene-ledger:focus-main-window"),
   notifyQuickEntryChanged: (payload) =>
     ipcRenderer.invoke("gene-ledger:quick-entry-changed", payload),
+  getPendingQuickEntryChanges: () =>
+    ipcRenderer.invoke("gene-ledger:get-pending-quick-entry-changes"),
+  acknowledgeQuickEntryChanges: (changes) =>
+    ipcRenderer.invoke("gene-ledger:acknowledge-quick-entry-changes", changes),
   notifyQuickEntryFieldsChanged: (payload) =>
     ipcRenderer.invoke("gene-ledger:quick-entry-fields-changed", payload),
   onQuickEntryOpenRequested: (listener) => {

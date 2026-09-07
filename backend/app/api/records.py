@@ -35,7 +35,12 @@ from app.schemas import (
     RecordOperationApply,
     RecordOperationApplyResult,
     RecordQueryRequest,
+    RecordQuickCreate,
     RecordRead,
+    RecordReorderByDateApply,
+    RecordReorderByDatePreview,
+    RecordReorderByDatePreviewRead,
+    RecordReorderByDateResult,
     RecordReplacePreview,
     RecordReplacePreviewRead,
     RecordReportStatusUpdate,
@@ -52,6 +57,10 @@ from app.services.record_operations import apply_record_operation, snapshot_reco
 from app.services.records import (
     allocate_record_position,
     assign_record_to_project,
+    date_reorder_hash,
+    date_reorder_plan,
+    parse_combined_pathology_number,
+    records_for_date_reorder,
     replace_record_values,
     require_project,
     require_record,
@@ -68,6 +77,47 @@ def record_load_options() -> tuple:
         selectinload(ProjectRecord.project),
         selectinload(ProjectRecord.values),
     )
+
+
+def _date_reorder_preview(session: Session, project_id: str, experiment_date: date) -> dict:
+    require_project(session, project_id)
+    records = records_for_date_reorder(session, project_id, experiment_date)
+    projects = date_reorder_plan(records)
+    return {
+        "experiment_date": experiment_date,
+        "affected_projects": len(projects),
+        "affected_records": len(records),
+        "changed_records": sum(project["changed_count"] for project in projects),
+        "locked_records": [
+            f"{record.pathology_number}-{record.block_number}"
+            if record.block_number
+            else record.pathology_number
+            for record in records
+            if record.locked
+        ],
+        "expected_order_hash": date_reorder_hash(records),
+        "projects": [
+            {
+                "project_id": project["project_id"],
+                "project_name": project["project_name"],
+                "record_count": len(project["records"]),
+                "changed_count": project["changed_count"],
+                "before": [
+                    f"{record.pathology_number}-{record.block_number}"
+                    if record.block_number
+                    else record.pathology_number
+                    for record in project["records"][:10]
+                ],
+                "after": [
+                    f"{record.pathology_number}-{record.block_number}"
+                    if record.block_number
+                    else record.pathology_number
+                    for record in project["ordered"][:10]
+                ],
+            }
+            for project in projects
+        ],
+    }
 
 
 def record_filters(
@@ -587,6 +637,111 @@ def validate_new_record(
             for issue in field_issues
         )
     return {"issues": issues}
+
+
+@router.post("/quick-create", response_model=RecordRead, status_code=status.HTTP_201_CREATED)
+def quick_create_record(
+    payload: RecordQuickCreate,
+    session: Session = Depends(get_session),
+) -> dict:
+    pathology_number, block_number = parse_combined_pathology_number(
+        payload.combined_pathology_number
+    )
+    return create_record(
+        RecordCreate(
+            project_id=payload.project_id,
+            pathology_number=pathology_number,
+            block_number=block_number,
+            status="待实验",
+            experiment_date=None,
+            values={},
+        ),
+        session,
+    )
+
+
+@router.post(
+    "/reorder-by-date/preview",
+    response_model=RecordReorderByDatePreviewRead,
+)
+def preview_reorder_by_date(
+    payload: RecordReorderByDatePreview,
+    session: Session = Depends(get_session),
+) -> dict:
+    return _date_reorder_preview(session, payload.project_id, payload.experiment_date)
+
+
+@router.post("/reorder-by-date/apply", response_model=RecordReorderByDateResult)
+def apply_reorder_by_date(
+    payload: RecordReorderByDateApply,
+    session: Session = Depends(get_session),
+) -> dict:
+    # SQLite ignores SELECT FOR UPDATE.  This desktop app uses SQLite, so take
+    # its write reservation before reading the preview state; other databases
+    # use row locks through with_for_update().
+    if session.get_bind().dialect.name == "sqlite":
+        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+    require_project(session, payload.project_id)
+    records = records_for_date_reorder(
+        session,
+        payload.project_id,
+        payload.experiment_date,
+        for_update=True,
+    )
+    if date_reorder_hash(records) != payload.expected_order_hash:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="台账记录已经变化，请重新预览后再重排",
+        )
+    locked = [
+        f"{record.pathology_number}-{record.block_number}"
+        if record.block_number
+        else record.pathology_number
+        for record in records
+        if record.locked
+    ]
+    if locked:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"记录已锁定，请先解锁：{', '.join(locked[:20])}",
+        )
+    projects = date_reorder_plan(records)
+    changed_records = sum(project["changed_count"] for project in projects)
+    try:
+        for project in projects:
+            before = [record.id for record in project["records"]]
+            after = [record.id for record in project["ordered"]]
+            for record, next_position in project["assignments"]:
+                if record.position == next_position:
+                    continue
+                stable_updated_at = record.updated_at
+                record.position = next_position
+                record.updated_at = stable_updated_at
+            if project["changed_count"]:
+                audit(
+                    session,
+                    "record.position.reorder_by_date",
+                    "project",
+                    project["project_id"],
+                    {
+                        "experiment_date": payload.experiment_date.isoformat(),
+                        "before": before,
+                        "after": after,
+                    },
+                )
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="记录重排冲突，请刷新后重试",
+        ) from error
+    return {
+        "experiment_date": payload.experiment_date,
+        "affected_projects": len(projects),
+        "affected_records": len(records),
+        "changed_records": changed_records,
+    }
 
 
 @router.get("/{record_id}", response_model=RecordRead)

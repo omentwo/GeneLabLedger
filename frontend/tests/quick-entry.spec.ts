@@ -5,6 +5,7 @@ import {
   buildQuickEntryChanges,
   buildQuickEntryCreatePayload,
   normalizeQuickEntrySettings,
+  parseCombinedPathologyNumber,
   resolveQuickEntryProjectSettings,
   unreportedQuickEntryRecords,
 } from "@/utils/quickEntry";
@@ -72,11 +73,14 @@ describe("quick entry field settings", () => {
         broken: null,
       },
     })).toEqual({
-      version: 1,
+      version: 3,
       projects: {
         "project-1": {
           selectedFieldIds: ["pathology"],
           pinnedFieldIds: [],
+          fieldWidth: 320,
+          quickCreateFieldWidth: 320,
+          autoAdvanceAfterUpdate: true,
         },
       },
     });
@@ -88,10 +92,16 @@ describe("quick entry field settings", () => {
       {
         selectedFieldIds: ["hidden", "removed"],
         pinnedFieldIds: ["hidden", "pathology", "removed"],
+        fieldWidth: 999,
+        quickCreateFieldWidth: 150,
+        autoAdvanceAfterUpdate: false,
       },
     )).toEqual({
-      selectedFieldIds: ["pathology", "required", "hidden"],
+      selectedFieldIds: ["hidden", "pathology", "required"],
       pinnedFieldIds: ["hidden"],
+      fieldWidth: 600,
+      quickCreateFieldWidth: 160,
+      autoAdvanceAfterUpdate: false,
     });
   });
 
@@ -102,6 +112,9 @@ describe("quick entry field settings", () => {
     })).toEqual({
       selectedFieldIds: ["pathology", "number", "required"],
       pinnedFieldIds: ["number"],
+      fieldWidth: 320,
+      quickCreateFieldWidth: 320,
+      autoAdvanceAfterUpdate: true,
     });
   });
 
@@ -112,7 +125,19 @@ describe("quick entry field settings", () => {
     })).toEqual({
       selectedFieldIds: ["pathology", "required"],
       pinnedFieldIds: [],
+      fieldWidth: 320,
+      quickCreateFieldWidth: 320,
+      autoAdvanceAfterUpdate: true,
     });
+  });
+
+  it("splits a combined pathology number at the final normalized dash", () => {
+    expect(parseCombinedPathologyNumber(" A-20260907－3 ")).toEqual({
+      pathologyNumber: "A-20260907",
+      blockNumber: "3",
+      normalized: "A-20260907-3",
+    });
+    expect(() => parseCombinedPathologyNumber("A20260907")).toThrow("病理号-蜡块号");
   });
 });
 

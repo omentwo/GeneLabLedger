@@ -163,6 +163,32 @@ export interface RecordCreateInput {
   insert_after_record_id?: string;
 }
 
+export interface RecordReorderProjectPreview {
+  project_id: string;
+  project_name: string;
+  record_count: number;
+  changed_count: number;
+  before: string[];
+  after: string[];
+}
+
+export interface RecordReorderByDatePreview {
+  experiment_date: string;
+  affected_projects: number;
+  affected_records: number;
+  changed_records: number;
+  locked_records: string[];
+  expected_order_hash: string;
+  projects: RecordReorderProjectPreview[];
+}
+
+export interface RecordReorderByDateResult {
+  experiment_date: string;
+  affected_projects: number;
+  affected_records: number;
+  changed_records: number;
+}
+
 export type RecordFieldFilterOperator =
   | "contains"
   | "equals"

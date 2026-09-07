@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import re
+from collections import defaultdict
+from datetime import date
+
 from fastapi import HTTPException, status
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, selectinload
@@ -85,6 +91,117 @@ def allocate_record_position(
         execution_options={"synchronize_session": False},
     )
     return position
+
+
+_QUICK_ENTRY_DASHES = str.maketrans({"－": "-", "—": "-", "–": "-", "﹣": "-"})
+
+
+def parse_combined_pathology_number(value: str) -> tuple[str, str]:
+    """Split a quick-entry identifier at its final dash."""
+    normalized = value.strip().translate(_QUICK_ENTRY_DASHES)
+    pathology_number, separator, block_number = normalized.rpartition("-")
+    pathology_number = pathology_number.strip()
+    block_number = block_number.strip()
+    if not separator or not pathology_number or not block_number:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="请输入“病理号-蜡块号”，例如 A-20260907-3",
+        )
+    if len(pathology_number) > 160:
+        raise HTTPException(status_code=422, detail="病理号不能超过 160 个字符")
+    if len(block_number) > 80:
+        raise HTTPException(status_code=422, detail="蜡块号不能超过 80 个字符")
+    return pathology_number, block_number
+
+
+def _natural_parts(value: str) -> tuple[tuple[int, object], ...]:
+    return tuple(
+        (0, int(part)) if part.isdigit() else (1, part.casefold())
+        for part in re.split(r"(\d+)", value)
+        if part
+    )
+
+
+def _pathology_sort_key(record: ProjectRecord) -> tuple:
+    combined = record.pathology_number.strip()
+    if record.block_number and record.block_number.strip():
+        combined = f"{combined}-{record.block_number.strip()}"
+    match = re.match(r"^([A-Za-z]*)(\d+)-(\d+)(.*)$", combined)
+    if not match:
+        return (1, _natural_parts(combined), record.position, record.id)
+    prefix, year, serial, remainder = match.groups()
+    return (
+        0,
+        (0, "") if not prefix else (1, prefix.casefold()),
+        int(year),
+        int(serial),
+        _natural_parts(remainder),
+        record.position,
+        record.id,
+    )
+
+
+def records_for_date_reorder(
+    session: Session,
+    project_id: str,
+    experiment_date: date,
+    *,
+    for_update: bool = False,
+) -> list[ProjectRecord]:
+    statement = (
+        select(ProjectRecord)
+        .where(
+            ProjectRecord.project_id == project_id,
+            ProjectRecord.experiment_date == experiment_date,
+        )
+        .options(selectinload(ProjectRecord.project), selectinload(ProjectRecord.values))
+        .order_by(ProjectRecord.project_id, ProjectRecord.position, ProjectRecord.id)
+    )
+    if for_update:
+        statement = statement.with_for_update()
+    return list(
+        session.scalars(statement)
+    )
+
+
+def date_reorder_hash(records: list[ProjectRecord]) -> str:
+    state = [
+        {
+            "id": record.id,
+            "project_id": record.project_id,
+            "position": record.position,
+            "pathology_number": record.pathology_number,
+            "block_number": record.block_number,
+            "locked": record.locked,
+        }
+        for record in records
+    ]
+    return hashlib.sha256(
+        json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def date_reorder_plan(records: list[ProjectRecord]) -> list[dict]:
+    grouped: dict[str, list[ProjectRecord]] = defaultdict(list)
+    for record in records:
+        grouped[record.project_id].append(record)
+    result: list[dict] = []
+    for project_records in grouped.values():
+        original = sorted(project_records, key=lambda item: (item.position, item.id))
+        ordered = sorted(original, key=_pathology_sort_key)
+        positions = [record.position for record in original]
+        assignments = list(zip(ordered, positions, strict=True))
+        result.append(
+            {
+                "project_id": original[0].project_id,
+                "project_name": original[0].project.name,
+                "records": original,
+                "ordered": ordered,
+                "assignments": assignments,
+                "changed_count": sum(record.position != position for record, position in assignments),
+            }
+        )
+    return result
 
 
 def validate_record_values(

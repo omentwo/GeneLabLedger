@@ -19,6 +19,8 @@ export interface GeneLedgerDesktopBridge {
   quickEntryReady: () => Promise<void>;
   focusMainWindow: () => Promise<boolean>;
   notifyQuickEntryChanged: (payload: QuickEntryChangedPayload) => Promise<void>;
+  getPendingQuickEntryChanges: () => Promise<QuickEntryProjectChange[]>;
+  acknowledgeQuickEntryChanges: (changes: QuickEntryProjectChange[]) => Promise<void>;
   notifyQuickEntryFieldsChanged: (payload: QuickEntryFieldsChangedPayload) => Promise<void>;
   onQuickEntryOpenRequested: (
     listener: (context: QuickEntryOpenContext) => void,
@@ -48,6 +50,12 @@ export interface QuickEntryChangedPayload {
   projectId: string;
   recordId: string;
   action: "create" | "update";
+  revision?: number;
+}
+
+export interface QuickEntryProjectChange {
+  projectId: string;
+  revision: number;
 }
 
 export interface QuickEntryFieldsChangedPayload {

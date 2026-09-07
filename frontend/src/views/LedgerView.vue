@@ -64,6 +64,8 @@ import {
   listRecords,
   previewCellBatch,
   previewReplace,
+  previewReorderByDate,
+  applyReorderByDate,
   queryRecordIds,
   queryRecords,
   setRecordLock,
@@ -102,8 +104,13 @@ import type {
   RecordCreateInput,
   RecordFieldFilter,
   RecordReplacePreview,
+  RecordReorderByDatePreview,
   RecordValidationIssue,
 } from "@/types/api";
+import type {
+  QuickEntryChangedPayload,
+  QuickEntryProjectChange,
+} from "@/types/electron";
 import {
   buildGridFillEntries,
   normalizeDate,
@@ -319,6 +326,11 @@ const nativePreviewLoading = ref(false);
 const columnToolsVisible = ref(false);
 const columnToolsOpenFieldId = ref("");
 const columnToolsPosition = reactive({ left: 0, top: 0 });
+const automaticRowHeight = ref(true);
+const reorderDialogVisible = ref(false);
+const reorderDate = ref("");
+const reorderPreview = ref<RecordReorderByDatePreview | null>(null);
+const reorderLoading = ref(false);
 type LedgerColumnToolsDraft = {
   text: string;
   options: string[];
@@ -493,6 +505,7 @@ let projectPrefetchTimer: number | null = null;
 let adjacentProjectPrefetchTimer: number | null = null;
 let ledgerDisposed = false;
 let removeQuickEntryChangedListener: (() => void) | undefined;
+let quickEntryRefreshPromise: Promise<void> = Promise.resolve();
 const currentPage = ref(1);
 const pageSize = 200;
 const recordTotal = ref(0);
@@ -513,6 +526,90 @@ function invalidateProjectRecordCache(projectId: string): void {
     projectId,
     projectRecordCacheGeneration(projectId) + 1,
   );
+}
+
+function normalizeQuickEntryProjectChange(
+  change: { projectId?: unknown; revision?: unknown },
+): QuickEntryProjectChange | null {
+  const projectId = typeof change.projectId === "string" ? change.projectId.trim() : "";
+  const revision = Number(change.revision);
+  if (!projectId) return null;
+  return {
+    projectId,
+    revision: Number.isSafeInteger(revision) && revision > 0 ? revision : 0,
+  };
+}
+
+async function acknowledgeQuickEntryChanges(changes: QuickEntryProjectChange[]): Promise<void> {
+  const bridge = desktopBridge();
+  const acknowledged = changes.filter((change) => change.revision > 0);
+  if (bridge?.windowKind !== "main" || !acknowledged.length) return;
+  try {
+    await bridge.acknowledgeQuickEntryChanges(acknowledged);
+  } catch (error) {
+    console.error("快速录入变更确认失败", error);
+  }
+}
+
+async function refreshQuickEntryChanges(changes: QuickEntryProjectChange[]): Promise<void> {
+  if (ledgerDisposed) return;
+  const latestByProject = new Map<string, QuickEntryProjectChange>();
+  changes.forEach((change) => {
+    const normalized = normalizeQuickEntryProjectChange(change);
+    if (!normalized) return;
+    const previous = latestByProject.get(normalized.projectId);
+    if (!previous || normalized.revision >= previous.revision) {
+      latestByProject.set(normalized.projectId, normalized);
+    }
+  });
+  if (!latestByProject.size) return;
+
+  latestByProject.forEach(({ projectId }) => invalidateProjectRecordCache(projectId));
+  const currentChange = latestByProject.get(activeProjectId.value);
+  let currentProjectLoaded = true;
+  if (currentChange) {
+    currentProjectLoaded = await loadRecords(currentChange.projectId, {
+      showLoading: false,
+      preserveHistory: true,
+      preserveSelection: true,
+    });
+  }
+  if (ledgerDisposed) return;
+  const acknowledged = [...latestByProject.values()].filter((change) => (
+    change.projectId !== activeProjectId.value || currentProjectLoaded
+  ));
+  await acknowledgeQuickEntryChanges(acknowledged);
+}
+
+function queueQuickEntryChanges(changes: QuickEntryProjectChange[]): void {
+  if (!changes.length) return;
+  const task = quickEntryRefreshPromise
+    .catch(() => undefined)
+    .then(() => refreshQuickEntryChanges(changes));
+  quickEntryRefreshPromise = task.catch((error) => {
+    console.error("快速录入变更刷新失败", error);
+  });
+}
+
+function handleQuickEntryChanged(payload: QuickEntryChangedPayload): void {
+  const change = normalizeQuickEntryProjectChange(payload);
+  if (change) queueQuickEntryChanges([change]);
+}
+
+async function requestPendingQuickEntryChanges(): Promise<void> {
+  const bridge = desktopBridge();
+  if (bridge?.windowKind !== "main") return;
+  try {
+    await quickEntryRefreshPromise;
+    const pending = await bridge.getPendingQuickEntryChanges();
+    queueQuickEntryChanges(pending);
+  } catch (error) {
+    console.error("读取快速录入待刷新项目失败", error);
+  }
+}
+
+function handleLedgerWindowFocus(): void {
+  void requestPendingQuickEntryChanges();
 }
 
 const currentProject = computed(() => appStore.projectById(activeProjectId.value));
@@ -3647,14 +3744,14 @@ async function loadRecords(
     stabilizeTable?: boolean;
     preferCache?: boolean;
   } = {},
-): Promise<void> {
+): Promise<boolean> {
   if (!options.preserveHistory) ledgerHistory.clear();
   const isGlobalScope = appliedSearch.scope !== "current";
   if (!projectId && !isGlobalScope) {
     records.value = [];
     globalSearchResults.value = [];
     globalSearchTotal.value = 0;
-    return;
+    return true;
   }
   const showLoading = options.showLoading ?? true;
   const requestSequence = ++loadSequence;
@@ -3695,12 +3792,12 @@ async function loadRecords(
       loaded = cacheHit.snapshot.records;
     } else {
       const page = await queryRecords(currentQuery!, controller.signal);
-      if (projectRecordCacheGeneration(projectId) !== queryCacheGeneration) return;
+      if (projectRecordCacheGeneration(projectId) !== queryCacheGeneration) return false;
       total = page.total;
       loaded = page.items;
       ledgerRecordCache.set(currentQueryKey, projectId, { records: loaded, total });
     }
-    if (requestSequence !== loadSequence || projectId !== activeProjectId.value) return;
+    if (requestSequence !== loadSequence || projectId !== activeProjectId.value) return false;
     if (isGlobalScope) {
       records.value = [];
       draftRows.value = [];
@@ -3731,10 +3828,10 @@ async function loadRecords(
       await refreshTableLayout(requestIsCurrent);
     } else {
       await nextTick();
-      if (!requestIsCurrent()) return;
+      if (!requestIsCurrent()) return false;
       tableRef.value?.doLayout();
     }
-    if (!requestIsCurrent()) return;
+    if (!requestIsCurrent()) return false;
     if (!isGlobalScope && options.preserveSelection && selectedRecordIds.value.size) {
       records.value.forEach((record) => {
         if (selectedRecordIds.value.has(record.id)) {
@@ -3753,9 +3850,11 @@ async function loadRecords(
       void revalidateCachedRecordQuery(projectId, currentQuery, currentQueryKey);
     }
     if (options.preferCache) scheduleAdjacentProjectPrefetch(projectId);
+    return true;
   } catch (error) {
-    if (requestSequence !== loadSequence || controller.signal.aborted) return;
+    if (requestSequence !== loadSequence || controller.signal.aborted) return false;
     ElMessage.error(error instanceof Error ? error.message : "台账读取失败");
+    return false;
   } finally {
     if (requestSequence === loadSequence) {
       loading.value = false;
@@ -3997,6 +4096,49 @@ function resetSearch(): void {
 
 function refreshRecords(): void {
   void loadRecords(activeProjectId.value, { preserveHistory: true, preserveSelection: true });
+}
+
+function openReorderDialog(): void {
+  reorderDate.value = appliedSearch.date || searchDate.value || shanghaiDateKey(new Date());
+  reorderPreview.value = null;
+  reorderDialogVisible.value = true;
+}
+
+async function loadReorderPreview(): Promise<void> {
+  if (!reorderDate.value) {
+    ElMessage.warning("请选择需要重排的实验日期");
+    return;
+  }
+  reorderLoading.value = true;
+  try {
+    reorderPreview.value = await previewReorderByDate(activeProjectId.value, reorderDate.value);
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "重排预览失败");
+  } finally {
+    reorderLoading.value = false;
+  }
+}
+
+async function confirmReorderByDate(): Promise<void> {
+  const preview = reorderPreview.value;
+  if (!preview) return;
+  reorderLoading.value = true;
+  try {
+    const result = await applyReorderByDate(
+      activeProjectId.value,
+      preview.experiment_date,
+      preview.expected_order_hash,
+    );
+    preview.projects.forEach((project) => invalidateProjectRecordCache(project.project_id));
+    reorderDialogVisible.value = false;
+    await loadRecords(activeProjectId.value, { preserveHistory: true, preserveSelection: true });
+    ElMessage.success(`重排完成，共调整 ${result.changed_records} 条记录`);
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "按日期重排失败");
+    reorderPreview.value = null;
+  } finally {
+    reorderLoading.value = false;
+  }
 }
 
 function selectProject(projectId: string): void {
@@ -4375,7 +4517,7 @@ async function openQuickEntry(): Promise<void> {
   window.open(
     target,
     "gene-ledger-quick-entry",
-    "popup=yes,width=940,height=680,resizable=yes,scrollbars=no",
+    "popup=yes,width=820,height=680,resizable=yes,scrollbars=no",
   );
 }
 
@@ -4484,6 +4626,39 @@ function fieldDefinitionById(fieldId: string): FieldDefinition | undefined {
 function applyFieldWidth(fieldId: string, width: number): void {
   const field = fieldDefinitionById(fieldId);
   if (field) field.width = width;
+}
+
+function bestFitColumn(field: FieldDefinition): void {
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  context.font = `${ledgerDisplaySettings.value.fontSizePx}px ${ledgerFontOption.value?.css ?? "system-ui"}`;
+  const candidates = [field.label, ...tableRows.value.map((row) => valueFor(row, field))];
+  const textWidth = candidates.reduce((maximum, value) => {
+    const width = String(value ?? "")
+      .split(/\r?\n/)
+      .reduce((lineMaximum, line) => Math.max(lineMaximum, context.measureText(line).width), 0);
+    return Math.max(maximum, width);
+  }, 0);
+  const chromeWidth = columnToolsVisible.value ? 64 : 38;
+  handleHeaderResize(
+    Math.min(600, Math.max(58, Math.ceil(textWidth + chromeWidth))),
+    field.width,
+    { columnKey: field.id },
+  );
+}
+
+function bestFitAllColumns(event?: MouseEvent): void {
+  fields.value.forEach(bestFitColumn);
+  (event?.currentTarget as HTMLElement | null)?.blur();
+  ElMessage.success("已按当前页内容调整所有可见列宽");
+}
+
+function toggleAutomaticRowHeight(event?: MouseEvent): void {
+  automaticRowHeight.value = !automaticRowHeight.value;
+  (event?.currentTarget as HTMLElement | null)?.blur();
+  ElMessage.success(automaticRowHeight.value ? "已启用最佳行高" : "已关闭最佳行高");
+  void nextTick(() => tableRef.value?.doLayout());
 }
 
 function handleHeaderResize(
@@ -5140,17 +5315,11 @@ onMounted(() => {
   document.addEventListener("keydown", handleLedgerDocumentKeydown);
   document.addEventListener("scroll", handleLedgerDocumentScroll, true);
   window.addEventListener("resize", handleLedgerDocumentScroll);
+  window.addEventListener("focus", handleLedgerWindowFocus);
   const bridge = desktopBridge();
   if (bridge?.windowKind === "main") {
-    removeQuickEntryChangedListener = bridge.onQuickEntryChanged((payload) => {
-      invalidateProjectRecordCache(payload.projectId);
-      if (payload.projectId !== activeProjectId.value) return;
-      void loadRecords(payload.projectId, {
-        showLoading: false,
-        preserveHistory: true,
-        preserveSelection: true,
-      });
-    });
+    removeQuickEntryChangedListener = bridge.onQuickEntryChanged(handleQuickEntryChanged);
+    void requestPendingQuickEntryChanges();
   }
   void loadLedgerDisplaySettings();
   void loadPreviewEngineSetting();
@@ -5166,6 +5335,7 @@ onBeforeUnmount(() => {
   document.removeEventListener("keydown", handleLedgerDocumentKeydown);
   document.removeEventListener("scroll", handleLedgerDocumentScroll, true);
   window.removeEventListener("resize", handleLedgerDocumentScroll);
+  window.removeEventListener("focus", handleLedgerWindowFocus);
   removeQuickEntryChangedListener?.();
   removeQuickEntryChangedListener = undefined;
   stopGridCellDrag(false);
@@ -5271,6 +5441,7 @@ onBeforeUnmount(() => {
               新增记录
             </el-button>
             <el-button :icon="Plus" @click="openQuickEntry">快速录入</el-button>
+            <el-button @click="openReorderDialog">按日期重排</el-button>
             <el-button @click="openFindReplace">查找替换</el-button>
             <el-button :icon="Download" @click="exportVisible = !exportVisible">
               导出 Excel
@@ -5281,6 +5452,10 @@ onBeforeUnmount(() => {
               @click="toggleColumnTools"
             >
               排序/筛选
+            </el-button>
+            <el-button @click="bestFitAllColumns($event)">最佳列宽</el-button>
+            <el-button @click="toggleAutomaticRowHeight($event)">
+              最佳行高
             </el-button>
             <el-select
               v-model="previewEngine"
@@ -5473,6 +5648,7 @@ onBeforeUnmount(() => {
         :class="{
           'selection-dragging': selectionDragging,
           'grid-selection-dragging': gridSelectionDragging,
+          'automatic-row-height': automaticRowHeight,
         }"
         v-loading="loading"
         element-loading-text="正在切换或读取项目数据…"
@@ -5705,6 +5881,9 @@ onBeforeUnmount(() => {
             取消排序
           </el-button>
         </div>
+        <el-button class="ledger-best-fit-button" size="small" @click="bestFitColumn(columnToolsField)">
+          当前列最佳宽度
+        </el-button>
         <div class="ledger-column-tools-filter-label">筛选</div>
         <el-select
           v-if="columnToolsFilterKind === 'options'"
@@ -5911,6 +6090,57 @@ onBeforeUnmount(() => {
     @select-project="selectProject"
     @open-templates="templateManagerVisible = true"
   />
+
+  <el-dialog
+    class="ledger-dialog"
+    v-model="reorderDialogVisible"
+    title="按实验日期重排台账"
+    width="680px"
+  >
+    <p class="dialog-note">
+      仅重排当前项目中所选日期的记录，并按“病理号-蜡块号”的实验编排规则排序；其他日期记录的位置保持不变。
+    </p>
+    <el-form label-position="top">
+      <el-form-item label="实验日期">
+        <el-date-picker
+          v-model="reorderDate"
+          type="date"
+          value-format="YYYY-MM-DD"
+          placeholder="选择日期"
+          @change="reorderPreview = null"
+        />
+      </el-form-item>
+    </el-form>
+    <div v-if="reorderPreview" class="reorder-preview-panel">
+      <strong>
+        当前项目共 {{ reorderPreview.affected_records }} 条记录，
+        将调整 {{ reorderPreview.changed_records }} 条
+      </strong>
+      <el-alert
+        v-if="reorderPreview.locked_records.length"
+        type="error"
+        :closable="false"
+        :title="`有 ${reorderPreview.locked_records.length} 条锁定记录，请先解锁`"
+      />
+      <div v-for="project in reorderPreview.projects" :key="project.project_id" class="reorder-project-preview">
+        <b>{{ project.project_name }}（调整 {{ project.changed_count }} 条）</b>
+        <span>调整前：{{ project.before.join('、') || '无' }}</span>
+        <span>调整后：{{ project.after.join('、') || '无' }}</span>
+      </div>
+    </div>
+    <template #footer>
+      <el-button @click="reorderDialogVisible = false">取消</el-button>
+      <el-button :loading="reorderLoading" @click="loadReorderPreview">预览</el-button>
+      <el-button
+        type="primary"
+        :loading="reorderLoading"
+        :disabled="!reorderPreview || Boolean(reorderPreview.locked_records.length) || !reorderPreview.changed_records"
+        @click="confirmReorderByDate"
+      >
+        确认重排
+      </el-button>
+    </template>
+  </el-dialog>
 
   <el-dialog class="ledger-dialog" v-model="findReplaceVisible" title="查找替换" width="660px">
     <el-form label-position="top">
@@ -7005,6 +7235,16 @@ onBeforeUnmount(() => {
   white-space: pre-wrap;
 }
 
+:deep(.automatic-row-height .cell-field-value) {
+  max-height: none;
+  overflow: visible;
+}
+
+:deep(.automatic-row-height .el-table__cell) {
+  height: auto;
+  vertical-align: top;
+}
+
 .cell-field:not(.cell-field-editing) :deep(*) {
   user-select: none;
   -webkit-user-select: none;
@@ -7321,6 +7561,24 @@ onBeforeUnmount(() => {
   border-radius: 8px;
   padding: 12px;
   background: var(--app-surface-soft);
+}
+
+.reorder-preview-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.reorder-project-preview {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--app-border-light);
+  border-radius: 8px;
+  padding: 9px 11px;
+  font-size: 12px;
+}
+
+.reorder-project-preview span {
+  overflow-wrap: anywhere;
 }
 
 .replace-preview-panel ul,

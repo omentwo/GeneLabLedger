@@ -7,14 +7,20 @@ import type {
 } from "@/types/api";
 
 export const QUICK_ENTRY_SETTINGS_KEY = "quick_entry_settings";
+export const QUICK_ENTRY_FIELD_WIDTH_MIN = 160;
+export const QUICK_ENTRY_FIELD_WIDTH_MAX = 600;
+export const QUICK_ENTRY_FIELD_WIDTH_DEFAULT = 320;
 
 export interface QuickEntryProjectSettings {
   selectedFieldIds: string[];
   pinnedFieldIds: string[];
+  fieldWidth: number;
+  quickCreateFieldWidth: number;
+  autoAdvanceAfterUpdate: boolean;
 }
 
 export interface QuickEntrySettingsDocument {
-  version: 1;
+  version: 3;
   projects: Record<string, QuickEntryProjectSettings>;
 }
 
@@ -35,6 +41,21 @@ function stringList(value: unknown): string[] {
   ];
 }
 
+function clampedDimension(value: unknown, fallback: number, minimum: number, maximum: number): number {
+  const numeric = Number(value);
+  return Number.isFinite(numeric)
+    ? Math.min(maximum, Math.max(minimum, Math.round(numeric)))
+    : fallback;
+}
+
+function legacyLayoutValue(settings: Record<string, unknown>, key: "width" | "height"): unknown {
+  const layouts = settings.fieldLayouts;
+  if (!layouts || typeof layouts !== "object") return undefined;
+  const first = Object.values(layouts as Record<string, unknown>)
+    .find((layout) => layout && typeof layout === "object") as Record<string, unknown> | undefined;
+  return first?.[key];
+}
+
 export function normalizeQuickEntrySettings(value: unknown): QuickEntrySettingsDocument {
   const candidate = value && typeof value === "object" ? value as Record<string, unknown> : {};
   const rawProjects =
@@ -50,11 +71,24 @@ export function normalizeQuickEntrySettings(value: unknown): QuickEntrySettingsD
         {
           selectedFieldIds: stringList(settings.selectedFieldIds),
           pinnedFieldIds: stringList(settings.pinnedFieldIds),
+          fieldWidth: clampedDimension(
+            settings.fieldWidth ?? legacyLayoutValue(settings, "width"),
+            QUICK_ENTRY_FIELD_WIDTH_DEFAULT,
+            QUICK_ENTRY_FIELD_WIDTH_MIN,
+            QUICK_ENTRY_FIELD_WIDTH_MAX,
+          ),
+          quickCreateFieldWidth: clampedDimension(
+            settings.quickCreateFieldWidth ?? settings.fieldWidth ?? legacyLayoutValue(settings, "width"),
+            QUICK_ENTRY_FIELD_WIDTH_DEFAULT,
+            QUICK_ENTRY_FIELD_WIDTH_MIN,
+            QUICK_ENTRY_FIELD_WIDTH_MAX,
+          ),
+          autoAdvanceAfterUpdate: settings.autoAdvanceAfterUpdate !== false,
         },
       ]];
     }),
   );
-  return { version: 1, projects };
+  return { version: 3, projects };
 }
 
 export function isMandatoryQuickEntryField(field: FieldDefinition): boolean {
@@ -75,12 +109,11 @@ export function resolveQuickEntryProjectSettings(
     ? defaults.selectedFieldIds
     : orderedFields.filter((field) => field.is_core || !field.hidden).map((field) => field.id);
   const requestedSelected = saved ? saved.selectedFieldIds : defaultSelected;
-  const selectedSet = new Set(
-    [...mandatoryIds, ...requestedSelected].filter((fieldId) => validIds.has(fieldId)),
-  );
-  const selectedFieldIds = orderedFields
-    .filter((field) => selectedSet.has(field.id))
-    .map((field) => field.id);
+  const selectedFieldIds = stringList(requestedSelected).filter((fieldId) => validIds.has(fieldId));
+  mandatoryIds.forEach((fieldId) => {
+    if (!selectedFieldIds.includes(fieldId)) selectedFieldIds.push(fieldId);
+  });
+  const selectedSet = new Set(selectedFieldIds);
 
   const defaultPinned = defaults.pinnedFieldIds !== undefined
     ? defaults.pinnedFieldIds
@@ -89,15 +122,47 @@ export function resolveQuickEntryProjectSettings(
         .map((field) => field.id);
   const requestedPinned = saved ? saved.pinnedFieldIds : defaultPinned;
   const pinnedSet = new Set(requestedPinned);
-  const pinnedFieldIds = orderedFields
-    .filter(
-      (field) =>
-        selectedSet.has(field.id) &&
-        pinnedSet.has(field.id) &&
-        field.system_key !== "pathology_number",
-    )
-    .map((field) => field.id);
-  return { selectedFieldIds, pinnedFieldIds };
+  const pinnedFieldIds = stringList(requestedPinned).filter((fieldId) => {
+    const field = orderedFields.find((item) => item.id === fieldId);
+    return Boolean(field && selectedSet.has(fieldId) && pinnedSet.has(fieldId) && field.system_key !== "pathology_number");
+  });
+  return {
+    selectedFieldIds,
+    pinnedFieldIds,
+    fieldWidth: clampedDimension(
+      saved?.fieldWidth,
+      QUICK_ENTRY_FIELD_WIDTH_DEFAULT,
+      QUICK_ENTRY_FIELD_WIDTH_MIN,
+      QUICK_ENTRY_FIELD_WIDTH_MAX,
+    ),
+    quickCreateFieldWidth: clampedDimension(
+      saved?.quickCreateFieldWidth ?? saved?.fieldWidth,
+      QUICK_ENTRY_FIELD_WIDTH_DEFAULT,
+      QUICK_ENTRY_FIELD_WIDTH_MIN,
+      QUICK_ENTRY_FIELD_WIDTH_MAX,
+    ),
+    autoAdvanceAfterUpdate: saved?.autoAdvanceAfterUpdate !== false,
+  };
+}
+
+
+export interface ParsedCombinedPathologyNumber {
+  pathologyNumber: string;
+  blockNumber: string;
+  normalized: string;
+}
+
+export function parseCombinedPathologyNumber(value: string): ParsedCombinedPathologyNumber {
+  const normalized = value.trim().replace(/[－—–﹣]/g, "-");
+  const separatorIndex = normalized.lastIndexOf("-");
+  const pathologyNumber = normalized.slice(0, separatorIndex).trim();
+  const blockNumber = normalized.slice(separatorIndex + 1).trim();
+  if (separatorIndex <= 0 || !pathologyNumber || !blockNumber) {
+    throw new Error("请输入“病理号-蜡块号”，例如 A-20260907-3");
+  }
+  if (pathologyNumber.length > 160) throw new Error("病理号不能超过 160 个字符");
+  if (blockNumber.length > 80) throw new Error("蜡块号不能超过 80 个字符");
+  return { pathologyNumber, blockNumber, normalized: `${pathologyNumber}-${blockNumber}` };
 }
 
 export function quickEntryFieldValue(

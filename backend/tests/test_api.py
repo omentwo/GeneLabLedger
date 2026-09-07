@@ -879,3 +879,125 @@ def test_records_can_be_highlighted_individually_or_in_batch(
         json={"record_ids": [second["id"]], "highlight_color": "yellow"},
     )
     assert invalid.status_code == 422
+
+
+def test_quick_create_splits_the_final_dash_and_rejects_invalid_input(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    project_id = seeded_projects["TB"]["id"]
+    created = client.post(
+        "/api/records/quick-create",
+        json={
+            "project_id": project_id,
+            "combined_pathology_number": " A-20260907－3 ",
+        },
+    )
+    assert created.status_code == 201
+    assert created.json()["pathology_number"] == "A-20260907"
+    assert created.json()["block_number"] == "3"
+    assert created.json()["status"] == "待实验"
+
+    invalid = client.post(
+        "/api/records/quick-create",
+        json={"project_id": project_id, "combined_pathology_number": "A20260907"},
+    )
+    assert invalid.status_code == 422
+    assert "病理号-蜡块号" in invalid.json()["detail"]
+
+
+def test_reorder_by_date_preserves_other_slots_and_detects_conflicts(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    project_id = seeded_projects["TB"]["id"]
+
+    def create(pathology: str, block: str | None, experiment_date: str) -> dict:
+        response = client.post(
+            "/api/records",
+            json={
+                "project_id": project_id,
+                "pathology_number": pathology,
+                "block_number": block,
+                "status": "待实验",
+                "experiment_date": experiment_date,
+                "values": {},
+            },
+        )
+        assert response.status_code == 201
+        return response.json()
+
+    untouched_first = create("OTHER-1", None, "2026-09-06")
+    serial_ten = create("P2026-10", "2", "2026-09-07")
+    untouched_middle = create("OTHER-2", None, "2026-09-08")
+    serial_two_block_ten = create("P2026-2", "10", "2026-09-07")
+    serial_two_block_one = create("P2026-2", "1", "2026-09-07")
+    other_project_id = seeded_projects["BRAFV600E"]["id"]
+    other_project_record = client.post(
+        "/api/records",
+        json={
+            "project_id": other_project_id,
+            "pathology_number": "P2026-1",
+            "status": "待实验",
+            "experiment_date": "2026-09-07",
+            "values": {},
+        },
+    )
+    assert other_project_record.status_code == 201
+
+    preview = client.post(
+        "/api/records/reorder-by-date/preview",
+        json={"project_id": project_id, "experiment_date": "2026-09-07"},
+    )
+    assert preview.status_code == 200
+    preview_body = preview.json()
+    assert preview_body["affected_projects"] == 1
+    assert preview_body["affected_records"] == 3
+    assert preview_body["changed_records"] == 2
+    assert preview_body["projects"][0]["after"] == [
+        "P2026-2-1",
+        "P2026-2-10",
+        "P2026-10-2",
+    ]
+
+    changed = client.patch(
+        f"/api/records/{serial_ten['id']}",
+        json={"pathology_number": "P2026-11"},
+    )
+    assert changed.status_code == 200
+    conflict = client.post(
+        "/api/records/reorder-by-date/apply",
+        json={
+            "experiment_date": "2026-09-07",
+            "project_id": project_id,
+            "expected_order_hash": preview_body["expected_order_hash"],
+        },
+    )
+    assert conflict.status_code == 409
+
+    fresh_preview = client.post(
+        "/api/records/reorder-by-date/preview",
+        json={"project_id": project_id, "experiment_date": "2026-09-07"},
+    ).json()
+    applied = client.post(
+        "/api/records/reorder-by-date/apply",
+        json={
+            "experiment_date": "2026-09-07",
+            "project_id": project_id,
+            "expected_order_hash": fresh_preview["expected_order_hash"],
+        },
+    )
+    assert applied.status_code == 200
+    rows = client.get(f"/api/records?project_id={project_id}&limit=1000").json()["items"]
+    assert [row["id"] for row in rows] == [
+        untouched_first["id"],
+        serial_two_block_one["id"],
+        untouched_middle["id"],
+        serial_two_block_ten["id"],
+        serial_ten["id"],
+    ]
+    assert [row["position"] for row in rows] == [1, 2, 3, 4, 5]
+    other_rows = client.get(
+        f"/api/records?project_id={other_project_id}&limit=1000"
+    ).json()["items"]
+    assert [row["id"] for row in other_rows] == [other_project_record.json()["id"]]
