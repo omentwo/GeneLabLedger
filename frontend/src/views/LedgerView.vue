@@ -5,9 +5,7 @@ import {
   ArrowUp,
   ArrowDown,
   Brush,
-  Copy as CopyDocument,
   Trash2 as Delete,
-  FileText as Document,
   Download,
   Lock,
   Minus,
@@ -54,7 +52,6 @@ import {
   type LedgerDisplaySettings,
 } from "@/api/system";
 import {
-  assignRecordProject,
   applyRecordOperation,
   createRecord,
   deleteRecord,
@@ -116,6 +113,11 @@ import {
   normalizeDate,
   type GridFillMode,
 } from "@/utils/ledgerFill";
+import {
+  gridAutoScrollVector,
+  nextGridScrollOffset,
+  type GridAutoScrollDirection,
+} from "@/utils/gridAutoScroll";
 import { shanghaiDateKey } from "@/utils/datetime";
 import { desktopBridge } from "@/utils/desktop";
 import {
@@ -159,6 +161,12 @@ import {
   rememberLastLedgerProjectId,
   resolveInitialLedgerProjectId,
 } from "@/utils/ledgerProjectPreference";
+import {
+  applyVisibleRecordSelection,
+  recordMatchesSelectionScope,
+  type RecordSelectionAction,
+  type RecordSelectionScope,
+} from "@/utils/ledgerRecordSelection";
 import { exportWorkbook } from "@/utils/workbook";
 
 const route = useRoute();
@@ -180,6 +188,7 @@ const projectStripRef = ref<HTMLElement | null>(null);
 const tableRef = ref<{
   clearSelection: () => void;
   doLayout: () => void;
+  setScrollLeft?: (left: number) => void;
   setScrollTop?: (top: number) => void;
   toggleAllSelection: () => void;
   toggleRowSelection: (row: LedgerRow, selected?: boolean) => void;
@@ -209,7 +218,9 @@ type GridCellDragState = {
   mode: GridCellDragMode;
   initialSelectionKeys: Set<string>;
   tableElement: HTMLElement;
-  scrollDirection: -1 | 0 | 1;
+  lastAppliedFocus: GridCellPosition | null;
+  horizontalScrollDirection: GridAutoScrollDirection;
+  verticalScrollDirection: GridAutoScrollDirection;
 };
 type GridFillDragState = {
   pointerId: number;
@@ -232,7 +243,10 @@ const editingGridCell = ref<GridCellPosition | null>(null);
 const editingGridSnapshot = ref<GridCellEditSnapshot | null>(null);
 const gridSelectionDragging = ref(false);
 let gridCellDragState: GridCellDragState | null = null;
-let gridCellAutoScrollTimer: number | null = null;
+let gridCellDragFrame: number | null = null;
+let pendingGridCell: GridCellPosition | null = null;
+let gridCellAutoScrollFrame: number | null = null;
+let gridCellAutoScrollTimestamp: number | null = null;
 let gridCellWheelUpdateTimer: number | null = null;
 let gridCellEditFinishPromise: Promise<boolean> | null = null;
 let lastGridClipboard: { plainText: string; payload: GridClipboardPayload } | null = null;
@@ -326,7 +340,6 @@ const nativePreviewLoading = ref(false);
 const columnToolsVisible = ref(false);
 const columnToolsOpenFieldId = ref("");
 const columnToolsPosition = reactive({ left: 0, top: 0 });
-const automaticRowHeight = ref(true);
 const reorderDialogVisible = ref(false);
 const reorderDate = ref("");
 const reorderPreview = ref<RecordReorderByDatePreview | null>(null);
@@ -358,9 +371,6 @@ const ledgerContextMenu = ref<{
   target: LedgerContextMenuTarget;
 } | null>(null);
 const exportVisible = ref(false);
-const assignDialogVisible = ref(false);
-const operationRecord = ref<ProjectRecord | null>(null);
-const assignProjectId = ref("");
 const searchText = ref("");
 const searchStatus = ref("");
 const searchDate = ref("");
@@ -511,6 +521,7 @@ const pageSize = 200;
 const recordTotal = ref(0);
 const selectedRecordIds = ref(new Set<string>());
 const selectedRecordCache = new Map<string, ProjectRecord>();
+const recordSelectionScope = ref<RecordSelectionScope>("all");
 let ledgerInitialized = false;
 let projectLoadPromise: Promise<void> | null = null;
 let ledgerLayoutSaveQueue: Promise<void> = Promise.resolve();
@@ -630,7 +641,18 @@ const baseTableRows = computed<LedgerRow[]>(() => [...records.value, ...draftRow
 const tableRows = computed<LedgerRow[]>(() =>
   applyLedgerTableView(baseTableRows.value, fields.value, ledgerSort.value, ledgerFilters.value),
 );
-const gridCellSelectionCount = computed(() => selectedGridCellKeys.value.size);
+const tableRowIndexById = computed(
+  () => new Map(tableRows.value.map((row, index) => [row.id, index] as const)),
+);
+const gridCellSelectionCount = computed(() => {
+  const range = gridCellRange.value;
+  if (!range) return selectedGridCellKeys.value.size;
+  const normalized = normalizedGridRange(range);
+  return (
+    (normalized.rowEnd - normalized.rowStart + 1) *
+    (normalized.columnEnd - normalized.columnStart + 1)
+  );
+});
 const hasGridCellSelection = computed(() => gridCellSelectionCount.value > 0);
 const gridCellInternalEditing = computed(() => Boolean(editingGridCell.value));
 const columnToolsField = computed(
@@ -656,7 +678,7 @@ const contextMenuRow = computed<LedgerRow | null>(() => {
 const contextMenuCell = computed<GridCellPosition | null>(() => {
   const target = ledgerContextMenu.value?.target;
   if (!target?.fieldId) return null;
-  const rowIndex = tableRows.value.findIndex((row) => row.id === target.rowId);
+  const rowIndex = tableRowIndexById.value.get(target.rowId) ?? -1;
   const columnIndex = fields.value.findIndex((field) => field.id === target.fieldId);
   return rowIndex >= 0 && columnIndex >= 0 ? { rowIndex, columnIndex } : null;
 });
@@ -731,7 +753,7 @@ function captureGridIdentity(position: GridCellPosition | null): { rowId: string
 
 function restoreGridIdentity(identity: { rowId: string; fieldId: string } | null): GridCellPosition | null {
   if (!identity) return null;
-  const rowIndex = tableRows.value.findIndex((row) => row.id === identity.rowId);
+  const rowIndex = tableRowIndexById.value.get(identity.rowId) ?? -1;
   const columnIndex = fields.value.findIndex((field) => field.id === identity.fieldId);
   return rowIndex >= 0 && columnIndex >= 0 ? { rowIndex, columnIndex } : null;
 }
@@ -910,7 +932,7 @@ function gridCellFromElement(element: EventTarget | null): GridCellPosition | nu
   const rowId = editor.dataset.rowId;
   const columnIndex = Number(editor.dataset.fieldIndex);
   if (!rowId || !Number.isInteger(columnIndex) || columnIndex < 0) return null;
-  const rowIndex = tableRows.value.findIndex((row) => row.id === rowId);
+  const rowIndex = tableRowIndexById.value.get(rowId) ?? -1;
   if (rowIndex < 0 || columnIndex >= fields.value.length) return null;
   return { rowIndex, columnIndex };
 }
@@ -989,6 +1011,16 @@ function selectedGridCellPositions(): GridCellPosition[] {
 }
 
 function isGridCellSelected(position: GridCellPosition): boolean {
+  const range = gridCellRange.value;
+  if (range) {
+    const normalized = normalizedGridRange(range);
+    return (
+      position.rowIndex >= normalized.rowStart &&
+      position.rowIndex <= normalized.rowEnd &&
+      position.columnIndex >= normalized.columnStart &&
+      position.columnIndex <= normalized.columnEnd
+    );
+  }
   const key = gridCellKey(position);
   return Boolean(key && selectedGridCellKeys.value.has(key));
 }
@@ -1166,30 +1198,45 @@ async function handleLedgerHeaderClick(
 }
 
 const gridCellClassName = computed(() => {
-  const currentRows = tableRows.value;
+  const currentRowIndexes = tableRowIndexById.value;
   const currentFields = fields.value;
   const active = activeGridCell.value;
   const editing = editingGridCell.value;
   const selectedKeys = selectedGridCellKeys.value;
+  const selectedRange = gridCellRange.value
+    ? normalizedGridRange(gridCellRange.value)
+    : null;
   const fillPreview = gridFillPreviewRange.value;
   const fillSource = gridFillPreviewSource.value;
   return ({ row, columnIndex }: { row: LedgerRow; columnIndex: number }): string => {
     const fieldIndex = columnIndex - 2;
     if (fieldIndex < 0 || fieldIndex >= currentFields.length) return "";
-    const rowIndex = currentRows.findIndex((candidate) => candidate.id === row.id);
+    const rowIndex = currentRowIndexes.get(row.id) ?? -1;
     if (rowIndex < 0) return "";
     const classes: string[] = [];
     const field = currentFields[fieldIndex];
     if (field && row.cell_highlight_colors?.[field.id]) {
       classes.push("cell-highlighted");
     }
-    if (field && selectedKeys.has(`${row.id}${GRID_CELL_KEY_SEPARATOR}${field.id}`)) {
+    const selectedByRange = Boolean(
+      selectedRange &&
+      rowIndex >= selectedRange.rowStart &&
+      rowIndex <= selectedRange.rowEnd &&
+      fieldIndex >= selectedRange.columnStart &&
+      fieldIndex <= selectedRange.columnEnd,
+    );
+    if (
+      field &&
+      (selectedRange
+        ? selectedByRange
+        : selectedKeys.has(`${row.id}${GRID_CELL_KEY_SEPARATOR}${field.id}`))
+    ) {
       classes.push("grid-cell-selected");
     }
-    if (active?.rowIndex === rowIndex && active.columnIndex === fieldIndex) {
+    if (active?.rowIndex === rowIndex && active?.columnIndex === fieldIndex) {
       classes.push("grid-cell-active");
     }
-    if (editing?.rowIndex === rowIndex && editing.columnIndex === fieldIndex) {
+    if (editing?.rowIndex === rowIndex && editing?.columnIndex === fieldIndex) {
       classes.push("grid-cell-editing");
     }
     if (
@@ -1404,6 +1451,7 @@ function handleGridFocusIn(event: FocusEvent): void {
 
 function stopGridCellDrag(resetClickSuppression = true): void {
   clearGridCellAutoScroll();
+  clearGridCellDragFrame();
   clearGridCellWheelUpdate();
   document.removeEventListener("pointermove", handleGridPointerMove);
   document.removeEventListener("pointerup", handleGridPointerUp, true);
@@ -1416,6 +1464,39 @@ function stopGridCellDrag(resetClickSuppression = true): void {
       suppressGridClick = false;
     }, 0);
   }
+}
+
+function clearGridCellDragFrame(): void {
+  if (gridCellDragFrame !== null) window.cancelAnimationFrame(gridCellDragFrame);
+  gridCellDragFrame = null;
+  pendingGridCell = null;
+}
+
+function flushGridCellDragFrame(): void {
+  if (gridCellDragFrame !== null) window.cancelAnimationFrame(gridCellDragFrame);
+  gridCellDragFrame = null;
+  const cell = pendingGridCell;
+  pendingGridCell = null;
+  if (cell) updateGridCellDrag(cell);
+}
+
+function materializeGridCellRangeSelection(): void {
+  const range = gridCellRange.value;
+  if (!range) return;
+  selectedGridCellKeys.value = new Set(
+    gridCellPositionsForRange(range).map(gridCellKey).filter(Boolean),
+  );
+}
+
+function scheduleGridCellDragUpdate(cell: GridCellPosition): void {
+  pendingGridCell = cell;
+  if (gridCellDragFrame !== null) return;
+  gridCellDragFrame = window.requestAnimationFrame(() => {
+    gridCellDragFrame = null;
+    const nextCell = pendingGridCell;
+    pendingGridCell = null;
+    if (nextCell) updateGridCellDrag(nextCell);
+  });
 }
 
 function gridCellAtPoint(x: number, y: number): GridCellPosition | null {
@@ -1432,9 +1513,11 @@ function gridTableBodyScrollElement(tableElement: HTMLElement): HTMLElement | nu
 }
 
 function clearGridCellAutoScroll(): void {
-  if (gridCellAutoScrollTimer === null) return;
-  window.clearInterval(gridCellAutoScrollTimer);
-  gridCellAutoScrollTimer = null;
+  if (gridCellAutoScrollFrame !== null) {
+    window.cancelAnimationFrame(gridCellAutoScrollFrame);
+  }
+  gridCellAutoScrollFrame = null;
+  gridCellAutoScrollTimestamp = null;
 }
 
 function clearGridCellWheelUpdate(): void {
@@ -1460,39 +1543,65 @@ function updateGridCellAutoScroll(event: PointerEvent): void {
   const body = gridTableBodyScrollElement(state.tableElement);
   const rect = body?.getBoundingClientRect() ?? state.tableElement.getBoundingClientRect();
   const edgeSize = 42;
-  let direction: -1 | 0 | 1 = 0;
-  if (event.clientX >= rect.left && event.clientX <= rect.right) {
-    if (event.clientY < rect.top + edgeSize) direction = -1;
-    else if (event.clientY > rect.bottom - edgeSize) direction = 1;
-  }
-  if (state.scrollDirection === direction) return;
+  const direction = gridAutoScrollVector(event.clientX, event.clientY, rect, edgeSize);
+  if (
+    state.horizontalScrollDirection === direction.horizontal &&
+    state.verticalScrollDirection === direction.vertical
+  ) return;
 
-  state.scrollDirection = direction;
+  state.horizontalScrollDirection = direction.horizontal;
+  state.verticalScrollDirection = direction.vertical;
   clearGridCellAutoScroll();
-  if (direction === 0) return;
+  if (direction.horizontal === 0 && direction.vertical === 0) return;
 
-  gridCellAutoScrollTimer = window.setInterval(() => {
+  const scrollFrame = (timestamp: number): void => {
+    gridCellAutoScrollFrame = null;
     const currentState = gridCellDragState;
     if (!currentState) {
       clearGridCellAutoScroll();
       return;
     }
-    const currentBody = gridTableBodyScrollElement(currentState.tableElement);
-    const currentTop = currentBody?.scrollTop ?? 0;
-    const maxTop = currentBody
-      ? Math.max(0, currentBody.scrollHeight - currentBody.clientHeight)
-      : 0;
-    const nextTop = Math.max(0, Math.min(maxTop, currentTop + direction * 24));
-    if (nextTop === currentTop) {
-      currentState.scrollDirection = 0;
+    const horizontalDirection = currentState.horizontalScrollDirection;
+    const verticalDirection = currentState.verticalScrollDirection;
+    if (horizontalDirection === 0 && verticalDirection === 0) {
       clearGridCellAutoScroll();
       return;
     }
-    if (tableRef.value?.setScrollTop) tableRef.value.setScrollTop(nextTop);
-    else if (currentBody) currentBody.scrollTop = nextTop;
+    const elapsed = gridCellAutoScrollTimestamp === null
+      ? 1000 / 60
+      : Math.min(50, timestamp - gridCellAutoScrollTimestamp);
+    gridCellAutoScrollTimestamp = timestamp;
+    const step = 480 * elapsed / 1000;
+    const currentBody = gridTableBodyScrollElement(currentState.tableElement);
+    const currentLeft = currentBody?.scrollLeft ?? 0;
+    const currentTop = currentBody?.scrollTop ?? 0;
+    const maxLeft = currentBody
+      ? Math.max(0, currentBody.scrollWidth - currentBody.clientWidth)
+      : 0;
+    const maxTop = currentBody
+      ? Math.max(0, currentBody.scrollHeight - currentBody.clientHeight)
+      : 0;
+    const nextLeft = nextGridScrollOffset(currentLeft, maxLeft, horizontalDirection, step);
+    const nextTop = nextGridScrollOffset(currentTop, maxTop, verticalDirection, step);
+    if (nextLeft === currentLeft && nextTop === currentTop) {
+      currentState.horizontalScrollDirection = 0;
+      currentState.verticalScrollDirection = 0;
+      clearGridCellAutoScroll();
+      return;
+    }
+    if (nextLeft !== currentLeft) {
+      if (tableRef.value?.setScrollLeft) tableRef.value.setScrollLeft(nextLeft);
+      else if (currentBody) currentBody.scrollLeft = nextLeft;
+    }
+    if (nextTop !== currentTop) {
+      if (tableRef.value?.setScrollTop) tableRef.value.setScrollTop(nextTop);
+      else if (currentBody) currentBody.scrollTop = nextTop;
+    }
     const cell = gridCellAtDragPoint(currentState);
     if (cell) updateGridCellDrag(cell);
-  }, 50);
+    gridCellAutoScrollFrame = window.requestAnimationFrame(scrollFrame);
+  };
+  gridCellAutoScrollFrame = window.requestAnimationFrame(scrollFrame);
 }
 
 function handleGridWheelDuringDrag(event: WheelEvent): void {
@@ -1515,7 +1624,10 @@ function handleGridWheelDuringDrag(event: WheelEvent): void {
 function updateGridCellDrag(cell: GridCellPosition): void {
   const state = gridCellDragState;
   if (!state) return;
-  state.focus = clampGridCell(cell);
+  const focus = clampGridCell(cell);
+  if (sameGridCell(state.lastAppliedFocus, focus)) return;
+  state.lastAppliedFocus = focus;
+  state.focus = focus;
   activeGridCell.value = state.focus;
   const range = {
     anchor: { ...state.anchor },
@@ -1527,12 +1639,9 @@ function updateGridCellDrag(cell: GridCellPosition): void {
     selectedGridCellKeys.value = keys;
     gridCellRange.value = null;
   } else {
-    replaceGridCellSelection(
-      gridCellPositionsForRange(range),
-      state.focus,
-      state.anchor,
-      range,
-    );
+    activeGridCell.value = state.focus;
+    gridSelectionAnchor.value = state.anchor;
+    gridCellRange.value = range;
   }
 }
 
@@ -1557,13 +1666,17 @@ function handleGridPointerMove(event: PointerEvent): void {
     event.preventDefault();
   }
   const cell = gridCellAtPoint(event.clientX, event.clientY);
-  if (cell) updateGridCellDrag(cell);
+  if (cell) scheduleGridCellDragUpdate(cell);
   updateGridCellAutoScroll(event);
 }
 
 function handleGridPointerUp(event: PointerEvent): void {
   if (!gridCellDragState || gridCellDragState.pointerId !== event.pointerId) return;
-  if (gridCellDragState.dragging) event.preventDefault();
+  if (gridCellDragState.dragging) {
+    event.preventDefault();
+    flushGridCellDragFrame();
+    if (gridCellDragState.mode !== "add") materializeGridCellRangeSelection();
+  }
   stopGridCellDrag();
 }
 
@@ -1820,7 +1933,9 @@ function handleGridPointerDown(event: PointerEvent): void {
     mode,
     initialSelectionKeys: new Set(selectedGridCellKeys.value),
     tableElement,
-    scrollDirection: 0,
+    lastAppliedFocus: null,
+    horizontalScrollDirection: 0,
+    verticalScrollDirection: 0,
   };
   if (mode === "shift") gridCellDragState.anchor = clampGridCell(anchor);
   document.addEventListener("pointermove", handleGridPointerMove, { passive: false });
@@ -2220,7 +2335,7 @@ function contextRowCopySelection(row: LedgerRow): {
   positions: GridCellPosition[];
   active: GridCellPosition;
 } | null {
-  const rowIndex = tableRows.value.findIndex((candidate) => candidate.id === row.id);
+  const rowIndex = tableRowIndexById.value.get(row.id) ?? -1;
   if (rowIndex < 0 || !fields.value.length) return null;
   const positions = fields.value.map((_, columnIndex) => ({ rowIndex, columnIndex }));
   return { positions, active: positions[0]! };
@@ -2364,7 +2479,7 @@ function insertDraftRowsAt(
   draftRows.value.push(...inserted);
 
   void nextTick(() => {
-    const rowIndex = tableRows.value.findIndex((row) => row.id === inserted[0]?.id);
+    const rowIndex = tableRowIndexById.value.get(inserted[0]?.id ?? "") ?? -1;
     const columnIndex = fields.value.findIndex(
       (field) => field.system_key === "pathology_number",
     );
@@ -2524,7 +2639,7 @@ function applySelectionDragRange(state: SelectionDragState, index: number): void
 
   affectedIndexes.forEach((rowIndex) => {
     const row = tableRows.value[rowIndex];
-    if (!row || isDraft(row)) return;
+    if (!row || !recordRowSelectable(row)) return;
     const shouldSelect =
       rowIndex >= nextRange.start && rowIndex <= nextRange.end
         ? state.mode
@@ -2604,7 +2719,7 @@ function handleSelectionPointerDown(event: PointerEvent): void {
   const selectionCell = target?.closest("td.el-table-column--selection");
   if (!selectionCell || !target?.closest(".el-checkbox__input, .el-checkbox__original")) return;
   const rowInfo = selectionRowFromElement(selectionCell);
-  if (!rowInfo || isDraft(rowInfo.row)) return;
+  if (!rowInfo || !recordRowSelectable(rowInfo.row)) return;
   const tableElement = selectionCell.closest(".el-table");
   if (!(tableElement instanceof HTMLElement)) return;
 
@@ -4174,26 +4289,55 @@ function openGlobalSearchResult(record: ProjectRecord): void {
   }
 }
 
-function invertVisibleSelection(): void {
-  const selectedIds = new Set(selectedRecordIds.value);
-  const next = new Set(selectedIds);
-  const nextVisible: ProjectRecord[] = [];
+function recordRowSelectable(row: LedgerRow): boolean {
+  return !isDraft(row) && recordMatchesSelectionScope(row, recordSelectionScope.value);
+}
+
+async function selectionScopeAllows(action: RecordSelectionAction): Promise<boolean> {
+  if (recordSelectionScope.value === "all" || !selectedRecordIds.value.size) return true;
+  try {
+    const containsLockedRecord = (await selectedTargetRecords()).some((record) => record.locked);
+    if (!containsLockedRecord) return true;
+    ElMessage.warning(
+      `当前选择包含锁定记录，无法${action === "select-all" ? "全选" : "反选"}非锁定记录，请切换到“全部记录”并取消锁定记录的选择`,
+    );
+    return false;
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "检查已选记录失败");
+    return false;
+  }
+}
+
+async function applyVisibleSelectionAction(action: RecordSelectionAction): Promise<void> {
+  if (!(await selectionScopeAllows(action))) return;
+  const visibleRecords = tableRows.value.filter((row) => !isDraft(row));
+  const next = applyVisibleRecordSelection({
+    visibleRecords,
+    selectedIds: selectedRecordIds.value,
+    scope: recordSelectionScope.value,
+    action,
+  });
+  const nextVisible = visibleRecords.filter((record) => next.has(record.id));
   tableRef.value?.clearSelection();
-  tableRows.value.forEach((row) => {
-    if (isDraft(row)) return;
-    const selected = !selectedIds.has(row.id);
-    tableRef.value?.toggleRowSelection(row, selected);
+  visibleRecords.forEach((record) => {
+    const selected = next.has(record.id);
     if (selected) {
-      next.add(row.id);
-      nextVisible.push(row);
-      selectedRecordCache.set(row.id, row);
+      tableRef.value?.toggleRowSelection(record, true);
+      selectedRecordCache.set(record.id, record);
     } else {
-      next.delete(row.id);
-      selectedRecordCache.delete(row.id);
+      selectedRecordCache.delete(record.id);
     }
   });
   selectedRecordIds.value = next;
   selectedRecords.value = nextVisible;
+}
+
+function selectVisibleRecords(): void {
+  void applyVisibleSelectionAction("select-all");
+}
+
+function invertVisibleSelection(): void {
+  void applyVisibleSelectionAction("invert");
 }
 
 function rowCellStyle({
@@ -4654,13 +4798,6 @@ function bestFitAllColumns(event?: MouseEvent): void {
   ElMessage.success("已按当前页内容调整所有可见列宽");
 }
 
-function toggleAutomaticRowHeight(event?: MouseEvent): void {
-  automaticRowHeight.value = !automaticRowHeight.value;
-  (event?.currentTarget as HTMLElement | null)?.blur();
-  ElMessage.success(automaticRowHeight.value ? "已启用最佳行高" : "已关闭最佳行高");
-  void nextTick(() => tableRef.value?.doLayout());
-}
-
 function handleHeaderResize(
   newWidth: number,
   _oldWidth: number,
@@ -5060,65 +5197,6 @@ async function toggleRecordLock(record: ProjectRecord): Promise<void> {
   }
 }
 
-function openAssign(record: ProjectRecord): void {
-  operationRecord.value = record;
-  assignProjectId.value =
-    appStore.projects.find((project) => project.id !== record.project_id)?.id ?? "";
-  assignDialogVisible.value = true;
-}
-
-async function confirmAssign(): Promise<void> {
-  if (!operationRecord.value || !assignProjectId.value) return;
-  try {
-    const assigned = await assignRecordProject(operationRecord.value.id, assignProjectId.value);
-    invalidateProjectRecordCache(assigned.project_id);
-    // The source record stays in the current project; the operation creates a
-    // new record in the target project.  Keeping the target project on the
-    // history entry lets undo/redo switch there automatically.
-    pushHistory("加入其他项目", [], [assigned], assigned.project_id);
-    assignDialogVisible.value = false;
-    ElMessage.success("已在目标项目建立独立台账记录");
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "加入其他项目失败");
-  }
-}
-
-async function removeRecord(record: ProjectRecord): Promise<void> {
-  if (record.locked) {
-    ElMessage.warning("记录已锁定，请先解锁");
-    return;
-  }
-  try {
-    await ElMessageBox.confirm(
-      `确认删除病理号 ${record.pathology_number} 在 ${record.project_name} 项目中的台账记录？`,
-      "删除台账记录",
-      {
-        confirmButtonText: "删除",
-        cancelButtonText: "取消",
-        type: "warning",
-      },
-    );
-    const before = snapshotRecord(record);
-    await deleteRecord(record.id);
-    tableRef.value?.toggleRowSelection(record, false);
-    selectedRecords.value = selectedRecords.value.filter((item) => item.id !== record.id);
-    const nextSelectedRecordIds = new Set(selectedRecordIds.value);
-    nextSelectedRecordIds.delete(record.id);
-    selectedRecordIds.value = nextSelectedRecordIds;
-    selectedRecordCache.delete(record.id);
-    invalidateProjectRecordCache(record.project_id);
-    records.value = records.value.filter((item) => item.id !== record.id);
-    recordTotal.value = Math.max(0, recordTotal.value - 1);
-    activeGridCell.value = null;
-    clearGridCellSelection();
-    pushHistory("删除台账记录", [before], [], before.project_id);
-    ElMessage.success("台账记录已删除");
-  } catch (error) {
-    if (error === "cancel" || error === "close") return;
-    ElMessage.error(error instanceof Error ? error.message : "记录删除失败");
-  }
-}
-
 async function exportCurrentProject(): Promise<void> {
   if (!currentProject.value) return;
   try {
@@ -5265,7 +5343,11 @@ watch(activeProjectId, async (projectId, previousProjectId) => {
 }, { flush: "sync" });
 
 async function initializeLedger(): Promise<void> {
-  await appStore.bootstrap();
+  try {
+    await appStore.bootstrap();
+  } catch {
+    if (!appStore.projects.length) return;
+  }
   await loadLedgerLayoutSettings();
   const queryProject =
     typeof route.query.project === "string" ? route.query.project : "";
@@ -5454,9 +5536,6 @@ onBeforeUnmount(() => {
               排序/筛选
             </el-button>
             <el-button @click="bestFitAllColumns($event)">最佳列宽</el-button>
-            <el-button @click="toggleAutomaticRowHeight($event)">
-              最佳行高
-            </el-button>
             <el-select
               v-model="previewEngine"
               class="ledger-preview-engine"
@@ -5563,9 +5642,16 @@ onBeforeUnmount(() => {
     </section>
 
     <section v-if="!globalSearchActive" class="selection-bar">
-      <strong v-if="hasGridCellSelection">已选 {{ gridCellSelectionCount }} 个单元格</strong>
-      <strong v-else>已选 {{ selectedCount }} 条记录</strong>
+      <el-select
+        v-model="recordSelectionScope"
+        class="record-selection-scope"
+        aria-label="记录选择范围"
+      >
+        <el-option label="全部记录" value="all" />
+        <el-option label="非锁定记录" value="unlocked" />
+      </el-select>
       <div class="selection-quick-actions" aria-label="快速选择">
+        <el-button @click="selectVisibleRecords">全选</el-button>
         <el-button @click="invertVisibleSelection">反选</el-button>
       </div>
       <el-button
@@ -5648,7 +5734,6 @@ onBeforeUnmount(() => {
         :class="{
           'selection-dragging': selectionDragging,
           'grid-selection-dragging': gridSelectionDragging,
-          'automatic-row-height': automaticRowHeight,
         }"
         v-loading="loading"
         element-loading-text="正在切换或读取项目数据…"
@@ -5679,7 +5764,7 @@ onBeforeUnmount(() => {
           fixed="left"
           align="center"
           reserve-selection
-          :selectable="(row: LedgerRow) => !isDraft(row)"
+          :selectable="recordRowSelectable"
         />
         <el-table-column width="42" fixed="left" align="center">
           <template #default="{ row }: { row: LedgerRow }">
@@ -5814,51 +5899,6 @@ onBeforeUnmount(() => {
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="86" fixed="right" align="center" header-align="center">
-          <template #default="{ row }: { row: LedgerRow }">
-            <span v-if="isDraft(row)" class="draft-row-hint">
-              待保存
-            </span>
-            <div v-else class="row-actions">
-              <el-button
-                link
-                :icon="row.locked ? Unlock : Lock"
-                :title="row.locked ? '解锁记录' : '锁定记录'"
-                :aria-label="row.locked ? '解锁记录' : '锁定记录'"
-                @click="toggleRecordLock(row)"
-              />
-              <el-dropdown trigger="click">
-                <el-button link type="primary" aria-label="更多操作">更多</el-button>
-                <template #dropdown>
-                  <el-dropdown-menu>
-                    <el-dropdown-item :icon="CopyDocument" @click="openAssign(row)">
-                      加入其他项目
-                    </el-dropdown-item>
-                    <el-dropdown-item :icon="Brush" @click="openHighlightDialog([row])">
-                      设置底色
-                    </el-dropdown-item>
-                    <el-dropdown-item :icon="Document">
-                      <RouterLink
-                        class="dropdown-router-link"
-                        :to="{ path: '/reports', query: { project: row.project_id, record: row.id } }"
-                      >
-                        打印报告
-                      </RouterLink>
-                    </el-dropdown-item>
-                    <el-dropdown-item
-                      :icon="Delete"
-                      divided
-                      :disabled="row.locked"
-                      @click="removeRecord(row)"
-                    >
-                      删除记录
-                    </el-dropdown-item>
-                  </el-dropdown-menu>
-                </template>
-              </el-dropdown>
-            </div>
-          </template>
-        </el-table-column>
       </el-table>
       </div>
       <div
@@ -6032,15 +6072,18 @@ onBeforeUnmount(() => {
           </button>
         </section>
         <div class="ledger-zoom-footer">
-          <div v-if="selectedGridStats.selected" class="ledger-selection-stats">
-            <span>选中 {{ selectedGridStats.selected }}</span>
-            <span>非空 {{ selectedGridStats.nonEmpty }}</span>
-            <span v-if="selectedGridStats.numericCount">数字 {{ selectedGridStats.numericCount }}</span>
-            <span v-if="selectedGridStats.numericCount">合计 {{ selectedGridStats.sum }}</span>
-            <span v-if="selectedGridStats.average !== null">平均 {{ selectedGridStats.average.toFixed(2) }}</span>
-            <span v-if="selectedGridStats.min !== null">最小 {{ selectedGridStats.min }}</span>
-            <span v-if="selectedGridStats.max !== null">最大 {{ selectedGridStats.max }}</span>
-            <span>状态 {{ cellSaveStatusLabels[selectedGridStats.saveStatus] }}</span>
+          <div v-if="hasGridCellSelection || selectedCount" class="ledger-selection-stats">
+            <span v-if="hasGridCellSelection">已选 {{ gridCellSelectionCount }} 个单元格</span>
+            <span v-else>已选 {{ selectedCount }} 条记录</span>
+            <template v-if="hasGridCellSelection">
+              <span>非空 {{ selectedGridStats.nonEmpty }}</span>
+              <span v-if="selectedGridStats.numericCount">数字 {{ selectedGridStats.numericCount }}</span>
+              <span v-if="selectedGridStats.numericCount">合计 {{ selectedGridStats.sum }}</span>
+              <span v-if="selectedGridStats.average !== null">平均 {{ selectedGridStats.average.toFixed(2) }}</span>
+              <span v-if="selectedGridStats.min !== null">最小 {{ selectedGridStats.min }}</span>
+              <span v-if="selectedGridStats.max !== null">最大 {{ selectedGridStats.max }}</span>
+              <span>状态 {{ cellSaveStatusLabels[selectedGridStats.saveStatus] }}</span>
+            </template>
           </div>
           <el-pagination
             v-model:current-page="currentPage"
@@ -6215,33 +6258,6 @@ onBeforeUnmount(() => {
       </el-button>
     </div>
   </div>
-
-  <el-dialog class="ledger-dialog" v-model="assignDialogVisible" title="复制为其他项目记录" width="480px">
-    <p class="dialog-note">
-      目标项目会建立一个全新的记录 UUID。病理号只是普通字段，相同病理号之间不会联动。
-    </p>
-    <el-form label-position="top">
-      <el-form-item label="病理号">
-        <el-input :model-value="operationRecord?.pathology_number" readonly />
-      </el-form-item>
-      <el-form-item label="目标项目">
-        <el-select v-model="assignProjectId" style="width: 100%">
-          <el-option
-            v-for="project in appStore.projects.filter(
-              (item) => item.id !== operationRecord?.project_id,
-            )"
-            :key="project.id"
-            :label="project.name"
-            :value="project.id"
-          />
-        </el-select>
-      </el-form-item>
-    </el-form>
-    <template #footer>
-      <el-button @click="assignDialogVisible = false">取消</el-button>
-      <el-button type="primary" @click="confirmAssign">确认加入</el-button>
-    </template>
-  </el-dialog>
 
   <el-dialog
     class="ledger-dialog"
@@ -6974,12 +6990,9 @@ onBeforeUnmount(() => {
   scrollbar-width: thin;
 }
 
-.selection-bar strong {
-  color: var(--app-primary-hover);
-  flex: 0 0 auto;
-  margin-right: 4px;
-  font-size: 13px;
-  white-space: nowrap;
+.record-selection-scope {
+  width: 132px;
+  flex: 0 0 132px;
 }
 
 .selection-quick-actions {
@@ -7100,54 +7113,6 @@ onBeforeUnmount(() => {
   font-size: 17px;
 }
 
-.row-actions {
-  display: flex;
-  height: 24px;
-  align-items: center;
-  justify-content: center;
-  gap: 1px;
-  flex-wrap: nowrap;
-  white-space: nowrap;
-  vertical-align: middle;
-}
-
-.row-actions > * {
-  flex: 0 0 auto;
-}
-
-.row-actions :deep(.el-button),
-.row-actions :deep(.el-dropdown .el-button) {
-  display: inline-flex;
-  width: 20px;
-  height: 20px;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  min-width: 20px;
-  line-height: 1;
-  vertical-align: middle;
-}
-
-.row-actions :deep(.el-dropdown) {
-  display: inline-flex;
-  align-items: center;
-}
-
-.row-actions :deep(.el-dropdown .el-button) {
-  width: 38px;
-  min-width: 38px;
-}
-
-.dropdown-router-link {
-  color: inherit;
-  text-decoration: none;
-}
-
-.draft-row-hint {
-  color: var(--app-muted);
-  font-size: 12px;
-}
-
 .cell-field {
   position: relative;
   display: flex;
@@ -7224,8 +7189,8 @@ onBeforeUnmount(() => {
   display: block;
   width: var(--ledger-editor-width, 100%);
   min-height: var(--ledger-editor-height, 32px);
-  max-height: 100px;
-  overflow: hidden;
+  max-height: none;
+  overflow: visible;
   padding: max(1px, calc((var(--ledger-editor-height, 32px) - 20px) / 2)) 8px;
   font-family: var(--ledger-font-family, inherit);
   font-size: var(--ledger-font-size, 14px);
@@ -7235,12 +7200,7 @@ onBeforeUnmount(() => {
   white-space: pre-wrap;
 }
 
-:deep(.automatic-row-height .cell-field-value) {
-  max-height: none;
-  overflow: visible;
-}
-
-:deep(.automatic-row-height .el-table__cell) {
+:deep(.ledger-table-card .el-table__cell) {
   height: auto;
   vertical-align: top;
 }
@@ -7510,6 +7470,15 @@ onBeforeUnmount(() => {
 :deep(.ledger-table-card .el-table__body-wrapper .el-scrollbar__bar.is-horizontal) {
   height: 10px;
   bottom: 2px;
+}
+
+:deep(.ledger-table-card .el-table__body-wrapper > .el-scrollbar) {
+  box-sizing: border-box;
+  padding-bottom: 14px;
+}
+
+:deep(.ledger-table-card .el-table__body-wrapper .el-scrollbar__bar.is-vertical) {
+  bottom: 14px;
 }
 
 :deep(.ledger-table-card .el-table__body-wrapper .el-scrollbar__thumb) {

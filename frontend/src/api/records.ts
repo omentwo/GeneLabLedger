@@ -233,16 +233,6 @@ export function setRecordLock(
   });
 }
 
-export function assignRecordProject(
-  recordId: string,
-  targetProjectId: string,
-): Promise<ProjectRecord> {
-  return apiRequest<ProjectRecord>(`/records/${recordId}/assign-project`, {
-    method: "POST",
-    body: jsonBody({ target_project_id: targetProjectId }),
-  });
-}
-
 export function deleteRecord(recordId: string): Promise<void> {
   return apiRequest<void>(`/records/${recordId}`, { method: "DELETE" });
 }

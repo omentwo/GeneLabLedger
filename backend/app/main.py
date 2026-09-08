@@ -76,7 +76,7 @@ def create_app(
 
     app = FastAPI(
         title=app_settings.app_name,
-        version="0.12.0",
+        version="0.12.1",
         lifespan=lifespan,
     )
     app.add_middleware(

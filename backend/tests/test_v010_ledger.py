@@ -7,8 +7,11 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
 
-from app.database import Database
+from app.api import records as records_api
+from app.database import Database, begin_immediate_write
+from app.models import ProjectRecord
 from app.services import cell_batches
 
 
@@ -675,6 +678,56 @@ def test_cell_batch_preserves_order_for_multiple_drafts_before_an_anchor(
     assert [record["position"] for record in listed] == [1, 2, 3, 4]
 
 
+def test_concurrent_append_reserves_position_before_reading(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_id = seeded_projects["TB"]["id"]
+    begin_attempted = threading.Event()
+    original_begin = records_api.begin_immediate_write
+
+    def observed_begin(session: Session) -> None:
+        begin_attempted.set()
+        original_begin(session)
+
+    monkeypatch.setattr(records_api, "begin_immediate_write", observed_begin)
+    database = client.app.state.database
+    with database.session_factory() as blocking_session:
+        begin_immediate_write(blocking_session)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            pending = executor.submit(
+                client.post,
+                "/api/records",
+                json={
+                    "project_id": project_id,
+                    "pathology_number": "CONCURRENT-SECOND",
+                    "status": "待实验",
+                    "experiment_date": None,
+                    "values": {},
+                },
+            )
+            assert begin_attempted.wait(timeout=5)
+            assert not pending.done()
+            blocking_session.add(
+                ProjectRecord(
+                    project_id=project_id,
+                    position=1,
+                    pathology_number="CONCURRENT-FIRST",
+                )
+            )
+            blocking_session.commit()
+            response = pending.result(timeout=5)
+
+    assert response.status_code == 201, response.text
+    listed = client.get(f"/api/records?project_id={project_id}&limit=1000").json()["items"]
+    assert [record["pathology_number"] for record in listed] == [
+        "CONCURRENT-FIRST",
+        "CONCURRENT-SECOND",
+    ]
+    assert [record["position"] for record in listed] == [1, 2]
+
+
 def test_dynamic_query_pagination_sort_filters_and_all_ids(
     client: TestClient,
     seeded_projects: dict[str, dict],
@@ -717,6 +770,71 @@ def test_dynamic_query_pagination_sort_filters_and_all_ids(
     all_ids = client.post("/api/records/query/ids", json={**payload, "limit": 1}).json()
     assert all_ids["total"] == 3
     assert len(all_ids["record_ids"]) == 3
+
+
+def test_numeric_query_preserves_decimal_precision(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    project_id = seeded_projects["TB"]["id"]
+    number = create_custom_field(client, project_id, label="高精度定量", data_type="number")
+    values = [
+        ("PRECISE-NEGATIVE", "-1e100"),
+        ("PRECISE-FRACTION-LOW", "0.123456789012345678"),
+        ("PRECISE-FRACTION-HIGH", "0.123456789012345679"),
+        ("PRECISE-INTEGER-LOW", "9007199254740992"),
+        ("PRECISE-INTEGER-HIGH", "9007199254740993"),
+    ]
+    for pathology, value in values:
+        create_record(client, project_id, pathology, values={number["id"]: value})
+
+    base_query = {
+        "project_id": project_id,
+        "search": "PRECISE-",
+        "field_filters": [],
+        "sort": {"field_id": number["id"], "direction": "asc"},
+        "limit": 100,
+        "offset": 0,
+    }
+    ordered = client.post("/api/records/query", json=base_query)
+    assert ordered.status_code == 200, ordered.text
+    assert [item["pathology_number"] for item in ordered.json()["items"]] == [
+        pathology for pathology, _value in values
+    ]
+
+    exact_integer = client.post(
+        "/api/records/query",
+        json={
+            **base_query,
+            "field_filters": [
+                {
+                    "field_id": number["id"],
+                    "operator": "number_between",
+                    "start": "9007199254740993",
+                    "end": "9007199254740993",
+                }
+            ],
+        },
+    )
+    assert exact_integer.status_code == 200, exact_integer.text
+    assert [item["pathology_number"] for item in exact_integer.json()["items"]] == [
+        "PRECISE-INTEGER-HIGH"
+    ]
+
+    invalid_boundary = client.post(
+        "/api/records/query",
+        json={
+            **base_query,
+            "field_filters": [
+                {
+                    "field_id": number["id"],
+                    "operator": "number_between",
+                    "start": "NaN",
+                }
+            ],
+        },
+    )
+    assert invalid_boundary.status_code == 422
 
 
 def test_batch_create_fields_retains_existing_headers_and_is_atomic(

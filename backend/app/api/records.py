@@ -10,14 +10,18 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.audit import audit
-from app.database import get_session
+from app.database import (
+    STRICT_DECIMAL_COLLATION,
+    begin_immediate_write,
+    get_session,
+    strict_decimal_text,
+)
 from app.models import FieldDefinition, Project, ProjectRecord, RecordValue
 from app.schemas import (
     BulkDeleteExecute,
     BulkDeleteFilter,
     BulkDeletePreviewRead,
     BulkDeleteResult,
-    RecordAssignProject,
     RecordCellBatchCommit,
     RecordCellBatchCommitRead,
     RecordCellBatchPreview,
@@ -56,7 +60,6 @@ from app.services.field_validation import new_record_field_value, validate_field
 from app.services.record_operations import apply_record_operation, snapshot_record
 from app.services.records import (
     allocate_record_position,
-    assign_record_to_project,
     date_reorder_hash,
     date_reorder_plan,
     parse_combined_pathology_number,
@@ -316,20 +319,27 @@ def _complex_record_statement(
                     date_expression <= (end_value if field.is_core else end_value.isoformat())
                 )
         elif item.operator == "number_between":
-            number_expression = func.strict_number(expression)
-            try:
-                if item.start not in {None, ""}:
-                    filters.append(number_expression >= float(item.start))
-                if item.end not in {None, ""}:
-                    filters.append(number_expression <= float(item.end))
-            except ValueError as error:
-                raise HTTPException(status_code=422, detail="数字筛选范围无效") from error
+            number_expression = func.strict_number(expression).collate(
+                STRICT_DECIMAL_COLLATION
+            )
+            if item.start not in {None, ""}:
+                start_value = strict_decimal_text(item.start)
+                if start_value is None:
+                    raise HTTPException(status_code=422, detail="数字筛选范围无效")
+                filters.append(number_expression >= start_value)
+            if item.end not in {None, ""}:
+                end_value = strict_decimal_text(item.end)
+                if end_value is None:
+                    raise HTTPException(status_code=422, detail="数字筛选范围无效")
+                filters.append(number_expression <= end_value)
     statement = select(ProjectRecord).where(*filters)
     if payload.sort:
         sort_field = fields[payload.sort.field_id]
         sort_expression = _query_field_expression(sort_field)
         if sort_field.data_type == "number":
-            sort_expression = func.strict_number(sort_expression)
+            sort_expression = func.strict_number(sort_expression).collate(
+                STRICT_DECIMAL_COLLATION
+            )
         order = sort_expression.desc() if payload.sort.direction == "desc" else sort_expression.asc()
         statement = statement.order_by(order, ProjectRecord.position.asc(), ProjectRecord.id.asc())
     else:
@@ -679,8 +689,7 @@ def apply_reorder_by_date(
     # SQLite ignores SELECT FOR UPDATE.  This desktop app uses SQLite, so take
     # its write reservation before reading the preview state; other databases
     # use row locks through with_for_update().
-    if session.get_bind().dialect.name == "sqlite":
-        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+    begin_immediate_write(session)
     require_project(session, payload.project_id)
     records = records_for_date_reorder(
         session,
@@ -751,6 +760,7 @@ def get_record(record_id: str, session: Session = Depends(get_session)) -> dict:
 
 @router.post("", response_model=RecordRead, status_code=status.HTTP_201_CREATED)
 def create_record(payload: RecordCreate, session: Session = Depends(get_session)) -> dict:
+    begin_immediate_write(session)
     require_project(session, payload.project_id)
     normalized_core = validate_core_record_values(
         session,
@@ -1080,28 +1090,6 @@ def update_record_lock(
     )
     session.commit()
     return record_dict(require_record(session, record.id, include_values=True))
-
-
-@router.post("/{record_id}/assign-project", response_model=RecordRead)
-def assign_record_project(
-    record_id: str,
-    payload: RecordAssignProject,
-    session: Session = Depends(get_session),
-) -> dict:
-    source = require_record(session, record_id)
-    target = assign_record_to_project(session, source, payload.target_project_id)
-    audit(
-        session,
-        "record.assign_project",
-        "project_record",
-        target.id,
-        {
-            "source_record_id": source.id,
-            "target_project_id": payload.target_project_id,
-        },
-    )
-    session.commit()
-    return record_dict(require_record(session, target.id, include_values=True))
 
 
 @router.delete("/{record_id}", status_code=status.HTTP_204_NO_CONTENT)

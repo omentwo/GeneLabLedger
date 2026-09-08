@@ -33,17 +33,18 @@ export const useAppStore = defineStore("app", {
       }
       const bootstrap = async (): Promise<void> => {
         this.bootstrapping = true;
-        this.bootstrapError = "";
         try {
           const [health, projects] = await Promise.allSettled([getHealth(), listProjects()]);
           this.health = health.status === "fulfilled" ? health.value : null;
-          if (projects.status === "fulfilled") {
-            this.projects = projects.value.slice().sort((a, b) => a.sort_order - b.sort_order);
+          if (projects.status === "rejected") {
+            const error = projects.reason instanceof Error
+              ? projects.reason
+              : new Error("项目列表读取失败");
+            this.bootstrapError = error.message;
+            throw error;
           }
-          const failed = [health, projects].find((result) => result.status === "rejected");
-          if (failed?.status === "rejected") {
-            this.bootstrapError = failed.reason instanceof Error ? failed.reason.message : "页面数据读取失败";
-          }
+          this.projects = projects.value.slice().sort((a, b) => a.sort_order - b.sort_order);
+          this.bootstrapError = "";
         } finally {
           this.bootstrapping = false;
         }

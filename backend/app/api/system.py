@@ -40,7 +40,6 @@ AUDIT_ACTION_SEARCH_LABELS = {
     "record.delete": "删除台账记录",
     "record.lock": "锁定台账记录",
     "record.unlock": "解锁台账记录",
-    "record.assign_project": "分配到其他项目",
     "record.experiment_number.update": "回写实验编号",
     "record.position.reorder_by_date": "按日期重排台账",
     "record.bulk_delete": "按日期批量删除台账记录",

@@ -110,7 +110,7 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 | 系统 | `GET /api/health`；`GET /api/audit-logs`；`GET/PUT /api/settings/{key}` | 健康检查、审计查询、通用设置 |
 | 项目 | `GET/POST /api/projects`；`PATCH/DELETE /api/projects/{project_id}` | 项目列表、创建、编辑、删除 |
 | 表头 | `GET/POST /api/projects/{project_id}/fields`；`POST /api/projects/{project_id}/fields/batch`；`PATCH/DELETE /api/projects/fields/{field_id}`；`PUT /api/projects/fields/{field_id}/options`；`PUT /api/projects/{project_id}/fields/reorder` | 动态字段、批量表头及选项管理 |
-| 台账 | `GET/POST /api/records`；`GET/PATCH/DELETE /api/records/{record_id}`；`PUT /api/records/{record_id}/lock`；`POST /api/records/{record_id}/assign-project`；`PUT /api/records/report-status` | 记录查询、CRUD、相对目标行插入、锁定、分配项目、报告标记 |
+| 台账 | `GET/POST /api/records`；`GET/PATCH/DELETE /api/records/{record_id}`；`PUT /api/records/{record_id}/lock`；`PUT /api/records/report-status` | 记录查询、CRUD、相对目标行插入、锁定、报告标记 |
 | 动态查询与批量单元格 | `POST /api/records/query`；`POST /api/records/query/ids`；`POST /api/records/cell-batches/preview`；`POST /api/records/cell-batches/commit`；`POST /api/records/replace/preview`；`POST /api/records/replace/commit` | 动态字段分页筛选排序、跨页 ID、粘贴/填充与查找替换的预检查和原子提交 |
 | 编号与批删 | `POST /api/records/experiment-numbers`；`POST /api/records/bulk-delete/preview`；`POST /api/records/bulk-delete/execute` | 实验编号原子回写、预览/执行批量删除 |
 | 报告 | `GET/POST /api/report-templates`；`POST /api/report-templates/{template_id}/versions`；`PUT /api/report-template-versions/{version_id}/mappings`；`DELETE /api/report-templates/{template_id}`；`GET /api/printers`；`GET /api/print-engines`；`POST /api/reports/print` | 模板版本、映射、打印机和直接打印；前端默认按台账列表倒序提交所选记录，后端保持请求顺序逐份打印 |

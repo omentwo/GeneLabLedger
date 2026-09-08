@@ -508,10 +508,6 @@ class RecordCellHighlightUpdate(BaseModel):
         return normalize_highlight_color(value)
 
 
-class RecordAssignProject(BaseModel):
-    target_project_id: str
-
-
 class RecordRead(BaseModel):
     id: str
     project_id: str

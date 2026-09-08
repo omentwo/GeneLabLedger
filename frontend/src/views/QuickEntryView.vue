@@ -62,6 +62,7 @@ const activeRecord = ref<ProjectRecord | null>(null);
 const activeRecordUnavailable = ref(false);
 const recordSearch = ref("");
 const recordsLoading = ref(false);
+const initializing = ref(false);
 const saving = ref(false);
 const settingsSaving = ref(false);
 const initializationError = ref("");
@@ -779,6 +780,9 @@ async function returnToMain(): Promise<void> {
 }
 
 async function initialize(): Promise<void> {
+  if (initializing.value) return;
+  initializing.value = true;
+  initializationError.value = "";
   try {
     await appStore.bootstrap();
     await loadSettings();
@@ -794,6 +798,8 @@ async function initialize(): Promise<void> {
     await activateProject(requestedProject, contextDefaults.get(requestedProject));
   } catch (error) {
     initializationError.value = error instanceof Error ? error.message : "快速录入初始化失败";
+  } finally {
+    initializing.value = false;
   }
 }
 
@@ -871,7 +877,16 @@ onBeforeUnmount(() => {
     </header>
 
     <div v-if="initializationError" class="quick-entry-error">
-      <el-empty :description="initializationError" />
+      <el-empty :description="initializationError">
+        <el-button
+          v-if="appStore.bootstrapError"
+          type="primary"
+          :loading="initializing"
+          @click="initialize"
+        >
+          重新加载
+        </el-button>
+      </el-empty>
     </div>
 
     <main v-else class="quick-entry-layout">

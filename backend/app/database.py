@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import math
 import re
 import shutil
 from collections.abc import Generator
 from datetime import UTC, datetime
+from decimal import Decimal, DecimalException
 from pathlib import Path
 
 from fastapi import Request
@@ -48,6 +48,39 @@ class Base(DeclarativeBase):
     pass
 
 
+STRICT_DECIMAL_COLLATION = "STRICT_DECIMAL"
+_STRICT_NUMBER_PATTERN = re.compile(
+    r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
+)
+
+
+def strict_decimal_text(value: object) -> str | None:
+    """Return validated decimal text without converting it through binary float."""
+    if value is None:
+        return None
+    text_value = str(value).strip()
+    if not _STRICT_NUMBER_PATTERN.fullmatch(text_value):
+        return None
+    try:
+        number = Decimal(text_value)
+    except DecimalException:
+        return None
+    return text_value if number.is_finite() else None
+
+
+def compare_strict_decimals(left: str, right: str) -> int:
+    """Compare validated decimal strings exactly for SQLite ordering and ranges."""
+    left_number = Decimal(left)
+    right_number = Decimal(right)
+    return (left_number > right_number) - (left_number < right_number)
+
+
+def begin_immediate_write(session: Session) -> None:
+    """Reserve SQLite's write lock before reading state used by a write transaction."""
+    if session.get_bind().dialect.name == "sqlite":
+        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+
+
 class Database:
     def __init__(self, database_url: str) -> None:
         connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
@@ -63,14 +96,13 @@ class Database:
 
     @staticmethod
     def _enable_sqlite_foreign_keys(dbapi_connection: object, _: object) -> None:
-        def strict_number(value):
-            pattern = r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
-            if value is None or not re.fullmatch(pattern, str(value).strip()):
-                return None
-            number = float(value)
-            return number if math.isfinite(number) else None
-
-        dbapi_connection.create_function("strict_number", 1, strict_number, deterministic=True)
+        dbapi_connection.create_function(
+            "strict_number",
+            1,
+            strict_decimal_text,
+            deterministic=True,
+        )
+        dbapi_connection.create_collation(STRICT_DECIMAL_COLLATION, compare_strict_decimals)
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()

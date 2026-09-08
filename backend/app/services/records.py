@@ -331,33 +331,3 @@ def replace_record_values(
             existing[field_id].value_text = text
         else:
             record.values.append(RecordValue(record_id=record.id, field_id=field_id, value_text=text))
-
-
-def assign_record_to_project(
-    session: Session,
-    source_record: ProjectRecord,
-    target_project_id: str,
-) -> ProjectRecord:
-    require_project(session, target_project_id)
-    target = ProjectRecord(
-        project_id=target_project_id,
-        position=next_record_position(session, target_project_id),
-        pathology_number=source_record.pathology_number,
-        block_number=source_record.block_number,
-        status="待实验",
-    )
-    session.add(target)
-    session.flush()
-    defaults = {
-        field.id: field.default_value
-        for field in session.scalars(
-            select(FieldDefinition).where(
-                FieldDefinition.project_id == target_project_id,
-                FieldDefinition.is_core.is_(False),
-                FieldDefinition.default_value.is_not(None),
-            )
-        )
-        if field.default_value is not None
-    }
-    replace_record_values(session, target, defaults)
-    return target

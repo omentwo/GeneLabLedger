@@ -26,6 +26,7 @@ const alwaysOnTop = ref(false);
 const isMaximized = ref(false);
 const windowControlBusy = ref(false);
 const isSidebarCollapsed = ref(false);
+const contentRevision = ref(0);
 let removeWindowStateListener: (() => void) | undefined;
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "gene-lab-ledger.sidebar-collapsed";
@@ -113,9 +114,18 @@ function toggleSidebar(): void {
   }
 }
 
+async function retryProjectBootstrap(): Promise<void> {
+  try {
+    await appStore.bootstrap();
+    contentRevision.value += 1;
+  } catch {
+    // The persistent alert keeps the latest project-loading error visible.
+  }
+}
+
 onMounted(() => {
   restoreSidebarState();
-  void appStore.bootstrap();
+  void appStore.bootstrap().catch(() => undefined);
   if (!bridge) return;
   void syncWindowState();
   removeWindowStateListener = bridge.onWindowStateChanged((state) => {
@@ -255,7 +265,18 @@ onBeforeUnmount(() => {
 
       <main class="min-w-0">
         <section class="min-w-0 px-3 pb-5 pt-3">
-          <RouterView />
+          <div v-if="appStore.bootstrapError" class="app-bootstrap-alert" role="alert">
+            <span>项目列表读取失败：{{ appStore.bootstrapError }}</span>
+            <el-button
+              type="danger"
+              text
+              :loading="appStore.bootstrapping"
+              @click="retryProjectBootstrap"
+            >
+              重新加载
+            </el-button>
+          </div>
+          <RouterView :key="contentRevision" />
         </section>
       </main>
     </div>
@@ -385,6 +406,20 @@ onBeforeUnmount(() => {
 .app-content > main {
   min-height: 0;
   overflow: auto;
+}
+
+.app-bootstrap-alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  background: var(--app-danger-soft);
+  color: var(--app-danger);
+  padding: 9px 12px;
+  font-size: 13px;
 }
 
 .app-sidebar {

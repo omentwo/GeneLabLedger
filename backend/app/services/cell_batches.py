@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.audit import audit
+from app.database import begin_immediate_write
 from app.models import FieldDefinition, ProjectRecord, RecordValue
 from app.schemas import RecordBatchNewRecord, RecordCellChange
 from app.services.field_validation import (
@@ -577,6 +578,7 @@ def commit_cell_batch(
 ) -> dict:
     preview = _claim_preview(token, accept_warnings=accept_warnings)
     try:
+        begin_immediate_write(session)
         return _commit_claimed_cell_batch(
             session,
             preview=preview,

@@ -72,12 +72,11 @@ def test_seed_health_and_json_settings(
     assert saved.json() == {"key": "queue_columns", **payload}
 
 
-def test_pathology_number_is_plain_record_data_and_duplicates_are_independent(
+def test_duplicate_pathology_numbers_are_independent(
     client: TestClient,
     seeded_projects: dict[str, dict],
 ) -> None:
     tb_id = seeded_projects["TB"]["id"]
-    braf_id = seeded_projects["BRAFV600E"]["id"]
     first = client.post(
         "/api/records",
         json={"project_id": tb_id, "pathology_number": "26-00001"},
@@ -86,13 +85,8 @@ def test_pathology_number_is_plain_record_data_and_duplicates_are_independent(
         "/api/records",
         json={"project_id": tb_id, "pathology_number": "26-00001"},
     ).json()
-    assigned = client.post(
-        f"/api/records/{first['id']}/assign-project",
-        json={"target_project_id": braf_id},
-    ).json()
-
-    assert len({first["id"], second["id"], assigned["id"]}) == 3
-    assert first["pathology_number"] == second["pathology_number"] == assigned["pathology_number"]
+    assert first["id"] != second["id"]
+    assert first["pathology_number"] == second["pathology_number"]
 
     updated = client.patch(
         f"/api/records/{first['id']}",
@@ -100,7 +94,11 @@ def test_pathology_number_is_plain_record_data_and_duplicates_are_independent(
     ).json()
     assert updated["pathology_number"] == "26-CHANGED"
     assert client.get(f"/api/records/{second['id']}").json()["pathology_number"] == "26-00001"
-    assert client.get(f"/api/records/{assigned['id']}").json()["pathology_number"] == "26-00001"
+
+
+def test_assign_project_endpoint_is_removed(client: TestClient) -> None:
+    paths = client.get("/openapi.json").json()["paths"]
+    assert "/api/records/{record_id}/assign-project" not in paths
 
 
 def test_experiment_numbering_only_updates_numbers_and_remains_editable(
