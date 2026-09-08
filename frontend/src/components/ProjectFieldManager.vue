@@ -32,6 +32,10 @@ import {
 import { ApiError } from "@/api/client";
 import { useAppStore } from "@/stores/app";
 import { previewBatchFieldLabels } from "@/utils/batchFields";
+import {
+  LEDGER_COLUMN_MAX_WIDTH,
+  LEDGER_COLUMN_MIN_WIDTH,
+} from "@/utils/ledgerColumnWidth";
 import type {
   DataType,
   FieldDefinition,
@@ -786,8 +790,8 @@ watch(
             <template #default="{ row }: { row: FieldDefinition }">
               <el-input-number
                 v-model="row.width"
-                :min="58"
-                :max="600"
+                :min="LEDGER_COLUMN_MIN_WIDTH"
+                :max="LEDGER_COLUMN_MAX_WIDTH"
                 :step="10"
                 controls-position="right"
               />
@@ -893,8 +897,8 @@ watch(
         <el-form-item label="初始列宽">
           <el-input-number
             v-model="newField.width"
-            :min="58"
-            :max="600"
+            :min="LEDGER_COLUMN_MIN_WIDTH"
+            :max="LEDGER_COLUMN_MAX_WIDTH"
             :step="10"
           />
         </el-form-item>

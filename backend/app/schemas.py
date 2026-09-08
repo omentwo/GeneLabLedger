@@ -107,7 +107,7 @@ class FieldRead(BaseModel):
 class FieldCreate(BaseModel):
     label: str = Field(min_length=1, max_length=120)
     data_type: DataType = "text"
-    width: int = Field(default=120, ge=58, le=600)
+    width: int = Field(default=120, ge=32, le=600)
     options: list[str] = Field(default_factory=list)
     validation_mode: ValidationMode = "suggestion"
     validation_rules: FieldValidationRules = Field(default_factory=FieldValidationRules)
@@ -166,7 +166,7 @@ class FieldUpdate(BaseModel):
     label: str | None = Field(default=None, min_length=1, max_length=120)
     data_type: DataType | None = None
     sort_order: int | None = Field(default=None, ge=0)
-    width: int | None = Field(default=None, ge=58, le=600)
+    width: int | None = Field(default=None, ge=32, le=600)
     hidden: bool | None = None
     validation_mode: ValidationMode | None = None
     validation_rules: FieldValidationRules | None = None
@@ -277,7 +277,7 @@ class LedgerTemplateField(BaseModel):
     is_core: bool = False
     hidden: bool = False
     sort_order: int = Field(default=0, ge=0)
-    width: int = Field(default=120, ge=58, le=600)
+    width: int = Field(default=120, ge=32, le=600)
     options: list[str] = Field(default_factory=list)
     validation_mode: ValidationMode = "suggestion"
     validation_rules: FieldValidationRules = Field(default_factory=FieldValidationRules)

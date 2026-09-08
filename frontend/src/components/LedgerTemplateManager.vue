@@ -11,6 +11,10 @@ import {
 } from "@/api/projects";
 import { useAppStore } from "@/stores/app";
 import type { LedgerTemplate, LedgerTemplateField } from "@/types/api";
+import {
+  LEDGER_COLUMN_MAX_WIDTH,
+  LEDGER_COLUMN_MIN_WIDTH,
+} from "@/utils/ledgerColumnWidth";
 
 const props = defineProps<{ modelValue: boolean; selectedProjectId: string }>();
 const emit = defineEmits<{ "update:modelValue": [value: boolean]; changed: [] }>();
@@ -248,7 +252,12 @@ watch(
             <el-option label="日期" value="date" />
             <el-option label="选择" value="select" />
           </el-select>
-          <el-input-number v-model="field.width" :min="58" :max="600" controls-position="right" />
+          <el-input-number
+            v-model="field.width"
+            :min="LEDGER_COLUMN_MIN_WIDTH"
+            :max="LEDGER_COLUMN_MAX_WIDTH"
+            controls-position="right"
+          />
           <el-input
             :model-value="field.default_value ?? ''"
             :disabled="field.is_core"

@@ -118,6 +118,12 @@ import {
   nextGridScrollOffset,
   type GridAutoScrollDirection,
 } from "@/utils/gridAutoScroll";
+import {
+  calculateLedgerBestFitWidth,
+  LEDGER_COLUMN_MAX_WIDTH,
+  LEDGER_COLUMN_MIN_WIDTH,
+  ledgerCellHorizontalPadding,
+} from "@/utils/ledgerColumnWidth";
 import { shanghaiDateKey } from "@/utils/datetime";
 import { desktopBridge } from "@/utils/desktop";
 import {
@@ -700,6 +706,7 @@ const ledgerTableStyle = computed<CSSProperties>(
       "--ledger-editor-width": `${ledgerDisplaySettings.value.editorWidthPercent}%`,
       "--ledger-editor-height": `${Math.round((Math.max(32, ledgerDisplaySettings.value.fontSizePx + 18) * ledgerDisplaySettings.value.editorHeightPercent) / 100)}px`,
       "--ledger-selection-min-height": `${Math.max(32, ledgerDisplaySettings.value.fontSizePx + 18)}px`,
+      "--ledger-cell-padding-x": `${ledgerCellHorizontalPadding(ledgerDisplaySettings.value.fontSizePx)}px`,
       "--ledger-font-family": ledgerFontOption.value?.css ?? "system-ui, sans-serif",
       "--ledger-font-size": `${ledgerDisplaySettings.value.fontSizePx}px`,
       "--ledger-zoom": String(ledgerDisplaySettings.value.zoomPercent / 100),
@@ -4777,19 +4784,37 @@ function bestFitColumn(field: FieldDefinition): void {
   const context = canvas.getContext("2d");
   if (!context) return;
   context.font = `${ledgerDisplaySettings.value.fontSizePx}px ${ledgerFontOption.value?.css ?? "system-ui"}`;
-  const candidates = [field.label, ...tableRows.value.map((row) => valueFor(row, field))];
-  const textWidth = candidates.reduce((maximum, value) => {
+  const textWidth = tableRows.value.map((row) => valueFor(row, field)).reduce((maximum, value) => {
     const width = String(value ?? "")
       .split(/\r?\n/)
       .reduce((lineMaximum, line) => Math.max(lineMaximum, context.measureText(line).width), 0);
     return Math.max(maximum, width);
   }, 0);
-  const chromeWidth = columnToolsVisible.value ? 64 : 38;
+  const headerTextWidth = context.measureText(field.label).width;
   handleHeaderResize(
-    Math.min(600, Math.max(58, Math.ceil(textWidth + chromeWidth))),
+    calculateLedgerBestFitWidth({
+      bodyTextWidth: textWidth,
+      headerTextWidth,
+      fontSizePx: ledgerDisplaySettings.value.fontSizePx,
+      editorWidthPercent: ledgerDisplaySettings.value.editorWidthPercent,
+      toolsVisible: columnToolsVisible.value,
+      sorted: ledgerSort.value?.fieldId === field.id,
+      filtered: Boolean(ledgerFilters.value[field.id]),
+    }),
     field.width,
     { columnKey: field.id },
   );
+}
+
+function handleReadOnlyCellWheel(event: WheelEvent, cell: GridCellPosition): void {
+  if (isGridCellEditing(cell)) return;
+  const tableRoot = ledgerTableCardRef.value;
+  if (!tableRoot) return;
+  const body = gridTableBodyScrollElement(tableRoot);
+  if (!body) return;
+  event.preventDefault();
+  body.scrollTop += event.deltaY;
+  body.scrollLeft += event.deltaX;
 }
 
 function bestFitAllColumns(event?: MouseEvent): void {
@@ -4807,7 +4832,10 @@ function handleHeaderResize(
   if (!fieldId) return;
   const field = fields.value.find((item) => item.id === fieldId);
   if (!field) return;
-  const width = Math.min(600, Math.max(58, Math.round(newWidth)));
+  const width = Math.min(
+    LEDGER_COLUMN_MAX_WIDTH,
+    Math.max(LEDGER_COLUMN_MIN_WIDTH, Math.round(newWidth)),
+  );
   let queue = columnWidthSaveQueues.get(fieldId);
   if (!queue) {
     queue = new LatestValuePersistence<number>({
@@ -5822,6 +5850,7 @@ onBeforeUnmount(() => {
               :data-row-id="row.id"
               :data-field-index="columnIndex"
               :tabindex="isGridCellEditing({ rowIndex: $index, columnIndex }) ? -1 : 0"
+              @wheel="handleReadOnlyCellWheel($event, { rowIndex: $index, columnIndex })"
             >
               <template v-if="isGridCellEditing({ rowIndex: $index, columnIndex })">
                 <EditableDateInput
@@ -7189,9 +7218,10 @@ onBeforeUnmount(() => {
   display: block;
   width: var(--ledger-editor-width, 100%);
   min-height: var(--ledger-editor-height, 32px);
-  max-height: none;
-  overflow: visible;
-  padding: max(1px, calc((var(--ledger-editor-height, 32px) - 20px) / 2)) 8px;
+  max-height: calc(var(--ledger-editor-height, 32px) + 20px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: max(1px, calc((var(--ledger-editor-height, 32px) - 20px) / 2)) var(--ledger-cell-padding-x, 5px);
   font-family: var(--ledger-font-family, inherit);
   font-size: var(--ledger-font-size, 14px);
   line-height: 20px;
@@ -7209,6 +7239,10 @@ onBeforeUnmount(() => {
   user-select: none;
   -webkit-user-select: none;
   pointer-events: none;
+}
+
+.cell-field:not(.cell-field-editing) > .cell-field-value {
+  pointer-events: auto;
 }
 
 .cell-field:not(.cell-field-editing) :deep(.el-input),
@@ -7332,7 +7366,7 @@ onBeforeUnmount(() => {
   overflow-wrap: anywhere;
   word-break: break-all;
   line-height: 20px;
-  padding: max(1px, calc((var(--ledger-editor-height, 32px) - 20px) / 2)) 8px;
+  padding: max(1px, calc((var(--ledger-editor-height, 32px) - 20px) / 2)) var(--ledger-cell-padding-x, 5px);
 }
 
 :deep(.ledger-table-surface .el-table th),
@@ -7401,6 +7435,8 @@ onBeforeUnmount(() => {
   height: var(--ledger-editor-height, 32px);
   min-height: var(--ledger-editor-height, 32px);
   align-items: center;
+  padding-right: var(--ledger-cell-padding-x, 5px);
+  padding-left: var(--ledger-cell-padding-x, 5px);
 }
 
 :deep(.el-table td.ledger-editor-column .el-input__inner) {
@@ -7410,6 +7446,7 @@ onBeforeUnmount(() => {
 :deep(.el-table td.el-table-column--selection) {
   cursor: default;
   user-select: none;
+  vertical-align: middle !important;
 }
 
 :deep(.el-table td.el-table-column--selection .cell) {
