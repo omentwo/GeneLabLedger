@@ -177,6 +177,17 @@ function focusPathology(): void {
   });
 }
 
+async function copyPathologyNumber(pathologyNumber: string): Promise<void> {
+  try {
+    const clipboard = navigator.clipboard;
+    if (!clipboard) throw new Error("clipboard-unavailable");
+    await clipboard.writeText(pathologyNumber);
+  } catch (error) {
+    console.error("下一条病理号自动复制失败", error);
+    ElMessage.warning("已进入下一条记录，但无法自动复制病理号，请手动复制");
+  }
+}
+
 async function scrollRecordIntoView(recordId: string): Promise<void> {
   await nextTick();
   const item = [...document.querySelectorAll<HTMLElement>(".record-list-item")]
@@ -712,6 +723,7 @@ async function saveExistingRecord(): Promise<void> {
       loadRecordIntoForm(nextRecord);
       await scrollRecordIntoView(nextRecord.id);
       focusPathology();
+      await copyPathologyNumber(nextRecord.pathology_number);
     }
   } else if (fieldSettings.value.autoAdvanceAfterUpdate && currentIndex >= 0) {
     ElMessage.info("已到最后一条记录");
