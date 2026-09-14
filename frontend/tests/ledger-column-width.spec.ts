@@ -33,7 +33,7 @@ describe("ledger best-fit column width", () => {
       toolsVisible: true,
       sorted: true,
       filtered: true,
-    })).toBe(78);
+    })).toBe(82);
   });
 
   it("accounts for editors configured narrower than their column", () => {

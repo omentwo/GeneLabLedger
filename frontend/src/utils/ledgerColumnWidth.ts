@@ -2,6 +2,7 @@ export const LEDGER_COLUMN_MIN_WIDTH = 32;
 export const LEDGER_COLUMN_MAX_WIDTH = 600;
 
 const HEADER_CELL_PADDING_X = 7;
+const HEADER_FIT_SAFETY_WIDTH = 4;
 const HEADER_ITEM_GAP = 4;
 const HEADER_TOOL_WIDTH = 20;
 const SORT_INDICATOR_WIDTH = 13;
@@ -39,7 +40,8 @@ export function calculateLedgerBestFitWidth(input: LedgerBestFitWidthInput): num
   if (input.filtered) {
     headerContentWidth += HEADER_ITEM_GAP + FILTER_INDICATOR_WIDTH + FILTER_INDICATOR_MARGIN;
   }
-  const headerColumnWidth = headerContentWidth + HEADER_CELL_PADDING_X * 2 + GRID_LINE_WIDTH;
+  const headerColumnWidth =
+    headerContentWidth + HEADER_CELL_PADDING_X * 2 + HEADER_FIT_SAFETY_WIDTH + GRID_LINE_WIDTH;
 
   return Math.min(
     LEDGER_COLUMN_MAX_WIDTH,
