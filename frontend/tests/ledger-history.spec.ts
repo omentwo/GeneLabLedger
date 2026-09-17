@@ -79,4 +79,35 @@ describe("ledger history", () => {
       }),
     ).toBe(false);
   });
+
+  it("preserves a failed undo so it can be retried or explicitly discarded", async () => {
+    const history = useLedgerHistory();
+    history.push(createLedgerHistoryEntry("project-1", "第一步", [], [record("1")]));
+    history.push(createLedgerHistoryEntry("project-1", "病理号修改", [], [record("2")]));
+
+    await expect(history.undo(async () => {
+      throw new Error("记录已锁定");
+    })).rejects.toThrow("记录已锁定");
+
+    expect(history.entries.value.map((entry) => entry.label)).toEqual(["第一步", "病理号修改"]);
+    expect(history.cursor.value).toBe(2);
+    expect(history.peek("undo")?.label).toBe("病理号修改");
+    expect(history.canUndo.value).toBe(true);
+
+    expect(history.discard("undo")?.label).toBe("病理号修改");
+    expect(history.entries.value.map((entry) => entry.label)).toEqual(["第一步"]);
+    expect(history.cursor.value).toBe(1);
+    expect(history.peek("undo")?.label).toBe("第一步");
+  });
+
+  it("can discard an invalid redo without moving the cursor", async () => {
+    const history = useLedgerHistory();
+    history.push(createLedgerHistoryEntry("project-1", "第一步", [], [record("1")]));
+    await history.undo(async () => undefined);
+
+    expect(history.peek("redo")?.label).toBe("第一步");
+    expect(history.discard("redo")?.label).toBe("第一步");
+    expect(history.cursor.value).toBe(0);
+    expect(history.entries.value).toHaveLength(0);
+  });
 });

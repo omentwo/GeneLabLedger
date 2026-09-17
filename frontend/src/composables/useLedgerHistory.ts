@@ -95,6 +95,21 @@ export function useLedgerHistory(limit = LEDGER_HISTORY_LIMIT) {
     cursor.value = next.length;
   }
 
+  function peek(direction: RecordOperationDirection): LedgerHistoryEntry | undefined {
+    const index = direction === "undo" ? cursor.value - 1 : cursor.value;
+    return entries.value[index];
+  }
+
+  function discard(direction: RecordOperationDirection): LedgerHistoryEntry | undefined {
+    if (busy.value) return undefined;
+    const index = direction === "undo" ? cursor.value - 1 : cursor.value;
+    const entry = entries.value[index];
+    if (!entry) return undefined;
+    entries.value = entries.value.filter((_, entryIndex) => entryIndex !== index);
+    if (direction === "undo") cursor.value -= 1;
+    return entry;
+  }
+
   async function run(
     direction: RecordOperationDirection,
     replay: (entry: LedgerHistoryEntry, direction: RecordOperationDirection) => Promise<void>,
@@ -134,6 +149,8 @@ export function useLedgerHistory(limit = LEDGER_HISTORY_LIMIT) {
     canRedo,
     clear,
     push,
+    peek,
+    discard,
     undo,
     redo,
   };

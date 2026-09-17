@@ -2,6 +2,8 @@
 import {
   ArrowDown,
   ArrowUp,
+  ChevronsDown,
+  ChevronsUp,
   Copy as CopyDocument,
   Trash2 as Delete,
   FileText as Document,
@@ -13,7 +15,7 @@ import {
   Settings2 as Setting,
 } from "@lucide/vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { computed, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
 
 import {
   batchCreateFields,
@@ -32,6 +34,8 @@ import {
 import { ApiError } from "@/api/client";
 import { useAppStore } from "@/stores/app";
 import { previewBatchFieldLabels } from "@/utils/batchFields";
+import { fieldDropTargetIndex, moveArrayItem } from "@/utils/fieldOrder";
+import { gridAutoScrollVector, nextGridScrollOffset } from "@/utils/gridAutoScroll";
 import {
   LEDGER_COLUMN_MAX_WIDTH,
   LEDGER_COLUMN_MIN_WIDTH,
@@ -69,6 +73,12 @@ const dragStartIndex = ref(-1);
 const dragTargetIndex = ref(-1);
 const dragOverRowIndex = ref(-1);
 const dragInsertAfter = ref(false);
+const fieldTableRef = ref<{ $el?: HTMLElement } | null>(null);
+let fieldDragAutoScrollFrame: number | null = null;
+let fieldDragAutoScrollTimestamp: number | null = null;
+let fieldDragScrollDirection: -1 | 0 | 1 = 0;
+let fieldDragLastX = 0;
+let fieldDragLastY = 0;
 const fieldDialogVisible = ref(false);
 const batchFieldDialogVisible = ref(false);
 const batchFieldText = ref("");
@@ -352,21 +362,21 @@ async function saveField(field: FieldDefinition): Promise<void> {
   }
 }
 
-async function moveField(index: number, offset: -1 | 1): Promise<void> {
-  const target = index + offset;
-  if (!currentProject.value || target < 0 || target >= workingFields.value.length) return;
-  const reordered = workingFields.value.slice();
-  const [field] = reordered.splice(index, 1);
-  if (!field) return;
-  reordered.splice(target, 0, field);
+async function persistFieldOrder(
+  reordered: FieldDefinition[],
+  successMessage?: string,
+): Promise<void> {
+  const projectId = currentProject.value?.id;
+  if (!projectId) return;
   workingFields.value = reordered;
   saving.value = true;
   try {
     await reorderFields(
-      currentProject.value.id,
+      projectId,
       reordered.map((item) => item.id),
     );
     await reloadAndNotify();
+    if (successMessage) ElMessage.success(successMessage);
   } catch (error) {
     syncCurrentProject();
     ElMessage.error(error instanceof Error ? error.message : "表头顺序保存失败");
@@ -375,7 +385,44 @@ async function moveField(index: number, offset: -1 | 1): Promise<void> {
   }
 }
 
+async function moveFieldTo(index: number, target: number): Promise<void> {
+  if (
+    saving.value ||
+    index < 0 ||
+    index >= workingFields.value.length ||
+    target < 0 ||
+    target >= workingFields.value.length ||
+    index === target
+  ) return;
+  await persistFieldOrder(moveArrayItem(workingFields.value, index, target), "表头顺序已保存");
+}
+
+async function moveField(index: number, offset: -1 | 1): Promise<void> {
+  await moveFieldTo(index, index + offset);
+}
+
+function fieldTableElement(): HTMLElement | null {
+  return fieldTableRef.value?.$el ?? null;
+}
+
+function fieldTableBodyScrollElement(): HTMLElement | null {
+  const table = fieldTableElement();
+  return table?.querySelector<HTMLElement>(".el-table__body-wrapper .el-scrollbar__wrap")
+    ?? table?.querySelector<HTMLElement>(".el-table__body-wrapper")
+    ?? null;
+}
+
+function stopFieldDragAutoScroll(): void {
+  if (fieldDragAutoScrollFrame !== null) {
+    window.cancelAnimationFrame(fieldDragAutoScrollFrame);
+  }
+  fieldDragAutoScrollFrame = null;
+  fieldDragAutoScrollTimestamp = null;
+  fieldDragScrollDirection = 0;
+}
+
 function clearFieldDrag(): void {
+  stopFieldDragAutoScroll();
   draggingFieldId.value = "";
   dragStartIndex.value = -1;
   dragTargetIndex.value = -1;
@@ -399,27 +446,136 @@ function startFieldDrag(event: DragEvent, field: FieldDefinition, index: number)
   }
 }
 
+function clearFieldDropTarget(): void {
+  dragTargetIndex.value = -1;
+  dragOverRowIndex.value = -1;
+  dragInsertAfter.value = false;
+}
+
+function updateFieldDropTargetAt(eventTarget: Element | null, clientY: number): void {
+  const table = fieldTableElement();
+  const scrollBody = fieldTableBodyScrollElement();
+  if (!eventTarget || !table || !scrollBody || !table.contains(eventTarget)) {
+    clearFieldDropTarget();
+    return;
+  }
+  const sourceIndex = workingFields.value.findIndex(
+    (field) => field.id === draggingFieldId.value,
+  );
+  if (sourceIndex < 0) {
+    clearFieldDropTarget();
+    return;
+  }
+
+  const row = eventTarget.closest("tr.el-table__row");
+  const body = row?.parentElement;
+  if (!(row instanceof HTMLTableRowElement) || !(body instanceof HTMLTableSectionElement)) {
+    const rows = Array.from(
+      table.querySelectorAll<HTMLTableRowElement>(".el-table__body tr.el-table__row"),
+    );
+    const firstRow = rows[0];
+    const lastRow = rows.at(-1);
+    const scrollRect = scrollBody.getBoundingClientRect();
+    if (clientY < scrollRect.top || clientY > scrollRect.bottom || !firstRow || !lastRow) {
+      clearFieldDropTarget();
+      return;
+    }
+    const firstRect = firstRow.getBoundingClientRect();
+    const lastRect = lastRow.getBoundingClientRect();
+    const boundaryIndex = clientY <= firstRect.top ? 0 : clientY >= lastRect.bottom ? rows.length : -1;
+    const targetIndex = fieldDropTargetIndex(sourceIndex, boundaryIndex, workingFields.value.length);
+    if (targetIndex < 0) {
+      clearFieldDropTarget();
+      return;
+    }
+    dragOverRowIndex.value = boundaryIndex === 0 ? 0 : workingFields.value.length - 1;
+    dragInsertAfter.value = boundaryIndex !== 0;
+    dragTargetIndex.value = targetIndex;
+    return;
+  }
+
+  const rowIndex = Array.from(body.rows).indexOf(row);
+  if (rowIndex < 0 || rowIndex >= workingFields.value.length) {
+    clearFieldDropTarget();
+    return;
+  }
+  const insertAfter = clientY >= row.getBoundingClientRect().top + row.offsetHeight / 2;
+  const boundaryIndex = rowIndex + (insertAfter ? 1 : 0);
+  const targetIndex = fieldDropTargetIndex(
+    sourceIndex,
+    boundaryIndex,
+    workingFields.value.length,
+  );
+  dragOverRowIndex.value = rowIndex;
+  dragInsertAfter.value = insertAfter;
+  dragTargetIndex.value = targetIndex;
+}
+
+function updateFieldDragAutoScroll(event: DragEvent): void {
+  fieldDragLastX = event.clientX;
+  fieldDragLastY = event.clientY;
+  const scrollBody = fieldTableBodyScrollElement();
+  if (!scrollBody) {
+    stopFieldDragAutoScroll();
+    return;
+  }
+  const direction = gridAutoScrollVector(
+    event.clientX,
+    event.clientY,
+    scrollBody.getBoundingClientRect(),
+    42,
+  ).vertical;
+  if (direction === fieldDragScrollDirection && fieldDragAutoScrollFrame !== null) return;
+  stopFieldDragAutoScroll();
+  fieldDragScrollDirection = direction;
+  if (direction === 0) return;
+
+  const scrollFrame = (timestamp: number): void => {
+    fieldDragAutoScrollFrame = null;
+    const currentBody = fieldTableBodyScrollElement();
+    if (!draggingFieldId.value || !currentBody || fieldDragScrollDirection === 0) {
+      stopFieldDragAutoScroll();
+      return;
+    }
+    const elapsed = fieldDragAutoScrollTimestamp === null
+      ? 1000 / 60
+      : Math.min(50, timestamp - fieldDragAutoScrollTimestamp);
+    fieldDragAutoScrollTimestamp = timestamp;
+    const maximum = Math.max(0, currentBody.scrollHeight - currentBody.clientHeight);
+    const nextTop = nextGridScrollOffset(
+      currentBody.scrollTop,
+      maximum,
+      fieldDragScrollDirection,
+      480 * elapsed / 1000,
+    );
+    if (nextTop === currentBody.scrollTop) {
+      stopFieldDragAutoScroll();
+      return;
+    }
+    currentBody.scrollTop = nextTop;
+    const rect = currentBody.getBoundingClientRect();
+    const x = Math.max(rect.left + 1, Math.min(rect.right - 1, fieldDragLastX));
+    const y = Math.max(rect.top + 1, Math.min(rect.bottom - 1, fieldDragLastY));
+    updateFieldDropTargetAt(document.elementFromPoint?.(x, y) ?? null, y);
+    fieldDragAutoScrollFrame = window.requestAnimationFrame(scrollFrame);
+  };
+  fieldDragAutoScrollFrame = window.requestAnimationFrame(scrollFrame);
+}
+
 function updateFieldDropTarget(event: DragEvent): void {
   if (!draggingFieldId.value) return;
   event.preventDefault();
   if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-  const eventTarget = event.target;
-  if (!(eventTarget instanceof Element)) return;
-  const row = eventTarget.closest("tr.el-table__row");
-  const body = row?.parentElement;
-  if (!(row instanceof HTMLTableRowElement) || !(body instanceof HTMLTableSectionElement)) return;
-  const rowIndex = Array.from(body.rows).indexOf(row);
-  if (rowIndex < 0 || rowIndex >= workingFields.value.length) return;
-  const sourceIndex = workingFields.value.findIndex(
-    (field) => field.id === draggingFieldId.value,
-  );
-  if (sourceIndex < 0) return;
-  const insertAfter = event.clientY >= row.getBoundingClientRect().top + row.offsetHeight / 2;
-  const boundaryIndex = rowIndex + (insertAfter ? 1 : 0);
-  const targetIndex = boundaryIndex > sourceIndex ? boundaryIndex - 1 : boundaryIndex;
-  dragOverRowIndex.value = rowIndex;
-  dragInsertAfter.value = insertAfter;
-  dragTargetIndex.value = Math.max(0, Math.min(workingFields.value.length - 1, targetIndex));
+  updateFieldDropTargetAt(event.target instanceof Element ? event.target : null, event.clientY);
+  updateFieldDragAutoScroll(event);
+}
+
+function handleFieldDragLeave(event: DragEvent): void {
+  const table = fieldTableElement();
+  const relatedTarget = event.relatedTarget;
+  if (table && relatedTarget instanceof Node && table.contains(relatedTarget)) return;
+  stopFieldDragAutoScroll();
+  clearFieldDropTarget();
 }
 
 async function dropField(event: DragEvent): Promise<void> {
@@ -432,25 +588,10 @@ async function dropField(event: DragEvent): Promise<void> {
   clearFieldDrag();
   if (!projectId || sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return;
 
-  const reordered = workingFields.value.slice();
-  const [field] = reordered.splice(sourceIndex, 1);
-  if (!field) return;
-  reordered.splice(targetIndex, 0, field);
-  workingFields.value = reordered;
-  saving.value = true;
-  try {
-    await reorderFields(
-      projectId,
-      reordered.map((item) => item.id),
-    );
-    await reloadAndNotify();
-    ElMessage.success("表头顺序已保存");
-  } catch (error) {
-    syncCurrentProject();
-    ElMessage.error(error instanceof Error ? error.message : "表头顺序保存失败");
-  } finally {
-    saving.value = false;
-  }
+  await persistFieldOrder(
+    moveArrayItem(workingFields.value, sourceIndex, targetIndex),
+    "表头顺序已保存",
+  );
 }
 
 function fieldRowClassName({ row, rowIndex }: { row: FieldDefinition; rowIndex: number }): string {
@@ -626,7 +767,10 @@ async function removeField(field: FieldDefinition): Promise<void> {
 watch(
   () => props.modelValue,
   (visible) => {
-    if (!visible) return;
+    if (!visible) {
+      clearFieldDrag();
+      return;
+    }
     currentProjectId.value = props.selectedProjectId;
     syncCurrentProject();
     void loadLedgerTemplates();
@@ -644,6 +788,8 @@ watch(
   },
   { deep: true },
 );
+
+onBeforeUnmount(clearFieldDrag);
 </script>
 
 <template>
@@ -727,18 +873,21 @@ watch(
 
         <div v-if="draggingField" class="field-drag-status" aria-live="polite">
           正在移动“{{ draggingField.label }}”：第 {{ dragStartIndex + 1 }} 位 →
-          第 {{ dragTargetIndex + 1 }} 位
+          <template v-if="dragTargetIndex >= 0">第 {{ dragTargetIndex + 1 }} 位</template>
+          <template v-else>请选择有效位置</template>
         </div>
         <el-table
+          ref="fieldTableRef"
           :data="workingFields"
           row-key="id"
           :row-class-name="fieldRowClassName"
           border
           max-height="480"
           @dragover="updateFieldDropTarget"
+          @dragleave="handleFieldDragLeave"
           @drop="dropField"
         >
-          <el-table-column label="顺序" width="116" align="center">
+          <el-table-column label="顺序" width="188" align="center">
             <template #default="{ row, $index }: { row: FieldDefinition; $index: number }">
               <span class="field-order-actions">
                 <button
@@ -754,17 +903,35 @@ watch(
                 </button>
                 <el-button
                   link
+                  :icon="ChevronsUp"
+                  :disabled="saving || $index === 0"
+                  :aria-label="`将表头“${row.label}”移到最前`"
+                  title="移到最前"
+                  @click="moveFieldTo($index, 0)"
+                />
+                <el-button
+                  link
                   :icon="ArrowUp"
-                  :disabled="$index === 0"
+                  :disabled="saving || $index === 0"
+                  :aria-label="`将表头“${row.label}”向前移动一位`"
                   title="向前移动"
                   @click="moveField($index, -1)"
                 />
                 <el-button
                   link
                   :icon="ArrowDown"
-                  :disabled="$index === workingFields.length - 1"
+                  :disabled="saving || $index === workingFields.length - 1"
+                  :aria-label="`将表头“${row.label}”向后移动一位`"
                   title="向后移动"
                   @click="moveField($index, 1)"
+                />
+                <el-button
+                  link
+                  :icon="ChevronsDown"
+                  :disabled="saving || $index === workingFields.length - 1"
+                  :aria-label="`将表头“${row.label}”移到最后`"
+                  title="移到最后"
+                  @click="moveFieldTo($index, workingFields.length - 1)"
                 />
               </span>
             </template>

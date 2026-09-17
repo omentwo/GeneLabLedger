@@ -32,6 +32,7 @@ import {
 } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
+import { ApiError } from "@/api/client";
 import {
   createLedgerNativePreview,
   DEFAULT_LEDGER_PREVIEW_SCOPE,
@@ -3352,8 +3353,12 @@ async function replayHistoryEntry(
     reconcileOperationResult(result);
     await loadRecords(entry.projectId, { showLoading: false, preserveHistory: true });
   } catch (error) {
-    ledgerHistory.clear();
-    await loadRecords(activeProjectId.value, { showLoading: false, preserveHistory: true });
+    try {
+      await loadRecords(entry.projectId, { showLoading: false, preserveHistory: true });
+    } catch {
+      // Preserve the original replay error. A failed refresh must not erase
+      // the history entry or hide the reason why undo/redo was rejected.
+    }
     throw error;
   } finally {
     historyReplayLoading.value = false;
@@ -3504,7 +3509,9 @@ function finishPersistedDraft(
     pushHistory("新增台账记录", [], [created], projectId);
     if (notify) {
       ElMessage.success(
-        record._insertAnchorId ? "病理号已自动保存，记录位置已保留" : "病理号已自动保存，记录已加入表格底部",
+        record._insertAnchorId
+          ? "病理号已保存并创建台账记录，位置已保留；可使用撤销删除本次新增"
+          : "病理号已保存并创建台账记录，已加入表格底部；可使用撤销删除本次新增",
       );
     }
 }
@@ -3844,7 +3851,7 @@ async function undoLedger(): Promise<void> {
     const applied = await ledgerHistory.undo((entry) => replayHistoryEntry(entry, "undo"));
     if (applied) ElMessage.success("已撤销上一步台账操作");
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "台账撤销失败");
+    await handleHistoryReplayError("undo", error);
   }
 }
 
@@ -3853,7 +3860,50 @@ async function redoLedger(): Promise<void> {
     const applied = await ledgerHistory.redo((entry) => replayHistoryEntry(entry, "redo"));
     if (applied) ElMessage.success("已恢复下一步台账操作");
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "台账恢复失败");
+    await handleHistoryReplayError("redo", error);
+  }
+}
+
+function isHistoryConflict(error: unknown): boolean {
+  if (error instanceof ApiError && error.status === 409) return true;
+  if (!(error instanceof Error)) return false;
+  return error.message.includes("内容已变化") || error.message.includes("数据已发生变化");
+}
+
+async function handleHistoryReplayError(
+  direction: "undo" | "redo",
+  error: unknown,
+): Promise<void> {
+  const fallback = direction === "undo" ? "台账撤销失败" : "台账恢复失败";
+  const message = error instanceof Error ? error.message : fallback;
+  if (!isHistoryConflict(error)) {
+    ElMessage.error(message);
+    return;
+  }
+
+  const entry = ledgerHistory.peek(direction);
+  if (!entry) {
+    ElMessage.error(message);
+    return;
+  }
+  try {
+    await ElMessageBox.confirm(
+      `“${entry.label}”之后的数据已被修改，不能安全${direction === "undo" ? "撤销" : "恢复"}。是否跳过这条失效历史，继续处理更早的操作？`,
+      `${direction === "undo" ? "撤销" : "恢复"}步骤已失效`,
+      {
+        confirmButtonText: "跳过此步骤",
+        cancelButtonText: "保留，稍后处理",
+        type: "warning",
+      },
+    );
+    const discarded = ledgerHistory.discard(direction);
+    if (discarded) ElMessage.info(`已跳过失效历史：“${discarded.label}”`);
+  } catch (action) {
+    if (action === "cancel" || action === "close") {
+      ElMessage.warning(`${message}；该步骤已保留`);
+      return;
+    }
+    ElMessage.error(message);
   }
 }
 
