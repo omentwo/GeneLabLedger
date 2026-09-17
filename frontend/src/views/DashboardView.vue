@@ -1,1397 +1,531 @@
 <script setup lang="ts">
+import type { EChartsCoreOption } from "echarts/core";
 import {
-  ArrowUpRight,
-  CalendarRange,
-  ChevronDown,
+  ArrowRight,
+  CalendarDays,
+  CheckCircle2,
   CircleAlert,
+  Clock3,
+  FileCheck2,
   FlaskConical,
-  Layers3,
-  Radar,
+  RefreshCw,
+  TrendingDown,
+  TrendingUp,
 } from "@lucide/vue";
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { useRouter } from "vue-router";
 
-import { listRecords } from "@/api/records";
+import { getDashboardSummary } from "@/api/dashboard";
+import DashboardChart from "@/components/dashboard/DashboardChart.vue";
 import { useAppStore } from "@/stores/app";
-import type { ProjectRecord } from "@/types/api";
-import { shanghaiDateKey, shiftDateKey, shiftMonthKey } from "@/utils/datetime";
+import type { DashboardSummary } from "@/types/api";
 
 const appStore = useAppStore();
-const records = ref<ProjectRecord[]>([]);
+const router = useRouter();
+const summary = ref<DashboardSummary | null>(null);
 const loading = ref(false);
 const errorMessage = ref("");
-const monthlyProjectId = ref("");
-const monthlyHoverIndex = ref<number | null>(null);
+const selectedProjectId = ref("");
+const trendMonths = ref<6 | 12>(12);
 const countFormatter = new Intl.NumberFormat("zh-CN");
+let requestController: AbortController | null = null;
 
 function formatCount(value: number): string {
   return countFormatter.format(value);
 }
 
-const total = computed(() => records.value.length);
-const recentThirtyDays = computed(() => {
-  const endKey = shanghaiDateKey();
-  const startKey = shiftDateKey(endKey, -29);
-  return records.value.filter((record) => {
-    const date = record.experiment_date ?? "";
-    return date >= startKey && date <= endKey;
-  }).length;
-});
+function cssColor(name: string, fallback: string): string {
+  if (typeof window === "undefined") return fallback;
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+}
 
-const projectStats = computed(() =>
-  appStore.projects.map((project) => {
-    const projectRecords = records.value.filter((record) => record.project_id === project.id);
-    return {
-      id: project.id,
-      name: project.name,
-      total: projectRecords.length,
-    };
-  }),
-);
-const projectChartStats = computed(() =>
-  projectStats.value
-    .map((project) => {
-      const endKey = shanghaiDateKey();
-      const previousMonthKey = shiftMonthKey(endKey.slice(0, 7), -1);
-      const startKey = `${previousMonthKey}-01`;
-      const nextMonthKey = shiftMonthKey(previousMonthKey, 1);
-      const endDate = `${nextMonthKey}-01`;
-      const previousMonthCount = records.value.filter((record) => {
-        const date = record.experiment_date ?? "";
-        return record.project_id === project.id && date >= startKey && date < endDate;
-      }).length;
-      return { ...project, previousMonth: previousMonthCount };
-    })
-    .sort((a, b) => b.total - a.total || a.name.localeCompare(b.name)),
-);
-const projectMax = computed(() =>
-  Math.max(1, ...projectChartStats.value.map((project) => project.total)),
-);
-const monthlyProjectName = computed(
-  () =>
-    appStore.projects.find((project) => project.id === monthlyProjectId.value)?.name ??
-    "全部项目",
-);
-const monthlyStats = computed(() => {
-  const currentMonthKey = shanghaiDateKey().slice(0, 7);
-  return Array.from({ length: 12 }, (_item, index) => {
-    const key = shiftMonthKey(currentMonthKey, index - 11);
-    const year = Number(key.slice(0, 4));
-    const month = Number(key.slice(5, 7));
-    const monthRecords = records.value.filter(
-      (record) =>
-        (!monthlyProjectId.value || record.project_id === monthlyProjectId.value) &&
-        (record.experiment_date ?? "").startsWith(key),
-    );
-    return {
-      key,
-      label:
-        month === 1
-          ? `${year}年1月`
-          : `${month}月`,
-      total: monthRecords.length,
-    };
-  });
-});
-const monthlyMax = computed(() =>
-  Math.max(1, ...monthlyStats.value.map((month) => month.total)),
-);
-const monthlyChartGeometry = {
-  width: 960,
-  height: 230,
-  left: 48,
-  right: 24,
-  top: 14,
-  bottom: 32,
-};
-type ChartPoint = { x: number; y: number };
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"]/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+  })[character] ?? character);
+}
 
-function smoothLineCommands(points: ChartPoint[]): string[] {
-  if (!points.length) return [];
-  const commands = [`M ${points[0]!.x} ${points[0]!.y}`];
-  for (let index = 0; index < points.length - 1; index += 1) {
-    const previous = points[index - 1] ?? points[index]!;
-    const current = points[index]!;
-    const next = points[index + 1]!;
-    const afterNext = points[index + 2] ?? next;
-    const controlOne = {
-      x: current.x + (next.x - previous.x) / 6,
-      y: current.y + (next.y - previous.y) / 6,
-    };
-    const controlTwo = {
-      x: next.x - (afterNext.x - current.x) / 6,
-      y: next.y - (afterNext.y - current.y) / 6,
-    };
-    commands.push(
-      `C ${controlOne.x} ${controlOne.y}, ${controlTwo.x} ${controlTwo.y}, ${next.x} ${next.y}`,
-    );
+const activeProjectName = computed(
+  () => appStore.projects.find((project) => project.id === selectedProjectId.value)?.name ?? "全部项目",
+);
+
+const monthChange = computed(() => {
+  const current = summary.value?.current_month ?? 0;
+  const previous = summary.value?.previous_month ?? 0;
+  if (previous === 0) {
+    return current === 0
+      ? { label: "与上月持平", tone: "neutral" as const }
+      : { label: "本月新增", tone: "up" as const };
   }
-  return commands;
-}
-
-function smoothLinePath(points: ChartPoint[]): string {
-  return smoothLineCommands(points).join(" ");
-}
-
-const monthlyPoints = computed(() => {
-  const plotWidth =
-    monthlyChartGeometry.width - monthlyChartGeometry.left - monthlyChartGeometry.right;
-  const plotHeight =
-    monthlyChartGeometry.height - monthlyChartGeometry.top - monthlyChartGeometry.bottom;
-  const step = plotWidth / Math.max(1, monthlyStats.value.length - 1);
-  return monthlyStats.value.map((month, index) => ({
-    ...month,
-    x: monthlyChartGeometry.left + step * index,
-    y:
-      monthlyChartGeometry.top +
-      plotHeight -
-      (month.total / monthlyMax.value) * plotHeight,
-  }));
-});
-const monthlyLinePath = computed(() =>
-  smoothLinePath(monthlyPoints.value.map(({ x, y }) => ({ x, y }))),
-);
-const monthlyAreaPath = computed(() => {
-  const points = monthlyPoints.value;
-  if (!points.length) return "";
-  const baseline = monthlyChartGeometry.height - monthlyChartGeometry.bottom;
-  const lineCommands = smoothLineCommands(points.map(({ x, y }) => ({ x, y })));
-  return [
-    `M ${points[0]!.x} ${baseline}`,
-    `L ${points[0]!.x} ${points[0]!.y}`,
-    ...lineCommands.slice(1),
-    `L ${points.at(-1)!.x} ${baseline}`,
-    "Z",
-  ].join(" ");
-});
-const monthlyGridLines = computed(() => {
-  const plotHeight =
-    monthlyChartGeometry.height - monthlyChartGeometry.top - monthlyChartGeometry.bottom;
-  return [0, 0.25, 0.5, 0.75, 1].map((fraction) => ({
-    y: monthlyChartGeometry.top + plotHeight * fraction,
-    value: Math.round(monthlyMax.value * (1 - fraction)),
-  }));
-});
-const hoveredMonth = computed(() => {
-  const index = monthlyHoverIndex.value;
-  return index === null ? null : monthlyPoints.value[index] ?? null;
-});
-const hoveredMonthProjects = computed(() => {
-  if (!hoveredMonth.value) return [];
-  return appStore.projects
-    .map((project) => ({
-      id: project.id,
-      name: project.name,
-      count: records.value.filter(
-        (record) =>
-          (!monthlyProjectId.value || record.project_id === monthlyProjectId.value) &&
-          record.project_id === project.id &&
-          (record.experiment_date ?? "").startsWith(hoveredMonth.value!.key),
-      ).length,
-    }))
-    .filter((project) => project.count > 0)
-    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
-});
-const monthlyTooltipClass = computed(() => {
-  const index = monthlyHoverIndex.value;
-  if (index === 0) return "monthly-tooltip-left";
-  if (index === monthlyPoints.value.length - 1) return "monthly-tooltip-right";
-  return "monthly-tooltip-center";
-});
-const monthlyTooltipStyle = computed(() => {
-  const point = hoveredMonth.value;
-  if (!point) return {};
-  const maxTop = Math.max(8, monthlyChartGeometry.height - 182);
-  const top = Math.min(maxTop, Math.max(8, point.y - 108));
+  const change = Math.round(((current - previous) / previous) * 100);
+  if (change === 0) return { label: "与上月持平", tone: "neutral" as const };
+  if (Math.abs(change) > 999) {
+    const difference = current - previous;
+    return {
+      label: `较上月 ${difference > 0 ? "+" : ""}${formatCount(difference)} 条`,
+      tone: difference > 0 ? "up" as const : "down" as const,
+    };
+  }
   return {
-    left: `${(point.x / monthlyChartGeometry.width) * 100}%`,
-    top: `${top}px`,
+    label: `较上月 ${change > 0 ? "+" : ""}${change}%`,
+    tone: change > 0 ? "up" as const : "down" as const,
   };
 });
 
-function setMonthlyHover(index: number): void {
-  monthlyHoverIndex.value = index;
+const visibleMonthly = computed(() => summary.value?.monthly.slice(-trendMonths.value) ?? []);
+
+const lineChartOption = computed<EChartsCoreOption>(() => {
+  const primary = cssColor("--app-chart-primary", "#5968ca");
+  const text = cssColor("--app-muted", "#606b80");
+  const border = cssColor("--app-border", "#e0e4ee");
+  const points = visibleMonthly.value;
+  return {
+    animationDuration: 450,
+    aria: { enabled: true, decal: { show: true } },
+    grid: { left: 16, right: 18, top: 24, bottom: 8, containLabel: true },
+    tooltip: {
+      trigger: "axis",
+      backgroundColor: cssColor("--app-card", "#ffffff"),
+      borderColor: border,
+      textStyle: { color: cssColor("--app-text", "#25304a") },
+      formatter: (params: unknown) => {
+        const item = Array.isArray(params) ? params[0] as { axisValue?: string; value?: number } : null;
+        return item
+          ? `<strong>${escapeHtml(item.axisValue ?? "")}</strong><br/>实验记录&nbsp;&nbsp;<b>${formatCount(Number(item.value ?? 0))}</b>`
+          : "";
+      },
+    },
+    xAxis: {
+      type: "category",
+      boundaryGap: false,
+      data: points.map((point) => point.month),
+      axisLine: { lineStyle: { color: border } },
+      axisTick: { show: false },
+      axisLabel: {
+        color: text,
+        formatter: (value: string) => value.endsWith("-01") ? `${value.slice(0, 4)}年\n1月` : `${Number(value.slice(5))}月`,
+      },
+    },
+    yAxis: {
+      type: "value",
+      minInterval: 1,
+      axisLabel: { color: text },
+      splitLine: { lineStyle: { color: border, type: "dashed" } },
+    },
+    series: [{
+      name: "实验记录",
+      type: "line",
+      smooth: 0.28,
+      symbol: "circle",
+      symbolSize: 7,
+      showSymbol: true,
+      data: points.map((point) => point.total),
+      lineStyle: { width: 3, color: primary },
+      itemStyle: { color: primary, borderColor: cssColor("--app-card", "#ffffff"), borderWidth: 2 },
+      areaStyle: { color: primary, opacity: 0.1 },
+      emphasis: { focus: "series" },
+    }],
+  };
+});
+
+const allProjects = computed(() =>
+  [...(summary.value?.projects ?? [])].sort(
+    (left, right) =>
+      right.current_month - left.current_month ||
+      right.previous_month - left.previous_month ||
+      left.name.localeCompare(right.name),
+  ),
+);
+const topProjects = computed(() => allProjects.value.slice(0, 7));
+const topProjectMax = computed(() => Math.max(1, ...topProjects.value.map((project) => project.current_month)));
+const compositionMonthly = computed(() => summary.value?.monthly.slice(-trendMonths.value) ?? []);
+const compositionMonthKeys = computed(() => new Set(compositionMonthly.value.map((item) => item.month)));
+const projectComposition = computed(() =>
+  allProjects.value.filter((project) =>
+    project.monthly.some((item) => compositionMonthKeys.value.has(item.month) && item.total > 0),
+  ),
+);
+const workloadChartHeight = computed(() => `${Math.max(330, allProjects.value.length * 46 + 88)}px`);
+
+function projectColor(index: number): string {
+  const themeColors = [
+    cssColor("--app-chart-primary", "#5968ca"),
+    cssColor("--app-chart-secondary", "#9180c7"),
+    "#3f8f83",
+    "#c7833f",
+    "#b86278",
+    "#5b7db8",
+    "#7b68ad",
+  ];
+  return themeColors[index] ?? `hsl(${(index * 53 + 198) % 360} 56% 52%)`;
 }
 
+const structureChartOption = computed<EChartsCoreOption>(() => ({
+  animationDuration: 450,
+  aria: { enabled: true, decal: { show: true } },
+  grid: { left: 8, right: 10, top: 18, bottom: 74, containLabel: true },
+  tooltip: {
+    trigger: "axis",
+    axisPointer: { type: "shadow" },
+    backgroundColor: cssColor("--app-card", "#ffffff"),
+    borderColor: cssColor("--app-border", "#e0e4ee"),
+    textStyle: { color: cssColor("--app-text", "#25304a") },
+  },
+  legend: {
+    type: "scroll",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    icon: "roundRect",
+    itemWidth: 10,
+    itemHeight: 10,
+    pageIconColor: cssColor("--app-primary-text", "#5968ca"),
+    pageTextStyle: { color: cssColor("--app-muted", "#606b80") },
+    textStyle: { color: cssColor("--app-muted", "#606b80"), width: 76, overflow: "truncate" },
+  },
+  xAxis: {
+    type: "category",
+    data: compositionMonthly.value.map((item) => item.month),
+    axisTick: { show: false },
+    axisLine: { lineStyle: { color: cssColor("--app-border", "#e0e4ee") } },
+    axisLabel: {
+      color: cssColor("--app-text", "#25304a"),
+      fontSize: 10,
+      formatter: (value: string) => value.endsWith("-01") ? `${value.slice(0, 4)}年\n1月` : `${Number(value.slice(5))}月`,
+    },
+  },
+  yAxis: {
+    type: "value",
+    minInterval: 1,
+    axisLabel: { color: cssColor("--app-muted", "#606b80") },
+    splitLine: { lineStyle: { color: cssColor("--app-border", "#e0e4ee"), type: "dashed" } },
+  },
+  series: projectComposition.value.map((project, index) => ({
+    name: project.name,
+    type: "bar",
+    stack: "current-month-total",
+    barMaxWidth: 42,
+    emphasis: { focus: "series" },
+    itemStyle: { color: projectColor(index) },
+    label: {
+      show: true,
+      position: "inside",
+      formatter: (params: unknown) => {
+        const item = params as { dataIndex?: number; value?: number };
+        const value = Number(item.value ?? 0);
+        const monthlyTotal = compositionMonthly.value[item.dataIndex ?? -1]?.total ?? 0;
+        return value > Math.max(1, monthlyTotal * 0.12) ? String(value) : "";
+      },
+      color: "#ffffff",
+      fontWeight: 700,
+    },
+    data: compositionMonthly.value.map((month) => {
+      const value = project.monthly.find((item) => item.month === month.month)?.total ?? 0;
+      return { value, projectId: project.id };
+    }),
+  })),
+}));
+
+const projectChartOption = computed<EChartsCoreOption>(() => {
+  const projects = [...allProjects.value].reverse();
+  const primary = cssColor("--app-chart-primary", "#5968ca");
+  const secondary = cssColor("--app-chart-secondary", "#9180c7");
+  const text = cssColor("--app-muted", "#606b80");
+  return {
+    animationDuration: 450,
+    aria: { enabled: true, decal: { show: true } },
+    grid: { left: 12, right: 18, top: 36, bottom: 6, containLabel: true },
+    legend: {
+      top: 0,
+      right: 0,
+      itemWidth: 10,
+      itemHeight: 10,
+      textStyle: { color: text },
+      data: ["本月", "上月"],
+    },
+    tooltip: {
+      trigger: "axis",
+      axisPointer: { type: "shadow" },
+      backgroundColor: cssColor("--app-card", "#ffffff"),
+      borderColor: cssColor("--app-border", "#e0e4ee"),
+      textStyle: { color: cssColor("--app-text", "#25304a") },
+    },
+    xAxis: {
+      type: "value",
+      minInterval: 1,
+      axisLabel: { color: text },
+      splitLine: { lineStyle: { color: cssColor("--app-border", "#e0e4ee"), type: "dashed" } },
+    },
+    yAxis: {
+      type: "category",
+      data: projects.map((project) => project.name),
+      axisTick: { show: false },
+      axisLine: { show: false },
+      axisLabel: { color: cssColor("--app-text", "#25304a"), width: 112, overflow: "truncate" },
+    },
+    series: [
+      {
+        name: "本月",
+        type: "bar",
+        barMaxWidth: 14,
+        itemStyle: { color: primary, borderRadius: [0, 5, 5, 0] },
+        data: projects.map((project) => ({ value: project.current_month, projectId: project.id })),
+      },
+      {
+        name: "上月",
+        type: "bar",
+        barMaxWidth: 14,
+        itemStyle: { color: secondary, borderRadius: [0, 5, 5, 0] },
+        data: projects.map((project) => ({ value: project.previous_month, projectId: project.id })),
+      },
+    ],
+  };
+});
+
 async function loadDashboard(): Promise<void> {
+  requestController?.abort();
+  const controller = new AbortController();
+  requestController = controller;
   loading.value = true;
   errorMessage.value = "";
   try {
-    const loaded: ProjectRecord[] = [];
-    let offset = 0;
-    while (true) {
-      const page = await listRecords({ limit: 1000, offset });
-      loaded.push(...page.items);
-      offset += page.items.length;
-      if (offset >= page.total || page.items.length === 0) break;
-    }
-    records.value = loaded;
+    summary.value = await getDashboardSummary(selectedProjectId.value, controller.signal);
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : "统计数据读取失败";
+    if (controller.signal.aborted) return;
+    errorMessage.value = error instanceof Error ? error.message : "统计数据加载失败";
   } finally {
-    loading.value = false;
+    if (requestController === controller) loading.value = false;
   }
 }
 
-onMounted(() => {
-  void loadDashboard();
-});
+function openProjectFromChart(params: unknown): void {
+  if (!params || typeof params !== "object" || !("data" in params)) return;
+  const data = (params as { data?: unknown }).data;
+  if (!data || typeof data !== "object" || !("projectId" in data)) return;
+  const projectId = String((data as { projectId: unknown }).projectId);
+  void router.push({ path: "/ledger", query: { project: projectId } });
+}
 
+watch(selectedProjectId, () => void loadDashboard());
 watch(
-  () => appStore.projects,
-  (projects) => {
-    if (
-      monthlyProjectId.value &&
-      !projects.some((project) => project.id === monthlyProjectId.value)
-    ) {
-      monthlyProjectId.value = "";
+  () => appStore.projects.map((project) => project.id),
+  (projectIds) => {
+    if (selectedProjectId.value && !projectIds.includes(selectedProjectId.value)) {
+      selectedProjectId.value = "";
     }
   },
-  { deep: true, immediate: true },
 );
+
+onMounted(() => void loadDashboard());
+onBeforeUnmount(() => requestController?.abort());
 </script>
 
 <template>
-  <div class="dashboard-stage page-stack" :aria-busy="loading">
-    <div v-if="errorMessage" class="dashboard-alert" role="alert">
-      <CircleAlert :size="18" :stroke-width="1.8" aria-hidden="true" />
-      <span>{{ errorMessage }}</span>
-    </div>
-
-    <header class="dashboard-masthead">
-      <div class="masthead-copy">
-        <div class="masthead-kicker">
-          <Radar :size="16" :stroke-width="1.8" aria-hidden="true" />
-          <span>实验运行态势</span>
-        </div>
-        <h1><span>数据</span><em>观测台</em></h1>
-        <p>以实验日期为统一口径，观察跨项目记录、月度轨迹与工作负载。</p>
+  <main class="dashboard" :aria-busy="loading">
+    <header class="dashboard-header">
+      <div>
+        <span class="dashboard-eyebrow">统计面板</span>
+        <h1>实验数据概览</h1>
+        <p>{{ activeProjectName }} · 数据口径为实验日期</p>
+      </div>
+      <div class="dashboard-actions">
+        <el-select
+          v-model="selectedProjectId"
+          class="project-filter"
+          filterable
+          aria-label="筛选检测项目"
+          placeholder="全部项目"
+        >
+          <el-option label="全部项目" value="" />
+          <el-option v-for="project in appStore.projects" :key="project.id" :label="project.name" :value="project.id" />
+        </el-select>
+        <button class="refresh-button" type="button" :disabled="loading" @click="loadDashboard">
+          <RefreshCw :size="16" :class="{ spinning: loading }" aria-hidden="true" />刷新
+        </button>
       </div>
     </header>
 
-    <section class="dashboard-kpis" aria-label="核心统计指标">
-      <article class="kpi-card kpi-card-primary">
-        <div class="kpi-card-topline">
-          <span class="kpi-icon" aria-hidden="true">
-            <FlaskConical :size="21" :stroke-width="1.7" />
-          </span>
-          <span class="kpi-index">01</span>
-        </div>
-        <div class="kpi-value">{{ formatCount(total) }}</div>
-        <div class="kpi-caption">
-          <strong>实验总量</strong>
-          <span>全部项目记录</span>
-        </div>
-      </article>
-      <article class="kpi-card">
-        <div class="kpi-card-topline">
-          <span class="kpi-icon" aria-hidden="true">
-            <Layers3 :size="21" :stroke-width="1.7" />
-          </span>
-          <span class="kpi-index">02</span>
-        </div>
-        <div class="kpi-value">{{ formatCount(appStore.projects.length) }}</div>
-        <div class="kpi-caption">
-          <strong>检测项目</strong>
-          <span>独立项目台账</span>
-        </div>
-      </article>
-      <article class="kpi-card">
-        <div class="kpi-card-topline">
-          <span class="kpi-icon" aria-hidden="true">
-            <CalendarRange :size="21" :stroke-width="1.7" />
-          </span>
-          <span class="kpi-index">03</span>
-        </div>
-        <div class="kpi-value">{{ formatCount(recentThirtyDays) }}</div>
-        <div class="kpi-caption">
-          <strong>近 30 天</strong>
-          <span>按实验日期统计</span>
-        </div>
-      </article>
-    </section>
+    <div v-if="errorMessage" class="dashboard-alert" role="alert">
+      <CircleAlert :size="18" aria-hidden="true" />
+      <span>{{ errorMessage }}</span>
+      <button type="button" @click="loadDashboard">重新加载</button>
+    </div>
 
-    <section class="analytics-grid">
-      <article class="chart-card monthly-card">
-        <div class="chart-heading">
-          <div>
-            <span class="section-eyebrow">月度轨迹</span>
-            <h2>近 12 个月实验量</h2>
-            <p>{{ monthlyProjectName }}，按实验日期统计</p>
-          </div>
-          <div class="chart-heading-actions">
-            <div class="monthly-chart-legend" aria-label="图表图例">
-              <span><i class="monthly-legend-dot" />实验总量</span>
-            </div>
-            <el-select
-              v-model="monthlyProjectId"
-              class="monthly-project-select"
-              filterable
-              placeholder="选择项目"
-              :suffix-icon="ChevronDown"
-              aria-label="选择月度统计项目"
-            >
-              <el-option label="全部项目" value="" />
-              <el-option
-                v-for="project in appStore.projects"
-                :key="project.id"
-                :label="project.name"
-                :value="project.id"
-              />
-            </el-select>
-          </div>
-        </div>
-        <div class="monthly-chart-scroll">
-          <div class="monthly-chart-shell" @mouseleave="monthlyHoverIndex = null">
-            <svg
-              class="monthly-line-chart"
-              :viewBox="`0 0 ${monthlyChartGeometry.width} ${monthlyChartGeometry.height}`"
-              preserveAspectRatio="none"
-              role="img"
-              aria-label="近 12 个月实验量折线图"
-            >
-              <defs>
-                <linearGradient id="monthly-area-gradient" x1="0" y1="0" x2="0" y2="1">
-                  <stop class="monthly-gradient-start" offset="0%" />
-                  <stop class="monthly-gradient-end" offset="100%" />
-                </linearGradient>
-              </defs>
-              <g class="monthly-grid-lines">
-                <line
-                  v-for="line in monthlyGridLines"
-                  :key="line.y"
-                  :x1="monthlyChartGeometry.left"
-                  :x2="monthlyChartGeometry.width - monthlyChartGeometry.right"
-                  :y1="line.y"
-                  :y2="line.y"
-                />
-                <text
-                  v-for="line in monthlyGridLines"
-                  :key="`label-${line.y}`"
-                  class="monthly-y-label"
-                  :x="monthlyChartGeometry.left - 10"
-                  :y="line.y + 4"
-                  text-anchor="end"
-                >{{ line.value }}</text>
-              </g>
-              <path class="monthly-area" :d="monthlyAreaPath" />
-              <path class="monthly-line" :d="monthlyLinePath" pathLength="1" />
-              <line
-                v-if="hoveredMonth"
-                class="monthly-focus-line"
-                :x1="hoveredMonth.x"
-                :x2="hoveredMonth.x"
-                :y1="monthlyChartGeometry.top"
-                :y2="monthlyChartGeometry.height - monthlyChartGeometry.bottom"
-              />
-              <g v-for="(point, index) in monthlyPoints" :key="point.key">
-                <circle
-                  class="monthly-point-hit"
-                  :cx="point.x"
-                  :cy="point.y"
-                  r="16"
-                  tabindex="0"
-                  :aria-label="`${point.label}：${point.total} 条实验记录`"
-                  @mouseenter="setMonthlyHover(index)"
-                  @focus="setMonthlyHover(index)"
-                  @blur="monthlyHoverIndex = null"
-                />
-                <circle
-                  class="monthly-point"
-                  :class="{ 'monthly-point-active': monthlyHoverIndex === index }"
-                  :cx="point.x"
-                  :cy="point.y"
-                  :r="monthlyHoverIndex === index ? 5 : 3.5"
-                />
-                <text
-                  class="monthly-axis-label"
-                  :x="point.x"
-                  :y="monthlyChartGeometry.height - 9"
-                  text-anchor="middle"
-                >{{ point.label }}</text>
-              </g>
-            </svg>
-            <div
-              v-if="hoveredMonth"
-              class="monthly-tooltip"
-              :class="monthlyTooltipClass"
-              :style="monthlyTooltipStyle"
-            >
-              <strong>{{ hoveredMonth.label }}</strong>
-              <div class="monthly-tooltip-row">
-                <i class="monthly-tooltip-dot monthly-tooltip-total" />
-                <span>实验总量</span>
-                <b>{{ hoveredMonth.total }}</b>
-              </div>
-              <div class="monthly-tooltip-list">
-                <div
-                  v-for="project in hoveredMonthProjects"
-                  :key="project.id"
-                  class="monthly-tooltip-row"
-                >
-                  <i class="monthly-tooltip-dot" />
-                  <span>{{ project.name }}</span>
-                  <b>{{ project.count }}</b>
-                </div>
-                <span v-if="!hoveredMonthProjects.length" class="monthly-tooltip-empty">
-                  暂无项目记录
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </article>
+    <template v-if="loading && !summary">
+      <section class="kpi-grid" aria-label="正在加载核心指标">
+        <article v-for="index in 4" :key="index" class="kpi-card skeleton-card"><el-skeleton animated :rows="2" /></article>
+      </section>
+      <section class="loading-panel"><el-skeleton animated :rows="8" /></section>
+    </template>
 
-      <article class="chart-card project-volume-card">
-        <div class="chart-heading">
-          <div>
-            <span class="section-eyebrow">负载分布</span>
-            <h2>项目工作量分布</h2>
-            <p>总记录量与上月工作量对照</p>
+    <template v-else-if="summary">
+      <section class="kpi-grid" aria-label="核心统计指标">
+        <article class="kpi-card kpi-card-primary">
+          <span class="kpi-icon"><FlaskConical :size="20" aria-hidden="true" /></span>
+          <div class="kpi-content"><span class="kpi-label">实验记录总量</span><strong>{{ formatCount(summary.total_records) }}</strong><small>当前筛选范围内全部记录</small></div>
+        </article>
+        <article class="kpi-card">
+          <span class="kpi-icon"><CalendarDays :size="20" aria-hidden="true" /></span>
+          <div class="kpi-content">
+            <span class="kpi-label">本月实验</span><strong>{{ formatCount(summary.current_month) }}</strong>
+            <small :class="`change-${monthChange.tone}`"><TrendingUp v-if="monthChange.tone === 'up'" :size="14" aria-hidden="true" /><TrendingDown v-else-if="monthChange.tone === 'down'" :size="14" aria-hidden="true" />{{ monthChange.label }}</small>
           </div>
-          <span class="section-count">{{ projectChartStats.length }} 项</span>
-        </div>
-        <div v-if="projectChartStats.length" class="project-bars">
-          <RouterLink
-            v-for="(project, index) in projectChartStats"
-            :key="project.id"
-            class="project-bar-row"
-            :to="{ path: '/ledger', query: { project: project.id } }"
-          >
-            <div class="project-bar-heading">
-              <span class="project-bar-rank">{{ String(index + 1).padStart(2, "0") }}</span>
-              <span class="project-bar-name">{{ project.name }}</span>
-              <strong>{{ formatCount(project.total) }}</strong>
-              <ArrowUpRight :size="15" :stroke-width="1.8" aria-hidden="true" />
-            </div>
-            <div class="project-bar-track" aria-hidden="true">
-              <span
-                class="project-bar-total"
-                :style="{ width: `${(project.total / projectMax) * 100}%` }"
-              >
-              </span>
-            </div>
-            <small>上月 {{ formatCount(project.previousMonth) }} 条</small>
-          </RouterLink>
-        </div>
-        <div v-else class="dashboard-empty-state">
-          <FlaskConical :size="22" :stroke-width="1.6" aria-hidden="true" />
-          <span>暂无项目统计数据</span>
-        </div>
-      </article>
-    </section>
+        </article>
+        <article class="kpi-card">
+          <span class="kpi-icon"><Clock3 :size="20" aria-hidden="true" /></span>
+          <div class="kpi-content"><span class="kpi-label">近 30 天</span><strong>{{ formatCount(summary.recent_30_days) }}</strong><small>截至 {{ summary.as_of }}</small></div>
+        </article>
+        <article class="kpi-card">
+          <span class="kpi-icon"><FileCheck2 :size="20" aria-hidden="true" /></span>
+          <div class="kpi-content"><span class="kpi-label">报告生成率</span><strong>{{ summary.report_generated_rate.toFixed(1) }}<em>%</em></strong><small>{{ formatCount(summary.report_generated) }} 条已生成报告</small></div>
+        </article>
+      </section>
 
-    <section class="overview-panel">
-      <div class="overview-panel-header">
-        <div>
-          <span class="section-eyebrow">项目索引</span>
-          <h2>进入项目台账</h2>
-          <p>查看各项目记录，继续录入与管理。</p>
+      <section class="analytics-grid">
+        <article class="panel trend-panel">
+          <header class="panel-header">
+            <div><span class="panel-eyebrow">趋势</span><h2>月度实验量</h2><p>{{ activeProjectName }}的实验记录变化</p></div>
+            <div class="range-switch" aria-label="趋势时间范围"><button type="button" :class="{ active: trendMonths === 6 }" @click="trendMonths = 6">近 6 月</button><button type="button" :class="{ active: trendMonths === 12 }" @click="trendMonths = 12">近 12 月</button></div>
+          </header>
+          <DashboardChart class="trend-chart" :option="lineChartOption" :label="`${activeProjectName}近 ${trendMonths} 个月实验量折线图`" />
+        </article>
+
+        <article class="panel structure-panel">
+          <header class="panel-header">
+            <div><span class="panel-eyebrow">结构</span><h2>月度项目构成</h2><p>每月柱高为当月总例数，颜色区分项目</p></div>
+            <div class="range-switch" aria-label="构成时间范围"><button type="button" :class="{ active: trendMonths === 6 }" @click="trendMonths = 6">近 6 月</button><button type="button" :class="{ active: trendMonths === 12 }" @click="trendMonths = 12">近 12 月</button></div>
+          </header>
+          <DashboardChart v-if="projectComposition.length" class="structure-chart" :option="structureChartOption" :label="`${activeProjectName}近 ${trendMonths} 个月各项目实验量堆叠柱状图`" @chart-click="openProjectFromChart" />
+          <div v-else class="panel-empty">当前周期暂无项目数据</div>
+        </article>
+      </section>
+
+      <section class="workload-grid">
+        <article class="panel workload-panel">
+          <header class="panel-header workload-heading"><div><span class="panel-eyebrow">工作量</span><h2>全部台账月度对比</h2><p>逐一展示每个台账的本月与上月实验量</p></div><span class="panel-note">点击条形进入项目台账</span></header>
+          <DashboardChart v-if="allProjects.length" class="workload-chart" :style="{ height: workloadChartHeight, minHeight: workloadChartHeight }" :option="projectChartOption" label="全部台账本月与上月实验量对比图" @chart-click="openProjectFromChart" />
+          <div v-else class="panel-empty">暂无项目工作量数据</div>
+        </article>
+
+        <aside class="panel ranking-panel" aria-labelledby="ranking-title">
+          <header class="panel-header"><div><span class="panel-eyebrow">排名</span><h2 id="ranking-title">本月前 7 名</h2><p>按本月实验例数排序</p></div></header>
+          <ol v-if="topProjects.length" class="ranking-list">
+            <li v-for="(project, index) in topProjects" :key="project.id">
+              <RouterLink :to="{ path: '/ledger', query: { project: project.id } }" class="ranking-link">
+                <span class="ranking-index" :class="{ leading: index < 3 }">{{ index + 1 }}</span>
+                <span class="ranking-main"><strong>{{ project.name }}</strong><i><b :style="{ width: `${(project.current_month / topProjectMax) * 100}%` }" /></i></span>
+                <span class="ranking-value"><strong>{{ formatCount(project.current_month) }}</strong><small>例</small></span>
+              </RouterLink>
+            </li>
+          </ol>
+          <div v-else class="panel-empty">暂无排名数据</div>
+        </aside>
+      </section>
+
+      <section class="panel project-panel">
+        <header class="panel-header"><div><span class="panel-eyebrow">快捷入口</span><h2>进入项目台账</h2></div><span class="project-count">{{ appStore.projects.length }} 个项目</span></header>
+        <div class="project-links">
+          <RouterLink v-for="project in appStore.projects" :key="project.id" :to="{ path: '/ledger', query: { project: project.id } }" class="project-link"><span><CheckCircle2 :size="16" aria-hidden="true" />{{ project.name }}</span><ArrowRight :size="16" aria-hidden="true" /></RouterLink>
+          <div v-if="!appStore.projects.length" class="panel-empty">暂无可查看的项目</div>
         </div>
-        <span class="overview-total">{{ appStore.projects.length }} 个项目</span>
-      </div>
-      <div class="project-overview-grid">
-        <RouterLink
-          v-for="project in projectStats"
-          :key="project.id"
-          class="project-overview-card"
-          :to="{ path: '/ledger', query: { project: project.id } }"
-        >
-          <span class="project-overview-line" aria-hidden="true" />
-          <div class="project-overview-title">
-            <span>{{ project.name }}</span>
-            <ArrowUpRight :size="17" :stroke-width="1.7" aria-hidden="true" />
-          </div>
-          <div class="project-overview-metric">
-            <strong>{{ formatCount(project.total) }}</strong>
-            <span>例记录</span>
-          </div>
-        </RouterLink>
-        <div v-if="!projectStats.length" class="dashboard-empty-state dashboard-empty-overview">
-          <Layers3 :size="22" :stroke-width="1.6" aria-hidden="true" />
-          <span>暂无可查看的项目</span>
-        </div>
-      </div>
-    </section>
-  </div>
+      </section>
+    </template>
+  </main>
 </template>
 
 <style scoped>
-.dashboard-stage {
-  --dashboard-ink: var(--app-text);
-  --dashboard-ink-soft: var(--app-muted);
-  --dashboard-paper: var(--app-bg);
-  --dashboard-line: var(--app-border);
-  --dashboard-accent: var(--app-primary-text);
-  --dashboard-aqua: var(--app-chart-primary);
-  --dashboard-blue: var(--app-chart-secondary);
-  position: relative;
-  isolation: isolate;
-  min-height: calc(100vh - 60px);
-  margin: -12px -12px -20px;
-  padding: clamp(18px, 2.5vw, 34px);
-  overflow: hidden;
-  background:
-    radial-gradient(circle at 92% 4%, var(--app-primary-soft), transparent 25rem),
-    var(--dashboard-paper);
-  color: var(--dashboard-ink);
-  gap: clamp(14px, 1.7vw, 22px);
+.dashboard { display: grid; gap: 18px; color: var(--app-text); }
+.dashboard-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; padding: 6px 2px 2px; }
+.dashboard-eyebrow, .panel-eyebrow { display: block; margin-bottom: 5px; color: var(--app-primary-text); font-size: 11px; font-weight: 750; letter-spacing: 0.13em; text-transform: uppercase; }
+.dashboard-header h1 { margin: 0; font-size: clamp(25px, 3vw, 34px); line-height: 1.2; letter-spacing: -0.035em; }
+.dashboard-header p, .panel-header p { margin: 6px 0 0; color: var(--app-muted); font-size: 13px; }
+.dashboard-actions { display: flex; align-items: center; gap: 10px; }
+.project-filter { width: 220px; }
+.refresh-button { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 13px; border: 1px solid var(--app-border-strong); border-radius: 8px; color: var(--app-text); background: var(--app-card); font: inherit; font-size: 13px; cursor: pointer; }
+.refresh-button:hover:not(:disabled) { border-color: var(--app-primary); color: var(--app-primary-text); }
+.refresh-button:disabled { cursor: wait; opacity: 0.65; }
+.spinning { animation: spin 0.9s linear infinite; }
+.dashboard-alert { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border: 1px solid var(--app-danger); border-radius: 10px; color: var(--app-danger); background: var(--app-danger-soft); font-size: 13px; }
+.dashboard-alert span { flex: 1; }
+.dashboard-alert button { border: 0; color: inherit; background: transparent; font: inherit; font-weight: 700; cursor: pointer; }
+.kpi-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.kpi-card, .panel, .loading-panel { border: 1px solid var(--app-border); border-radius: 14px; background: var(--app-card); box-shadow: 0 1px 2px rgb(15 23 42 / 4%); }
+.kpi-card { display: flex; align-items: flex-start; gap: 13px; min-width: 0; padding: 18px; }
+.kpi-card-primary { border-color: var(--app-primary-border); background: linear-gradient(145deg, var(--app-card), var(--app-primary-soft)); }
+.kpi-icon { display: grid; flex: 0 0 38px; width: 38px; height: 38px; place-items: center; border-radius: 10px; color: var(--app-primary-text); background: var(--app-primary-soft); }
+.kpi-content { display: grid; min-width: 0; gap: 3px; }
+.kpi-label { color: var(--app-muted); font-size: 12px; font-weight: 650; }
+.kpi-content strong { font-size: clamp(25px, 3vw, 34px); line-height: 1.15; letter-spacing: -0.035em; }
+.kpi-content strong em { margin-left: 2px; font-size: 15px; font-style: normal; color: var(--app-muted); }
+.kpi-content small { display: flex; align-items: center; gap: 4px; min-height: 18px; color: var(--app-subtle); font-size: 11px; }
+.kpi-content small.change-up { color: var(--app-success-text); }
+.kpi-content small.change-down { color: var(--app-danger); }
+.analytics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.panel { min-width: 0; padding: 18px; }
+.panel-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.panel-header h2 { margin: 0; font-size: 17px; line-height: 1.3; }
+.range-switch { display: inline-flex; flex: 0 0 auto; padding: 3px; border: 1px solid var(--app-border); border-radius: 9px; background: var(--app-surface-soft); }
+.range-switch button { padding: 5px 9px; border: 0; border-radius: 6px; color: var(--app-muted); background: transparent; font: inherit; font-size: 11px; cursor: pointer; }
+.range-switch button.active { color: var(--app-primary-text); background: var(--app-card); box-shadow: 0 1px 3px rgb(15 23 42 / 10%); }
+.trend-chart { height: 300px; min-height: 300px; margin-top: 8px; }
+.structure-chart { height: 300px; min-height: 300px; margin-top: 8px; cursor: pointer; }
+.workload-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; align-items: start; gap: 14px; }
+.workload-heading { align-items: center; }
+.panel-note, .project-count { color: var(--app-muted); font-size: 11px; }
+.workload-chart { height: 330px; min-height: 330px; margin-top: 10px; cursor: pointer; }
+.ranking-list { display: grid; gap: 3px; margin: 15px 0 0; padding: 0; list-style: none; }
+.ranking-link { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 9px; min-width: 0; padding: 10px 4px; border-bottom: 1px solid var(--app-border-light); color: var(--app-text); text-decoration: none; }
+.ranking-list li:last-child .ranking-link { border-bottom: 0; }
+.ranking-link:hover .ranking-main strong { color: var(--app-primary-text); }
+.ranking-index { display: grid; width: 25px; height: 25px; place-items: center; border-radius: 8px; color: var(--app-muted); background: var(--app-surface-soft); font-size: 11px; font-weight: 750; }
+.ranking-index.leading { color: var(--app-on-primary); background: var(--app-primary); }
+.ranking-main { display: grid; min-width: 0; gap: 7px; }
+.ranking-main strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; transition: color 0.15s ease; }
+.ranking-main i { display: block; height: 4px; overflow: hidden; border-radius: 99px; background: var(--app-border-light); }
+.ranking-main i b { display: block; height: 100%; min-width: 3px; border-radius: inherit; background: var(--app-chart-primary); }
+.ranking-value { display: flex; align-items: baseline; gap: 2px; }
+.ranking-value strong { font-size: 15px; }
+.ranking-value small { color: var(--app-muted); font-size: 10px; }
+.project-links { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; margin-top: 16px; }
+.project-link { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; padding: 11px 12px; border: 1px solid var(--app-border); border-radius: 9px; color: var(--app-text); background: var(--app-surface-soft); text-decoration: none; transition: border-color 0.16s ease, transform 0.16s ease, background 0.16s ease; }
+.project-link span { display: flex; align-items: center; gap: 7px; min-width: 0; overflow: hidden; font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.project-link span svg { flex: 0 0 auto; color: var(--app-primary-text); }
+.project-link > svg { flex: 0 0 auto; color: var(--app-muted); }
+.project-link:hover { transform: translateY(-1px); border-color: var(--app-primary); background: var(--app-primary-soft); }
+.panel-empty { display: grid; min-height: 220px; place-items: center; color: var(--app-muted); font-size: 13px; }
+.loading-panel { min-height: 420px; padding: 24px; }
+.skeleton-card { min-height: 118px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (max-width: 1120px) {
+  .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .analytics-grid { grid-template-columns: minmax(0, 1fr); }
+  .structure-chart { height: 280px; min-height: 280px; }
+  .workload-grid { grid-template-columns: minmax(0, 1fr); }
+  .ranking-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ranking-list li:nth-child(odd):last-child { grid-column: 1 / -1; }
+  .project-links { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  .dashboard { gap: 12px; }
+  .dashboard-header { align-items: stretch; flex-direction: column; gap: 14px; }
+  .dashboard-actions { align-items: stretch; }
+  .project-filter { flex: 1; width: auto; }
+  .kpi-grid { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .kpi-card { padding: 15px; }
+  .panel { padding: 15px; }
+  .trend-chart { height: 270px; min-height: 270px; }
+  .workload-heading { align-items: flex-start; }
+  .panel-note { display: none; }
+  .workload-chart { height: 300px; min-height: 300px; }
+  .ranking-list { grid-template-columns: minmax(0, 1fr); }
+  .ranking-list li:nth-child(odd):last-child { grid-column: auto; }
+  .project-links { grid-template-columns: minmax(0, 1fr); }
 }
-
-.dashboard-stage::before {
-  content: none;
-}
-
-.dashboard-stage::after {
-  content: none;
-}
-
-.dashboard-alert {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  border: 1px solid rgba(198, 87, 70, 0.2);
-  border-radius: 14px;
-  background: var(--app-danger-soft);
-  color: var(--app-danger);
-  padding: 12px 14px;
-  font-size: 13px;
-  font-weight: 600;
-  box-shadow: 0 12px 30px rgba(180, 35, 24, 0.08);
-}
-
-.dashboard-masthead {
-  position: relative;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  min-height: 148px;
-  overflow: hidden;
-  border: 1px solid var(--dashboard-line);
-  border-radius: 26px;
-  background:
-    radial-gradient(circle at 96% 0%, var(--app-accent-soft), transparent 36%),
-    radial-gradient(circle at 70% 100%, var(--app-primary-soft), transparent 32%),
-    var(--app-bg);
-  box-shadow: 0 6px 24px rgba(45, 42, 38, 0.04);
-  animation: dashboard-rise 700ms cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-.dashboard-masthead::before {
-  content: none;
-}
-
-.masthead-copy {
-  position: relative;
-  z-index: 1;
-}
-
-.masthead-copy {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  padding: clamp(22px, 2.5vw, 30px);
-}
-
-.masthead-kicker,
-.section-eyebrow {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--app-muted);
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-}
-
-.masthead-kicker {
-  color: var(--dashboard-accent);
-}
-
-.masthead-copy h1 {
-  margin: 12px 0 10px;
-  color: var(--dashboard-ink);
-  font-size: clamp(28px, 3vw, 40px);
-  font-weight: 760;
-  letter-spacing: -0.065em;
-  line-height: 1.2;
-}
-
-.masthead-copy h1 span,
-.masthead-copy h1 em {
-  display: inline-block;
-}
-
-.masthead-copy h1 em {
-  margin-left: 0.14em;
-  color: var(--dashboard-accent);
-  font-style: normal;
-  font-weight: 420;
-}
-
-.masthead-copy p {
-  max-width: 610px;
-  margin: 0;
-  color: var(--dashboard-ink-soft);
-  font-size: 14px;
-  line-height: 1.7;
-}
-
-.overview-panel-header p {
-  margin: 0;
-  color: var(--app-muted);
-  font-size: 12px;
-  line-height: 1.55;
-}
-
-.dashboard-kpis {
-  display: grid;
-  grid-template-columns: minmax(0, 1.35fr) repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.kpi-card {
-  position: relative;
-  display: grid;
-  min-height: 160px;
-  overflow: hidden;
-  border: 1px solid var(--dashboard-line);
-  border-radius: 22px;
-  background: var(--app-card);
-  padding: 18px;
-  box-shadow: 0 6px 22px rgba(45, 42, 38, 0.05);
-  transition:
-    transform 360ms cubic-bezier(0.22, 1, 0.36, 1),
-    box-shadow 360ms ease,
-    border-color 260ms ease;
-  animation: dashboard-rise 650ms cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-.kpi-card:nth-child(2) {
-  animation-delay: 70ms;
-}
-
-.kpi-card:nth-child(3) {
-  animation-delay: 140ms;
-}
-
-.kpi-card::after {
-  content: none;
-}
-
-.kpi-card:hover {
-  border-color: rgba(11, 16, 32, 0.2);
-  box-shadow: 0 6px 22px rgba(45, 42, 38, 0.05);
-  transform: translateY(-2px);
-}
-
-.kpi-card:hover::after {
-  transform: scale(1.2) translate(-5px, -5px);
-}
-
-.kpi-card-primary {
-  background: linear-gradient(115deg, var(--app-bg) 55%, var(--app-hover));
-  color: var(--dashboard-ink);
-}
-
-.kpi-card-primary::after {
-  content: none;
-}
-
-.kpi-card-topline {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-}
-
-.kpi-icon {
-  display: inline-grid;
-  width: 40px;
-  height: 40px;
-  place-items: center;
-  border-radius: 13px;
-  background: var(--app-surface-soft);
-  color: var(--dashboard-ink);
-}
-
-.kpi-card-primary .kpi-icon {
-  background: var(--app-primary-soft);
-  color: var(--dashboard-accent);
-}
-
-.kpi-index {
-  color: var(--app-muted);
-  font-family: ui-monospace, "Cascadia Code", monospace;
-  font-size: 12px;
-  letter-spacing: 0.12em;
-}
-
-.kpi-card-primary .kpi-index {
-  color: var(--dashboard-ink-soft);
-}
-
-.kpi-value {
-  align-self: end;
-  font-size: clamp(34px, 4vw, 50px);
-  font-weight: 680;
-  letter-spacing: -0.06em;
-  line-height: 0.9;
-}
-
-.kpi-caption {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 14px;
-}
-
-.kpi-caption strong {
-  font-size: 14px;
-}
-
-.kpi-caption span {
-  color: var(--app-muted);
-  font-size: 12px;
-}
-
-.kpi-card-primary .kpi-caption span {
-  color: var(--dashboard-ink-soft);
-}
-
-.analytics-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.65fr) minmax(300px, 0.7fr);
-  gap: 12px;
-  align-items: stretch;
-}
-
-.chart-card,
-.overview-panel {
-  min-width: 0;
-  border: 1px solid var(--dashboard-line);
-  border-radius: 24px;
-  background: var(--app-card);
-  box-shadow: 0 6px 22px rgba(45, 42, 38, 0.05);
-  animation: dashboard-rise 720ms 110ms cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-.chart-card {
-  padding: clamp(18px, 2vw, 26px);
-}
-
-.chart-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.chart-heading h2,
-.chart-heading p,
-.overview-panel-header h2 {
-  margin: 0;
-}
-
-.chart-heading h2,
-.overview-panel-header h2 {
-  margin-top: 7px;
-  color: var(--dashboard-ink);
-  font-size: 20px;
-  font-weight: 670;
-  letter-spacing: -0.035em;
-}
-
-.chart-heading p {
-  margin-top: 6px;
-  color: var(--app-muted);
-  font-size: 12px;
-}
-
-.chart-heading-actions {
-  display: flex;
-  flex: 0 0 auto;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 10px;
-}
-
-.monthly-card {
-  overflow: hidden;
-  border-color: var(--dashboard-line);
-  background: linear-gradient(180deg, var(--app-bg) 70%, var(--app-surface-soft));
-  color: var(--dashboard-ink);
-}
-
-.monthly-card .section-eyebrow {
-  color: var(--dashboard-accent);
-}
-
-.monthly-card .chart-heading h2 {
-  color: var(--dashboard-ink);
-}
-
-.monthly-card .chart-heading p {
-  color: var(--dashboard-ink-soft);
-}
-
-.monthly-chart-legend {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 12px;
-  color: var(--dashboard-ink-soft);
-  font-size: 12px;
-}
-
-.monthly-chart-legend span {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-}
-
-.monthly-legend-dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--dashboard-aqua);
-  box-shadow: 0 0 0 5px rgb(var(--app-primary-rgb) / 0.1);
-}
-
-.monthly-project-select {
-  width: 220px;
-}
-
-.monthly-project-select :deep(.el-select__wrapper) {
-  min-height: 38px;
-  border-radius: 12px;
-  background: var(--app-bg);
-  box-shadow: 0 0 0 1px var(--app-border-strong) inset;
-}
-
-.monthly-project-select :deep(.el-select__wrapper:hover),
-.monthly-project-select :deep(.el-select__wrapper.is-focused) {
-  box-shadow: 0 0 0 1px rgb(var(--app-primary-rgb) / 0.48) inset;
-}
-
-.monthly-project-select :deep(.el-select__selected-item),
-.monthly-project-select :deep(.el-select__placeholder),
-.monthly-project-select :deep(.el-select__caret) {
-  color: var(--dashboard-ink);
-}
-
-.monthly-chart-scroll {
-  margin: 20px -4px -4px;
-  overflow-x: auto;
-  scrollbar-color: rgb(var(--app-primary-rgb) / 0.28) transparent;
-  scrollbar-width: thin;
-}
-
-.monthly-chart-shell {
-  position: relative;
-  min-width: 620px;
-  height: 250px;
-  overflow: hidden;
-}
-
-.monthly-line-chart {
-  display: block;
-  width: 100%;
-  height: 250px;
-  overflow: visible;
-}
-
-.monthly-gradient-start {
-  stop-color: var(--dashboard-accent);
-  stop-opacity: 0.16;
-}
-
-.monthly-gradient-end {
-  stop-color: var(--dashboard-blue);
-  stop-opacity: 0.015;
-}
-
-.monthly-grid-lines line {
-  stroke: var(--app-border);
-  stroke-dasharray: 3 7;
-  stroke-width: 1;
-}
-
-.monthly-grid-lines line:last-of-type {
-  stroke: var(--app-border-strong);
-  stroke-dasharray: none;
-}
-
-.monthly-area {
-  fill: url("#monthly-area-gradient");
-}
-
-.monthly-line {
-  fill: none;
-  stroke: var(--dashboard-aqua);
-  stroke-dasharray: 1;
-  stroke-dashoffset: 0;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-width: 2.5;
-  animation: monthly-trace 900ms 160ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
-}
-
-.monthly-focus-line {
-  stroke: var(--dashboard-accent);
-  stroke-dasharray: 4 5;
-  stroke-width: 1;
-}
-
-.monthly-point-hit {
-  fill: transparent;
-  cursor: crosshair;
-  outline: none;
-}
-
-.monthly-point-hit:focus-visible {
-  stroke: var(--dashboard-accent);
-  stroke-dasharray: 3 3;
-  stroke-width: 1.5;
-}
-
-.monthly-point {
-  fill: var(--app-bg);
-  stroke: var(--dashboard-aqua);
-  stroke-width: 2;
-  pointer-events: none;
-  transition: r 180ms cubic-bezier(0.22, 1, 0.36, 1), fill 180ms ease;
-}
-
-.monthly-point-active {
-  fill: var(--dashboard-accent);
-  stroke: var(--dashboard-accent);
-}
-
-.monthly-axis-label,
-.monthly-y-label {
-  fill: var(--app-muted);
-  font-family: ui-monospace, "Cascadia Code", monospace;
-  font-size: 12px;
-}
-
-.monthly-tooltip {
-  position: absolute;
-  top: 8px;
-  z-index: 2;
-  width: 220px;
-  padding: 13px 14px;
-  border: 1px solid var(--app-border-strong);
-  border-radius: 13px;
-  background: var(--app-bg);
-  box-shadow: 0 8px 26px rgba(45, 42, 38, 0.12);
-  color: var(--dashboard-ink);
-  pointer-events: none;
-  transition: left 150ms ease, top 150ms ease;
-}
-
-.monthly-tooltip-left {
-  transform: translateX(0);
-}
-
-.monthly-tooltip-center {
-  transform: translateX(-50%);
-}
-
-.monthly-tooltip-right {
-  transform: translateX(-100%);
-}
-
-.monthly-tooltip > strong {
-  display: block;
-  margin-bottom: 9px;
-  color: var(--dashboard-ink);
-  font-size: 14px;
-}
-
-.monthly-tooltip-list {
-  max-height: 110px;
-  margin-top: 6px;
-  overflow-y: auto;
-}
-
-.monthly-tooltip-row {
-  display: grid;
-  grid-template-columns: 8px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 7px;
-  margin-top: 7px;
-  color: var(--dashboard-ink-soft);
-  font-size: 12px;
-}
-
-.monthly-tooltip-row b {
-  color: var(--dashboard-ink);
-  font-size: 13px;
-}
-
-.monthly-tooltip-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--dashboard-blue);
-}
-
-.monthly-tooltip-total {
-  background: var(--dashboard-accent);
-}
-
-.monthly-tooltip-empty {
-  display: block;
-  margin-top: 8px;
-  color: var(--dashboard-ink-soft);
-  font-size: 12px;
-}
-
-.project-volume-card {
-  display: flex;
-  flex-direction: column;
-}
-
-.section-count,
-.overview-total {
-  display: inline-flex;
-  align-items: center;
-  min-height: 28px;
-  border: 1px solid rgba(11, 16, 32, 0.1);
-  border-radius: 999px;
-  background: var(--app-surface-soft);
-  color: var(--app-muted);
-  padding: 0 10px;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.project-bars {
-  display: grid;
-  gap: 9px;
-  margin-top: 18px;
-}
-
-.project-bar-row {
-  display: grid;
-  gap: 9px;
-  border: 1px solid transparent;
-  border-radius: 14px;
-  color: inherit;
-  padding: 11px;
-  text-decoration: none;
-  transition:
-    border-color 180ms ease,
-    background 180ms ease,
-    transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.project-bar-row:hover,
-.project-bar-row:focus-visible {
-  border-color: rgba(11, 16, 32, 0.1);
-  background: var(--app-hover);
-  outline: none;
-  transform: translateX(2px);
-}
-
-
-.project-bar-row:nth-child(5n + 2) { --project-color: var(--app-chart-secondary); }
-.project-bar-row:nth-child(5n + 3) { --project-color: var(--app-chart-third); }
-.project-bar-row:nth-child(5n + 4) { --project-color: var(--app-chart-fourth); }
-.project-bar-row:nth-child(5n + 5) { --project-color: var(--app-chart-fifth); }
-
-.project-bar-heading {
-  display: grid;
-  grid-template-columns: 26px minmax(0, 1fr) auto 16px;
-  align-items: center;
-  gap: 8px;
-}
-
-.project-bar-rank {
-  color: var(--app-muted);
-  font-family: ui-monospace, "Cascadia Code", monospace;
-  font-size: 12px;
-}
-
-.project-bar-name {
-  overflow: hidden;
-  font-size: 13px;
-  font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.project-bar-heading strong {
-  font-size: 14px;
-  letter-spacing: -0.025em;
-}
-
-.project-bar-heading svg {
-  color: var(--app-muted);
-  transition: color 180ms ease, transform 180ms ease;
-}
-
-.project-bar-row:hover .project-bar-heading svg,
-.project-bar-row:focus-visible .project-bar-heading svg {
-  color: var(--dashboard-ink);
-  transform: translate(2px, -2px);
-}
-
-.project-bar-track {
-  height: 5px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: var(--app-surface-soft);
-}
-
-.project-bar-total {
-  display: block;
-  height: 100%;
-  min-width: 0;
-  border-radius: inherit;
-  background: var(--project-color, var(--app-chart-primary));
-  transform: scaleX(1);
-  transform-origin: left;
-  animation: project-bar-reveal 650ms 160ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
-}
-
-.project-bar-row small {
-  color: var(--app-muted);
-  font-size: 12px;
-  text-align: right;
-}
-
-.overview-panel {
-  overflow: hidden;
-  padding: clamp(18px, 2vw, 26px);
-}
-
-.overview-panel-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  padding-bottom: 18px;
-  border-bottom: 1px solid var(--dashboard-line);
-}
-
-.overview-panel-header h2 {
-  margin-bottom: 6px;
-}
-
-.project-overview-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-  padding-top: 14px;
-}
-
-.project-overview-card {
-  position: relative;
-  display: grid;
-  min-height: 120px;
-  overflow: hidden;
-  border: 1px solid var(--dashboard-line);
-  border-radius: 17px;
-  background: var(--app-surface-soft);
-  color: inherit;
-  padding: 15px;
-  text-decoration: none;
-  transition:
-    border-color 220ms ease,
-    background 220ms ease,
-    transform 320ms cubic-bezier(0.22, 1, 0.36, 1),
-    box-shadow 320ms ease;
-}
-
-.project-overview-card:hover,
-.project-overview-card:focus-visible {
-  border-color: rgba(11, 16, 32, 0.24);
-  background: var(--app-bg);
-  box-shadow: 0 6px 22px rgba(45, 42, 38, 0.05);
-  outline: none;
-  transform: translateY(-2px);
-}
-
-.project-overview-line {
-  position: absolute;
-  top: 0;
-  right: 0;
-  left: 0;
-  height: 3px;
-  background: var(--dashboard-accent);
-  transform: scaleX(0.28);
-  transform-origin: left;
-  transition: transform 460ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.project-overview-card:hover .project-overview-line,
-.project-overview-card:focus-visible .project-overview-line {
-  transform: scaleX(1);
-}
-
-.project-overview-title {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.project-overview-title span {
-  overflow: hidden;
-  font-size: 14px;
-  font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.project-overview-title svg {
-  flex: 0 0 auto;
-  color: var(--app-muted);
-}
-
-.project-overview-metric {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  align-self: end;
-}
-
-.project-overview-metric strong {
-  font-size: 30px;
-  font-weight: 650;
-  letter-spacing: -0.055em;
-}
-
-.project-overview-metric span {
-  color: var(--app-muted);
-  font-size: 12px;
-}
-
-.dashboard-empty-state {
-  display: flex;
-  min-height: 150px;
-  align-items: center;
-  justify-content: center;
-  gap: 9px;
-  color: var(--app-muted);
-  font-size: 13px;
-}
-
-.dashboard-empty-overview {
-  grid-column: 1 / -1;
-}
-
-@keyframes dashboard-rise {
-  from {
-    opacity: 0;
-    transform: translateY(18px) scale(0.99);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
-@keyframes monthly-trace {
-  from { stroke-dashoffset: 1; }
-  to {
-    stroke-dashoffset: 0;
-  }
-}
-
-@keyframes project-bar-reveal {
-  from { transform: scaleX(0); }
-  to {
-    transform: scaleX(1);
-  }
-}
-
-@media (max-width: 1180px) {
-  .analytics-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .project-bars {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 900px) {
-  .dashboard-kpis {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .kpi-card-primary {
-    grid-column: 1 / -1;
-  }
-
-  .project-overview-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 680px) {
-  .dashboard-stage {
-    padding: 14px;
-  }
-
-  .masthead-copy {
-    padding: 20px;
-  }
-
-  .masthead-copy h1 {
-    font-size: clamp(34px, 12vw, 48px);
-  }
-
-  .chart-heading,
-  .overview-panel-header {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .dashboard-kpis,
-  .project-bars,
-  .project-overview-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .kpi-card-primary {
-    grid-column: auto;
-  }
-
-  .chart-heading-actions {
-    width: 100%;
-    align-items: flex-start;
-  }
-
-  .monthly-project-select {
-    width: 100%;
-  }
-
-  .monthly-chart-shell {
-    min-width: 620px;
-  }
-
-  .overview-total {
-    align-self: flex-start;
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .dashboard-masthead,
-  .kpi-card,
-  .chart-card,
-  .overview-panel,
-  .monthly-line,
-  .project-bar-total,
-  .kpi-card,
-  .project-bar-row,
-  .project-overview-card,
-  .project-overview-line {
-    transition-duration: 0.01ms;
-  }
+  .spinning { animation: none; }
+  .project-link { transition: none; }
 }
 </style>

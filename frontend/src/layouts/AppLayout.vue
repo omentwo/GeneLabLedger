@@ -26,8 +26,17 @@ const alwaysOnTop = ref(false);
 const isMaximized = ref(false);
 const windowControlBusy = ref(false);
 const isSidebarCollapsed = ref(false);
+const isNarrowViewport = ref(false);
+const effectiveSidebarCollapsed = computed(
+  () => isSidebarCollapsed.value || isNarrowViewport.value,
+);
 const contentRevision = ref(0);
 let removeWindowStateListener: (() => void) | undefined;
+let narrowViewportQuery: MediaQueryList | undefined;
+
+function syncNarrowViewport(event: MediaQueryList | MediaQueryListEvent): void {
+  isNarrowViewport.value = event.matches;
+}
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "gene-lab-ledger.sidebar-collapsed";
 
@@ -125,6 +134,9 @@ async function retryProjectBootstrap(): Promise<void> {
 
 onMounted(() => {
   restoreSidebarState();
+  narrowViewportQuery = window.matchMedia("(max-width: 760px)");
+  syncNarrowViewport(narrowViewportQuery);
+  narrowViewportQuery.addEventListener("change", syncNarrowViewport);
   void appStore.bootstrap().catch(() => undefined);
   if (!bridge) return;
   void syncWindowState();
@@ -135,6 +147,8 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  narrowViewportQuery?.removeEventListener("change", syncNarrowViewport);
+  narrowViewportQuery = undefined;
   removeWindowStateListener?.();
   removeWindowStateListener = undefined;
 });
@@ -143,7 +157,7 @@ onBeforeUnmount(() => {
 <template>
   <div
     class="app-shell"
-    :class="{ 'sidebar-collapsed': isSidebarCollapsed }"
+    :class="{ 'sidebar-collapsed': effectiveSidebarCollapsed }"
   >
     <header class="window-titlebar" aria-label="窗口标题栏">
       <div class="window-titlebar-drag" @dblclick="toggleMaximize">
@@ -207,32 +221,32 @@ onBeforeUnmount(() => {
     <div class="app-content">
       <aside
         class="app-sidebar"
-        :class="{ 'is-collapsed': isSidebarCollapsed }"
+        :class="{ 'is-collapsed': effectiveSidebarCollapsed }"
       >
         <div class="sidebar-brand">
-          <span v-if="!isSidebarCollapsed" class="sidebar-brand-mark" aria-hidden="true">
+          <span v-if="!effectiveSidebarCollapsed" class="sidebar-brand-mark" aria-hidden="true">
             <Dna :size="24" :stroke-width="1.7" />
           </span>
-          <div v-if="!isSidebarCollapsed" class="sidebar-brand-title">
+          <div v-if="!effectiveSidebarCollapsed" class="sidebar-brand-title">
             <strong>基因检测台账</strong>
             <span>实验工作空间</span>
           </div>
           <button
             class="sidebar-toggle"
             type="button"
-            :aria-expanded="!isSidebarCollapsed"
+            :aria-expanded="!effectiveSidebarCollapsed"
             aria-controls="primary-navigation"
-            :aria-label="isSidebarCollapsed ? '展开侧边栏' : '收起侧边栏'"
-            :title="isSidebarCollapsed ? '展开侧边栏' : '收起侧边栏'"
+            :aria-label="effectiveSidebarCollapsed ? '展开侧边栏' : '收起侧边栏'"
+            :title="effectiveSidebarCollapsed ? '展开侧边栏' : '收起侧边栏'"
             @click="toggleSidebar"
           >
-            <Expand v-if="isSidebarCollapsed" :size="18" :stroke-width="1.7" aria-hidden="true" />
+            <Expand v-if="effectiveSidebarCollapsed" :size="18" :stroke-width="1.7" aria-hidden="true" />
             <Fold v-else :size="18" :stroke-width="1.7" aria-hidden="true" />
           </button>
 
         </div>
 
-        <div v-if="!isSidebarCollapsed" class="sidebar-section-label">工作导航</div>
+        <div v-if="!effectiveSidebarCollapsed" class="sidebar-section-label">工作导航</div>
         <nav id="primary-navigation" class="sidebar-navigation" aria-label="主导航">
           <RouterLink
             v-for="item in navigation"
@@ -240,10 +254,10 @@ onBeforeUnmount(() => {
             :to="item.to"
             class="sidebar-nav-link"
             :aria-label="item.label"
-            :title="isSidebarCollapsed ? item.label : undefined"
+            :title="effectiveSidebarCollapsed ? item.label : undefined"
           >
             <component :is="item.icon" :size="20" :stroke-width="1.7" aria-hidden="true" />
-            <span v-if="!isSidebarCollapsed">{{ item.label }}</span>
+            <span v-if="!effectiveSidebarCollapsed">{{ item.label }}</span>
           </RouterLink>
         </nav>
 
@@ -251,7 +265,7 @@ onBeforeUnmount(() => {
           class="sidebar-status"
           role="status"
           :aria-label="appStore.backendOnline ? '本机后端已连接' : '正在连接后端'"
-          :title="isSidebarCollapsed ? (appStore.backendOnline ? '本机后端已连接' : '正在连接后端') : undefined"
+          :title="effectiveSidebarCollapsed ? (appStore.backendOnline ? '本机后端已连接' : '正在连接后端') : undefined"
         >
           <Server
             :size="18"
@@ -259,7 +273,7 @@ onBeforeUnmount(() => {
             :class="{ 'is-online': appStore.backendOnline }"
             aria-hidden="true"
           />
-          <span v-if="!isSidebarCollapsed">{{ appStore.backendOnline ? "本机后端已连接" : "正在连接后端" }}</span>
+          <span v-if="!effectiveSidebarCollapsed">{{ appStore.backendOnline ? "本机后端已连接" : "正在连接后端" }}</span>
         </div>
       </aside>
 
@@ -599,13 +613,8 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 760px) {
-  .app-shell {
-    --app-sidebar-expanded-width: 200px;
-  }
-
-  .sidebar-brand-mark {
-    display: none;
-  }
+  .app-shell { --app-sidebar-collapsed-width: 64px; }
+  .sidebar-toggle { visibility: hidden; }
 
   .window-control {
     width: 40px;

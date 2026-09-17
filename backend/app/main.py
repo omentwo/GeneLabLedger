@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api import (
     auto_exports,
+    dashboard,
     exports,
     ledger_templates,
     preview,
@@ -76,7 +77,7 @@ def create_app(
 
     app = FastAPI(
         title=app_settings.app_name,
-        version="0.12.5",
+        version="0.12.6",
         lifespan=lifespan,
     )
     app.add_middleware(
@@ -93,6 +94,7 @@ def create_app(
     app.state.auto_export_scheduler = auto_export_scheduler
 
     app.include_router(system.router, prefix="/api")
+    app.include_router(dashboard.router, prefix="/api")
     app.include_router(projects.router, prefix="/api")
     app.include_router(ledger_templates.router, prefix="/api")
     app.include_router(preview.router, prefix="/api")

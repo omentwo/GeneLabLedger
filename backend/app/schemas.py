@@ -600,6 +600,39 @@ class RecordList(BaseModel):
     offset: int
 
 
+class DashboardMonthlyPoint(BaseModel):
+    month: str
+    total: int
+
+
+class DashboardStatusPoint(BaseModel):
+    status: str
+    total: int
+
+
+class DashboardProjectPoint(BaseModel):
+    id: str
+    name: str
+    total: int
+    current_month: int
+    previous_month: int
+    monthly: list[DashboardMonthlyPoint]
+
+
+class DashboardSummaryRead(BaseModel):
+    project_id: str | None
+    as_of: date
+    total_records: int
+    recent_30_days: int
+    current_month: int
+    previous_month: int
+    report_generated: int
+    report_generated_rate: float
+    monthly: list[DashboardMonthlyPoint]
+    statuses: list[DashboardStatusPoint]
+    projects: list[DashboardProjectPoint]
+
+
 class RecordFieldFilter(BaseModel):
     field_id: str = Field(min_length=1, max_length=36)
     operator: Literal[

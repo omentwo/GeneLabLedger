@@ -163,6 +163,39 @@ export interface RecordCreateInput {
   insert_after_record_id?: string;
 }
 
+export interface DashboardMonthlyPoint {
+  month: string;
+  total: number;
+}
+
+export interface DashboardStatusPoint {
+  status: string;
+  total: number;
+}
+
+export interface DashboardProjectPoint {
+  id: string;
+  name: string;
+  total: number;
+  current_month: number;
+  previous_month: number;
+  monthly: DashboardMonthlyPoint[];
+}
+
+export interface DashboardSummary {
+  project_id: string | null;
+  as_of: string;
+  total_records: number;
+  recent_30_days: number;
+  current_month: number;
+  previous_month: number;
+  report_generated: number;
+  report_generated_rate: number;
+  monthly: DashboardMonthlyPoint[];
+  statuses: DashboardStatusPoint[];
+  projects: DashboardProjectPoint[];
+}
+
 export interface RecordReorderProjectPreview {
   project_id: string;
   project_name: string;
