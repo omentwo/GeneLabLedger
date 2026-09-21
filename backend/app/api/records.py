@@ -132,6 +132,7 @@ def record_filters(
     search: str | None = None,
     experiment_date: date | None = None,
     report_generated: bool | None = None,
+    include_locked: bool = True,
 ) -> list:
     filters = []
     if scope == "selected" and project_ids:
@@ -146,6 +147,8 @@ def record_filters(
         filters.append(ProjectRecord.experiment_date == experiment_date)
     if report_generated is not None:
         filters.append(ProjectRecord.report_generated == report_generated)
+    if not include_locked:
+        filters.append(ProjectRecord.locked.is_(False))
     if search and search.strip():
         term = f"%{search.strip()}%"
         value_match = (
@@ -177,6 +180,7 @@ def list_records(
     search: str | None = None,
     experiment_date: date | None = None,
     report_generated: bool | None = None,
+    include_locked: bool = True,
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     session: Session = Depends(get_session),
@@ -196,6 +200,7 @@ def list_records(
         search=search,
         experiment_date=experiment_date,
         report_generated=report_generated,
+        include_locked=include_locked,
     )
     base = select(ProjectRecord).where(*filters)
     total = session.scalar(select(func.count()).select_from(base.subquery())) or 0
@@ -270,6 +275,7 @@ def _complex_record_statement(
         record_status=payload.status,
         search=payload.search,
         report_generated=payload.report_generated,
+        include_locked=payload.include_locked,
     )
     if payload.experiment_date_from is not None:
         filters.append(ProjectRecord.experiment_date >= payload.experiment_date_from)

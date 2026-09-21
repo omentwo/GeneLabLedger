@@ -68,6 +68,7 @@ describe("ledger native preview API", () => {
     await createLedgerNativePreview("ledger-1", {
       action: "open",
       scope: "project",
+      include_locked: false,
       print_engine: "wps",
     });
 
@@ -76,6 +77,7 @@ describe("ledger native preview API", () => {
     expect(JSON.parse(String(options.body))).toEqual({
       action: "open",
       scope: "project",
+      include_locked: false,
       print_engine: "wps",
     });
   });

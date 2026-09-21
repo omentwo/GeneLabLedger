@@ -117,7 +117,7 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 | Excel | `POST /api/exports/workbook` | XLSX 生成（导入已移除） |
 | 自动导出 | `GET /api/auto-export/config`；`GET/POST /api/auto-export/tasks`；`PUT/DELETE /api/auto-export/tasks/{task_id}`；`POST /api/auto-export/tasks/{task_id}/run`；`GET /api/auto-export/tasks/{task_id}/runs`；`POST /api/auto-export/validate-cron` | 任务配置、立即执行、历史查询、Cron 校验 |
 
-兼容记录列表支持项目、状态、实验日期、报告状态、关键字和 `limit/offset`。主台账使用复杂查询接口，每页固定 200 条，并支持动态字段筛选、排序和筛选结果的完整 ID 集合。未指定字段排序时按项目内 `position` 返回；创建请求可用 `insert_before_record_id` 或 `insert_after_record_id` 指定相对插入位置，其他新增路径追加到末尾。
+兼容记录列表支持项目、状态、实验日期、报告状态、关键字、`include_locked` 和 `limit/offset`。主台账使用复杂查询接口，每页固定 200 条，并支持动态字段筛选、排序、锁定记录可见性和筛选结果的完整 ID 集合；台账、实验编排、快速录入和报告候选列表均传 `include_locked=false`，统计和导出保持包含锁定记录。未指定字段排序时按项目内 `position` 返回；创建请求可用 `insert_before_record_id` 或 `insert_after_record_id` 指定相对插入位置，其他新增路径追加到末尾。
 
 ## 6. 文件处理与业务服务
 
@@ -127,7 +127,7 @@ Excel 导入入口、API 和解析服务已移除；粘贴使用单元格批量�
 
 导出由 `backend/app/services/workbooks.py` 生成 XLSX；请求模型限制最多 100 个工作表、每表 10,000 行/200 列、总计 2,000,000 个单元格。Electron 保存 IPC 将文件名规范化为 `.xlsx`，限制单次写入不超过 256 MiB，并要求用户确认保存路径。
 
-台账原生预览与打开复用临时 XLSX 快照和 Office/WPS COM 服务。预览范围支持选中单元格、当前项目、当前筛选结果和整本台账；当前项目范围只按项目 UUID 取数，不继承页面搜索条件。
+台账原生预览与打开复用临时 XLSX 快照和 Office/WPS COM 服务。预览范围支持选中单元格、当前项目、当前筛选结果和整本台账；当前项目范围只按项目 UUID 取数，不继承页面搜索条件，并通过 `include_locked` 跟随台账“显示锁定记录”状态。手动“导出 Excel”则固定包含锁定记录。
 
 ### 6.2 DOCX 与打印
 

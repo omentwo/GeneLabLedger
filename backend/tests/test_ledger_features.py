@@ -357,6 +357,7 @@ def test_ledger_current_project_preview_excludes_other_projects(
     projects = feature_client.get("/api/projects").json()
     current_project = projects[0]
     other_project = projects[1]
+    current_records = []
     for pathology_number in ("CURRENT-ONE", "CURRENT-TWO"):
         created = feature_client.post(
             "/api/records",
@@ -366,6 +367,12 @@ def test_ledger_current_project_preview_excludes_other_projects(
             },
         )
         assert created.status_code == 201, created.text
+        current_records.append(created.json())
+    locked = feature_client.put(
+        f"/api/records/{current_records[1]['id']}/lock",
+        json={"locked": True},
+    )
+    assert locked.status_code == 200, locked.text
     other = feature_client.post(
         "/api/records",
         json={
@@ -385,9 +392,21 @@ def test_ledger_current_project_preview_excludes_other_projects(
     visible_fields = [field for field in current_project["fields"] if not field["hidden"]]
     assert print_payload["selected_cell_count"] == 2 * len(visible_fields)
 
+    unlocked_preview = feature_client.post(
+        f"/api/ledgers/{current_project['id']}/print-preview",
+        json={"scope": "project", "include_locked": False},
+    )
+    assert unlocked_preview.status_code == 200, unlocked_preview.text
+    assert unlocked_preview.json()["selected_cell_count"] == len(visible_fields)
+
     native_preview = feature_client.post(
         f"/api/ledgers/{current_project['id']}/native-preview",
-        json={"scope": "project", "action": "open", "print_engine": "wps"},
+        json={
+            "scope": "project",
+            "include_locked": False,
+            "action": "open",
+            "print_engine": "wps",
+        },
     )
     assert native_preview.status_code == 200, native_preview.text
     native_payload = native_preview.json()

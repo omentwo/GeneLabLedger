@@ -90,6 +90,7 @@ const activeProject = computed(() =>
 const filteredRecords = computed(() => {
   const keyword = recordSearch.value.trim().toLocaleLowerCase();
   return records.value.filter((record) => {
+    if (record.locked) return false;
     if (!showGenerated.value && record.report_generated) return false;
     if (!keyword) return true;
     return [
@@ -161,6 +162,7 @@ async function loadRecordsForTemplate(): Promise<void> {
   while (true) {
     const page = await listRecords({
       project_id: template.project_id,
+      include_locked: false,
       limit: 1000,
       offset,
     });

@@ -329,7 +329,7 @@ export function buildQuickEntryChanges(
 
 export function unreportedQuickEntryRecords(records: ProjectRecord[]): ProjectRecord[] {
   return records
-    .filter((record) => !record.report_generated)
+    .filter((record) => !record.locked && !record.report_generated)
     .slice()
     .sort((left, right) => left.position - right.position || left.id.localeCompare(right.id));
 }

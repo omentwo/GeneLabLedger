@@ -772,6 +772,57 @@ def test_dynamic_query_pagination_sort_filters_and_all_ids(
     assert len(all_ids["record_ids"]) == 3
 
 
+def test_record_queries_can_exclude_locked_records(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    project_id = seeded_projects["TB"]["id"]
+    visible = create_record(client, project_id, "VISIBILITY-UNLOCKED")
+    locked = create_record(client, project_id, "VISIBILITY-LOCKED")
+    lock_response = client.put(
+        f"/api/records/{locked['id']}/lock",
+        json={"locked": True},
+    )
+    assert lock_response.status_code == 200, lock_response.text
+
+    compatible = client.get(
+        "/api/records",
+        params={
+            "project_id": project_id,
+            "search": "VISIBILITY-",
+            "include_locked": False,
+            "limit": 100,
+        },
+    )
+    assert compatible.status_code == 200, compatible.text
+    assert compatible.json()["total"] == 1
+    assert [item["id"] for item in compatible.json()["items"]] == [visible["id"]]
+
+    payload = {
+        "project_id": project_id,
+        "include_locked": False,
+        "search": "VISIBILITY-",
+        "field_filters": [],
+        "limit": 200,
+        "offset": 0,
+    }
+    queried = client.post("/api/records/query", json=payload)
+    assert queried.status_code == 200, queried.text
+    assert queried.json()["total"] == 1
+    assert [item["id"] for item in queried.json()["items"]] == [visible["id"]]
+
+    ids = client.post("/api/records/query/ids", json=payload)
+    assert ids.status_code == 200, ids.text
+    assert ids.json() == {"record_ids": [visible["id"]], "total": 1}
+
+    default_query = client.post(
+        "/api/records/query",
+        json={**payload, "include_locked": True},
+    )
+    assert default_query.status_code == 200, default_query.text
+    assert default_query.json()["total"] == 2
+
+
 def test_numeric_query_preserves_decimal_precision(
     client: TestClient,
     seeded_projects: dict[str, dict],

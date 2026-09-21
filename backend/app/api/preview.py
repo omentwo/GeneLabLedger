@@ -46,6 +46,8 @@ def _display_value(record: ProjectRecord, field: FieldDefinition, values: dict[s
 
 def _search_filters(project_id: str, payload: LedgerPrintPreviewCreate) -> list[Any]:
     filters: list[Any] = [ProjectRecord.project_id == project_id]
+    if not payload.include_locked:
+        filters.append(ProjectRecord.locked.is_(False))
     if payload.status:
         filters.append(ProjectRecord.status == payload.status)
     if payload.experiment_date:
@@ -72,7 +74,10 @@ def _search_filters(project_id: str, payload: LedgerPrintPreviewCreate) -> list[
 
 def _preview_filters(project_id: str, payload: LedgerPrintPreviewCreate) -> list[Any]:
     if payload.scope == "project":
-        return [ProjectRecord.project_id == project_id]
+        filters: list[Any] = [ProjectRecord.project_id == project_id]
+        if not payload.include_locked:
+            filters.append(ProjectRecord.locked.is_(False))
+        return filters
     return _search_filters(project_id, payload)
 
 
@@ -107,6 +112,8 @@ def _build_ledger_sheet(
             ProjectRecord.project_id == project.id,
             ProjectRecord.id.in_({item.record_id for item in payload.cells}),
         ]
+        if not payload.include_locked:
+            filters.append(ProjectRecord.locked.is_(False))
     row_count = session.scalar(select(func.count()).select_from(ProjectRecord).where(*filters)) or 0
     if (row_count + 1) * len(fields) > 2_000_000 or row_count > 10_000 or len(fields) > 200:
         raise HTTPException(
@@ -184,11 +191,12 @@ def _build_ledger_source(
             select(Project).options(selectinload(Project.fields)).order_by(Project.sort_order, Project.id)
         )
     )
-    counts = dict(
-        session.execute(
-            select(ProjectRecord.project_id, func.count()).group_by(ProjectRecord.project_id)
-        ).all()
+    count_statement = select(ProjectRecord.project_id, func.count()).group_by(
+        ProjectRecord.project_id
     )
+    if not payload.include_locked:
+        count_statement = count_statement.where(ProjectRecord.locked.is_(False))
+    counts = dict(session.execute(count_statement).all())
     printable_projects = [item for item in projects if any(not field.hidden for field in item.fields)]
     cell_count = sum(
         (counts.get(item.id, 0) + 1) * sum(not field.hidden for field in item.fields)

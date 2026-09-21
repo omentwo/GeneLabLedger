@@ -381,6 +381,7 @@ const exportVisible = ref(false);
 const searchText = ref("");
 const searchStatus = ref("");
 const searchDate = ref("");
+const showLockedRecords = ref(false);
 const searchScope = ref<RecordSearchScope>("all");
 const searchProjectIds = ref<string[]>([]);
 const appliedSearch = reactive({
@@ -3790,6 +3791,7 @@ async function openLedgerNative(): Promise<void> {
     const task = await createLedgerNativePreview(currentProject.value.id, {
       action: "open",
       scope,
+      include_locked: showLockedRecords.value,
       cells,
       search: appliedSearch.text || undefined,
       status: appliedSearch.status || undefined,
@@ -3945,6 +3947,7 @@ async function loadRecords(
       while (true) {
         const page = await listRecords({
           scope: appliedSearch.scope,
+          include_locked: showLockedRecords.value,
           project_id: undefined,
           project_ids:
             appliedSearch.scope === "selected" ? [...appliedSearch.projectIds] : undefined,
@@ -4070,6 +4073,7 @@ function buildRecordQuery(
   });
   return {
     project_id: projectId,
+    include_locked: showLockedRecords.value,
     status: appliedSearch.status || null,
     search: appliedSearch.text || null,
     experiment_date_from: appliedSearch.date || null,
@@ -4268,6 +4272,12 @@ function resetSearch(): void {
 
 function refreshRecords(): void {
   void loadRecords(activeProjectId.value, { preserveHistory: true, preserveSelection: true });
+}
+
+function handleLockedVisibilityChange(): void {
+  currentPage.value = 1;
+  clearSelectionsAfterLedgerViewChange();
+  void loadRecords(activeProjectId.value, { preserveHistory: true });
 }
 
 function openReorderDialog(): void {
@@ -5155,6 +5165,10 @@ async function updateSelectedLock(locked: boolean): Promise<void> {
       setRecordLock(record.id, locked),
     );
     updated.forEach(replaceRecord);
+    if (locked && !showLockedRecords.value) {
+      clearRecordSelection();
+      await loadRecords(activeProjectId.value, { preserveHistory: true });
+    }
     ElMessage.success(locked ? "所选记录已锁定" : "所选记录已解锁");
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "锁定状态修改失败");
@@ -5269,6 +5283,10 @@ async function toggleRecordLock(record: ProjectRecord): Promise<void> {
   const nextLocked = !record.locked;
   try {
     replaceRecord(await setRecordLock(record.id, nextLocked));
+    if (nextLocked && !showLockedRecords.value) {
+      clearRecordSelection();
+      await loadRecords(activeProjectId.value, { preserveHistory: true });
+    }
     ElMessage.success(nextLocked ? "记录已锁定" : "记录已解锁");
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "锁定状态修改失败");
@@ -5288,6 +5306,7 @@ async function exportCurrentProject(): Promise<void> {
     while (true) {
       const page = await queryRecords({
         ...buildRecordQuery(),
+        include_locked: true,
         limit: 1000,
         offset,
       });
@@ -5570,6 +5589,13 @@ onBeforeUnmount(() => {
             <el-button class="ledger-refresh-button" :icon="Refresh" @click="refreshRecords">
               刷新
             </el-button>
+            <el-checkbox
+              v-model="showLockedRecords"
+              class="ledger-locked-visibility"
+              @change="handleLockedVisibilityChange"
+            >
+              显示锁定记录
+            </el-checkbox>
           </div>
           <div v-if="!globalSearchActive" class="ledger-operation-group">
             <el-button
@@ -5603,9 +5629,6 @@ onBeforeUnmount(() => {
             <el-button :icon="Plus" @click="openQuickEntry">快速录入</el-button>
             <el-button @click="openReorderDialog">按日期重排</el-button>
             <el-button @click="openFindReplace">查找替换</el-button>
-            <el-button :icon="Download" @click="exportVisible = !exportVisible">
-              导出 Excel
-            </el-button>
             <el-button
               :icon="Setting"
               :type="columnToolsVisible ? 'primary' : undefined"
@@ -5614,6 +5637,9 @@ onBeforeUnmount(() => {
               排序/筛选
             </el-button>
             <el-button @click="bestFitAllColumns($event)">最佳列宽</el-button>
+            <el-button :icon="Download" @click="exportVisible = !exportVisible">
+              导出 Excel
+            </el-button>
             <el-select
               v-model="previewEngine"
               class="ledger-preview-engine"
@@ -7006,6 +7032,11 @@ onBeforeUnmount(() => {
 
 .ledger-refresh-button {
   min-width: 96px;
+}
+
+.ledger-locked-visibility {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .ledger-history-button {

@@ -24,6 +24,7 @@ export type RecordSearchScope = "current" | "all" | "selected";
 
 export interface RecordQuery {
   project_id?: string;
+  include_locked?: boolean;
   scope?: RecordSearchScope;
   project_ids?: string[];
   status?: string;

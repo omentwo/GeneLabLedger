@@ -19,6 +19,7 @@ export function createLedgerNativePreview(
   payload: {
     action: NativePreviewAction;
     scope: LedgerPreviewScope;
+    include_locked?: boolean;
     cells?: Array<{ record_id: string; field_id: string }>;
     search?: string;
     status?: string;

@@ -22,12 +22,13 @@ describe("record search API", () => {
 
     await listRecords({
       scope: "selected",
+      include_locked: false,
       project_ids: ["project-1", "project-2"],
       search: "POSITIVE",
     });
 
     expect(fetchMock.mock.calls[0]![0]).toBe(
-      "/api/records?scope=selected&project_ids=project-1&project_ids=project-2&search=POSITIVE",
+      "/api/records?scope=selected&include_locked=false&project_ids=project-1&project_ids=project-2&search=POSITIVE",
     );
   });
 });

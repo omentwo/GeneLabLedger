@@ -6,7 +6,6 @@ import {
   CheckCircle2,
   CircleAlert,
   Clock3,
-  FileCheck2,
   FlaskConical,
   RefreshCw,
   TrendingDown,
@@ -356,7 +355,7 @@ onBeforeUnmount(() => requestController?.abort());
 
     <template v-if="loading && !summary">
       <section class="kpi-grid" aria-label="正在加载核心指标">
-        <article v-for="index in 4" :key="index" class="kpi-card skeleton-card"><el-skeleton animated :rows="2" /></article>
+        <article v-for="index in 3" :key="index" class="kpi-card skeleton-card"><el-skeleton animated :rows="2" /></article>
       </section>
       <section class="loading-panel"><el-skeleton animated :rows="8" /></section>
     </template>
@@ -377,10 +376,6 @@ onBeforeUnmount(() => requestController?.abort());
         <article class="kpi-card">
           <span class="kpi-icon"><Clock3 :size="20" aria-hidden="true" /></span>
           <div class="kpi-content"><span class="kpi-label">近 30 天</span><strong>{{ formatCount(summary.recent_30_days) }}</strong><small>截至 {{ summary.as_of }}</small></div>
-        </article>
-        <article class="kpi-card">
-          <span class="kpi-icon"><FileCheck2 :size="20" aria-hidden="true" /></span>
-          <div class="kpi-content"><span class="kpi-label">报告生成率</span><strong>{{ summary.report_generated_rate.toFixed(1) }}<em>%</em></strong><small>{{ formatCount(summary.report_generated) }} 条已生成报告</small></div>
         </article>
       </section>
 
@@ -451,7 +446,7 @@ onBeforeUnmount(() => requestController?.abort());
 .dashboard-alert { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border: 1px solid var(--app-danger); border-radius: 10px; color: var(--app-danger); background: var(--app-danger-soft); font-size: 13px; }
 .dashboard-alert span { flex: 1; }
 .dashboard-alert button { border: 0; color: inherit; background: transparent; font: inherit; font-weight: 700; cursor: pointer; }
-.kpi-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.kpi-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
 .kpi-card, .panel, .loading-panel { border: 1px solid var(--app-border); border-radius: 14px; background: var(--app-card); box-shadow: 0 1px 2px rgb(15 23 42 / 4%); }
 .kpi-card { display: flex; align-items: flex-start; gap: 13px; min-width: 0; padding: 18px; }
 .kpi-card-primary { border-color: var(--app-primary-border); background: linear-gradient(145deg, var(--app-card), var(--app-primary-soft)); }

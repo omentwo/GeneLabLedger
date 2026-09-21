@@ -110,7 +110,9 @@ const orderedExperimentProjects = computed(() => {
 const pendingCandidates = computed(() => {
   const keyword = candidateSearch.value.trim().toLocaleLowerCase();
   return records.value.filter((record) => {
-    if (record.status !== "待实验" || queuedRecordIds.value.has(record.id)) return false;
+    if (record.locked || record.status !== "待实验" || queuedRecordIds.value.has(record.id)) {
+      return false;
+    }
     if (!appStore.projectById(record.project_id)?.experiment_enabled) return false;
     if (candidateProjectId.value && record.project_id !== candidateProjectId.value) return false;
     if (!keyword) return true;
@@ -214,7 +216,7 @@ async function loadAllRecords(): Promise<void> {
   const loaded: ProjectRecord[] = [];
   let offset = 0;
   while (true) {
-    const page = await listRecords({ limit: 1000, offset });
+    const page = await listRecords({ include_locked: false, limit: 1000, offset });
     loaded.push(...page.items);
     offset += page.items.length;
     if (offset >= page.total || page.items.length === 0) break;

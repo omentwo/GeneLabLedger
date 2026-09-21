@@ -657,6 +657,7 @@ class RecordQuerySort(BaseModel):
 
 class RecordQueryRequest(BaseModel):
     project_id: str = Field(min_length=1, max_length=36)
+    include_locked: bool = True
     status: str | None = Field(default=None, max_length=40)
     search: str | None = Field(default=None, max_length=500)
     experiment_date_from: date | None = None
@@ -863,6 +864,7 @@ class PreviewCellTarget(BaseModel):
 
 class LedgerPrintPreviewCreate(BaseModel):
     scope: PreviewScope = "filtered"
+    include_locked: bool = True
     cells: list[PreviewCellTarget] = Field(default_factory=list, max_length=10000)
     search: str | None = Field(default=None, max_length=240)
     status: str | None = Field(default=None, max_length=40)

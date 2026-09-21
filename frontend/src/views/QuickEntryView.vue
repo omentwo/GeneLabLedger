@@ -314,6 +314,7 @@ async function loadUnreportedRecords(projectId: string): Promise<void> {
     do {
       const page = await listRecords({
         project_id: projectId,
+        include_locked: false,
         report_generated: false,
         limit: 1000,
         offset,
@@ -342,7 +343,7 @@ async function loadUnreportedRecords(projectId: string): Promise<void> {
       resetCreateForm(false);
     } else if (!activeRecordUnavailable.value) {
       activeRecordUnavailable.value = true;
-      ElMessage.warning("当前记录已生成报告并移出侧栏，未保存内容仍保留但不能再提交");
+      ElMessage.warning("当前记录已锁定或已生成报告并移出侧栏，未保存内容仍保留但不能再提交");
     }
   } catch (error) {
     if (sequence === recordsLoadSequence) {
@@ -669,7 +670,7 @@ async function saveExistingRecord(): Promise<void> {
   const record = activeRecord.value;
   if (!record) return;
   if (activeRecordUnavailable.value || record.report_generated) {
-    ElMessage.warning("该记录已生成报告，不再允许从快速录入侧栏修改");
+    ElMessage.warning("该记录已锁定或已生成报告，不再允许从快速录入侧栏修改");
     return;
   }
   if (record.locked) {
@@ -905,7 +906,7 @@ onBeforeUnmount(() => {
       <aside class="record-pane">
         <div class="record-pane-header">
           <div>
-            <h2>未生成报告</h2>
+            <h2>可快速录入</h2>
             <p>{{ unreportedRecords.length }} 条记录</p>
           </div>
           <el-button
@@ -925,7 +926,7 @@ onBeforeUnmount(() => {
           :prefix-icon="Search"
           placeholder="搜索病理号"
         />
-        <p class="record-pane-note">已生成报告的记录不会出现在这里。</p>
+        <p class="record-pane-note">锁定或已生成报告的记录不会出现在这里。</p>
 
         <el-scrollbar v-loading="recordsLoading" class="record-list">
           <button
@@ -945,7 +946,7 @@ onBeforeUnmount(() => {
             </span>
           </button>
           <div v-if="!recordsLoading && !filteredRecords.length" class="record-list-empty">
-            {{ recordSearch ? '没有匹配的病理号' : '暂无未生成报告记录' }}
+            {{ recordSearch ? '没有匹配的病理号' : '暂无可快速录入记录' }}
           </div>
         </el-scrollbar>
       </aside>
@@ -982,7 +983,7 @@ onBeforeUnmount(() => {
           v-if="activeRecordUnavailable"
           class="locked-alert"
           type="error"
-          title="该记录已生成报告并移出病理号侧栏，当前内容仅保留供查看，不能再提交。"
+          title="该记录已锁定或已生成报告并移出病理号侧栏，当前内容仅保留供查看，不能再提交。"
           :closable="false"
           show-icon
         />

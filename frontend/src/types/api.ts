@@ -242,6 +242,7 @@ export interface RecordFieldFilter {
 
 export interface RecordComplexQuery {
   project_id: string;
+  include_locked?: boolean;
   status?: string | null;
   search?: string | null;
   experiment_date_from?: string | null;

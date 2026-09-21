@@ -191,11 +191,12 @@ describe("quick entry record operations", () => {
     ]);
   });
 
-  it("never exposes generated-report records in the pathology-number list", () => {
+  it("never exposes locked or generated-report records in the pathology-number list", () => {
     expect(unreportedQuickEntryRecords([
       { ...record("3"), position: 3 },
       { ...record("1"), position: 1 },
       { ...record("2", true), position: 2 },
+      { ...record("4"), position: 4, locked: true },
     ]).map((item) => item.id)).toEqual(["1", "3"]);
   });
 });

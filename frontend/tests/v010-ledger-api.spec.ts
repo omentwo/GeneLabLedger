@@ -28,6 +28,7 @@ describe("v0.10 ledger APIs", () => {
     vi.stubGlobal("fetch", fetchMock);
     const query = {
       project_id: "p1",
+      include_locked: false,
       status: "待实验",
       search: "26-",
       field_filters: [{ field_id: "f1", operator: "contains" as const, value: "阳性" }],
