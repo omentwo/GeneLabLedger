@@ -53,6 +53,7 @@ export interface Project {
   name: string;
   sort_order: number;
   experiment_enabled: boolean;
+  duplicate_pathology_warning_enabled: boolean;
   fields: FieldDefinition[];
 }
 

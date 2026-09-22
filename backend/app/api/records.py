@@ -60,8 +60,10 @@ from app.services.field_validation import new_record_field_value, validate_field
 from app.services.record_operations import apply_record_operation, snapshot_record
 from app.services.records import (
     allocate_record_position,
+    count_project_pathology_number_duplicates,
     date_reorder_hash,
     date_reorder_plan,
+    duplicate_pathology_warning_message,
     parse_combined_pathology_number,
     records_for_date_reorder,
     replace_record_values,
@@ -185,9 +187,7 @@ def list_records(
     offset: int = Query(default=0, ge=0),
     session: Session = Depends(get_session),
 ) -> dict:
-    normalized_project_ids = list(
-        dict.fromkeys(item.strip() for item in (project_ids or []) if item.strip())
-    )
+    normalized_project_ids = list(dict.fromkeys(item.strip() for item in (project_ids or []) if item.strip()))
     if scope == "current" and not project_id:
         raise HTTPException(status_code=422, detail="当前项目搜索必须提供 project_id")
     if scope == "selected" and not normalized_project_ids:
@@ -213,12 +213,7 @@ def list_records(
         else (ProjectRecord.created_at.asc(), ProjectRecord.id.asc())
     )
     records = list(
-        session.scalars(
-            base.options(*record_load_options())
-            .order_by(*ordering)
-            .offset(offset)
-            .limit(limit)
-        )
+        session.scalars(base.options(*record_load_options()).order_by(*ordering).offset(offset).limit(limit))
     )
     return {
         "items": [record_dict(record) for record in records],
@@ -290,7 +285,8 @@ def _complex_record_statement(
         elif item.operator == "equals":
             filters.append(
                 or_(expression.is_(None), cast(expression, String) == "")
-                if not item.value else cast(expression, String) == item.value
+                if not item.value
+                else cast(expression, String) == item.value
             )
         elif item.operator == "in":
             selected_values = list(dict.fromkeys(item.values))
@@ -317,17 +313,11 @@ def _complex_record_statement(
                 raise HTTPException(status_code=422, detail="日期筛选格式无效") from error
             date_expression = expression if field.is_core else cast(expression, String)
             if start_value is not None:
-                filters.append(
-                    date_expression >= (start_value if field.is_core else start_value.isoformat())
-                )
+                filters.append(date_expression >= (start_value if field.is_core else start_value.isoformat()))
             if end_value is not None:
-                filters.append(
-                    date_expression <= (end_value if field.is_core else end_value.isoformat())
-                )
+                filters.append(date_expression <= (end_value if field.is_core else end_value.isoformat()))
         elif item.operator == "number_between":
-            number_expression = func.strict_number(expression).collate(
-                STRICT_DECIMAL_COLLATION
-            )
+            number_expression = func.strict_number(expression).collate(STRICT_DECIMAL_COLLATION)
             if item.start not in {None, ""}:
                 start_value = strict_decimal_text(item.start)
                 if start_value is None:
@@ -343,9 +333,7 @@ def _complex_record_statement(
         sort_field = fields[payload.sort.field_id]
         sort_expression = _query_field_expression(sort_field)
         if sort_field.data_type == "number":
-            sort_expression = func.strict_number(sort_expression).collate(
-                STRICT_DECIMAL_COLLATION
-            )
+            sort_expression = func.strict_number(sort_expression).collate(STRICT_DECIMAL_COLLATION)
         order = sort_expression.desc() if payload.sort.direction == "desc" else sort_expression.asc()
         statement = statement.order_by(order, ProjectRecord.position.asc(), ProjectRecord.id.asc())
     else:
@@ -362,11 +350,7 @@ def query_records(
     count_statement = statement.order_by(None)
     total = session.scalar(select(func.count()).select_from(count_statement.subquery())) or 0
     records = list(
-        session.scalars(
-            statement.options(*record_load_options())
-            .offset(payload.offset)
-            .limit(payload.limit)
-        )
+        session.scalars(statement.options(*record_load_options()).offset(payload.offset).limit(payload.limit))
     )
     return {
         "items": [record_dict(record) for record in records],
@@ -394,9 +378,7 @@ def get_records_by_ids(
     record_ids = list(dict.fromkeys(payload.record_ids))
     records = list(
         session.scalars(
-            select(ProjectRecord)
-            .where(ProjectRecord.id.in_(record_ids))
-            .options(*record_load_options())
+            select(ProjectRecord).where(ProjectRecord.id.in_(record_ids)).options(*record_load_options())
         )
     )
     by_id = {record.id: record for record in records}
@@ -545,9 +527,7 @@ def assign_experiment_numbers(
     record_ids = list(dict.fromkeys(payload.record_ids))
     records = list(
         session.scalars(
-            select(ProjectRecord)
-            .where(ProjectRecord.id.in_(record_ids))
-            .options(*record_load_options())
+            select(ProjectRecord).where(ProjectRecord.id.in_(record_ids)).options(*record_load_options())
         )
     )
     by_id = {record.id: record for record in records}
@@ -609,7 +589,7 @@ def validate_new_record(
     payload: RecordCreate,
     session: Session = Depends(get_session),
 ) -> dict:
-    require_project(session, payload.project_id)
+    project = require_project(session, payload.project_id)
     fields = list(
         session.scalars(
             select(FieldDefinition)
@@ -652,6 +632,20 @@ def validate_new_record(
             }
             for issue in field_issues
         )
+    if project.duplicate_pathology_warning_enabled:
+        pathology_field = next((field for field in fields if field.system_key == "pathology_number"), None)
+        duplicate_count = count_project_pathology_number_duplicates(
+            session, payload.project_id, payload.pathology_number
+        )
+        if pathology_field and duplicate_count:
+            issues.append(
+                {
+                    "record_id": "new",
+                    "field_id": pathology_field.id,
+                    "severity": "warning",
+                    "message": duplicate_pathology_warning_message(payload.pathology_number, duplicate_count),
+                }
+            )
     return {"issues": issues}
 
 
@@ -660,9 +654,7 @@ def quick_create_record(
     payload: RecordQuickCreate,
     session: Session = Depends(get_session),
 ) -> dict:
-    pathology_number, block_number = parse_combined_pathology_number(
-        payload.combined_pathology_number
-    )
+    pathology_number, block_number = parse_combined_pathology_number(payload.combined_pathology_number)
     return create_record(
         RecordCreate(
             project_id=payload.project_id,
@@ -709,9 +701,7 @@ def apply_reorder_by_date(
             detail="台账记录已经变化，请重新预览后再重排",
         )
     locked = [
-        f"{record.pathology_number}-{record.block_number}"
-        if record.block_number
-        else record.pathology_number
+        f"{record.pathology_number}-{record.block_number}" if record.block_number else record.pathology_number
         for record in records
         if record.locked
     ]
@@ -923,9 +913,7 @@ def update_highlight(
     record_ids = list(dict.fromkeys(payload.record_ids))
     records = list(
         session.scalars(
-            select(ProjectRecord)
-            .where(ProjectRecord.id.in_(record_ids))
-            .options(*record_load_options())
+            select(ProjectRecord).where(ProjectRecord.id.in_(record_ids)).options(*record_load_options())
         )
     )
     by_id = {record.id: record for record in records}
@@ -956,9 +944,7 @@ def update_cell_highlights(
     payload: RecordCellHighlightUpdate,
     session: Session = Depends(get_session),
 ) -> list[dict]:
-    targets = list(
-        dict.fromkeys((cell.record_id, cell.field_id) for cell in payload.cells)
-    )
+    targets = list(dict.fromkeys((cell.record_id, cell.field_id) for cell in payload.cells))
     record_ids = list(dict.fromkeys(record_id for record_id, _ in targets))
     field_ids = list(dict.fromkeys(field_id for _, field_id in targets))
     if not targets:
@@ -968,9 +954,7 @@ def update_cell_highlights(
         )
     records = list(
         session.scalars(
-            select(ProjectRecord)
-            .where(ProjectRecord.id.in_(record_ids))
-            .options(*record_load_options())
+            select(ProjectRecord).where(ProjectRecord.id.in_(record_ids)).options(*record_load_options())
         )
     )
     by_id = {record.id: record for record in records}
@@ -1043,9 +1027,7 @@ def update_report_status(
     unique_ids = list(dict.fromkeys(payload.record_ids))
     records = list(
         session.scalars(
-            select(ProjectRecord)
-            .where(ProjectRecord.id.in_(unique_ids))
-            .options(*record_load_options())
+            select(ProjectRecord).where(ProjectRecord.id.in_(unique_ids)).options(*record_load_options())
         )
     )
     by_id = {record.id: record for record in records}
@@ -1074,10 +1056,7 @@ def update_report_status(
             },
         )
     session.commit()
-    return [
-        record_dict(require_record(session, record_id, include_values=True))
-        for record_id in unique_ids
-    ]
+    return [record_dict(require_record(session, record_id, include_values=True)) for record_id in unique_ids]
 
 
 @router.put("/{record_id}/lock", response_model=RecordRead)
@@ -1125,17 +1104,11 @@ def bulk_delete_conditions(payload: BulkDeleteFilter) -> list:
             ]
         )
     else:
-        start_at = datetime.combine(
-            payload.start_date, time.min, tzinfo=ASIA_SHANGHAI
-        ).astimezone(UTC)
+        start_at = datetime.combine(payload.start_date, time.min, tzinfo=ASIA_SHANGHAI).astimezone(UTC)
         end_at = (
             datetime.combine(payload.end_date, time.min, tzinfo=ASIA_SHANGHAI) + timedelta(days=1)
         ).astimezone(UTC)
-        column = (
-            ProjectRecord.created_at
-            if payload.date_field == "created_at"
-            else ProjectRecord.updated_at
-        )
+        column = ProjectRecord.created_at if payload.date_field == "created_at" else ProjectRecord.updated_at
         conditions.extend([column >= start_at, column < end_at])
     return conditions
 

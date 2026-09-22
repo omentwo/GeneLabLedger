@@ -60,9 +60,7 @@ def _ensure_unique_field_label(
             status_code=status.HTTP_409_CONFLICT,
             detail="表头名称不能使用 系统保留字段",
         )
-    fields = session.scalars(
-        select(FieldDefinition).where(FieldDefinition.project_id == project_id)
-    )
+    fields = session.scalars(select(FieldDefinition).where(FieldDefinition.project_id == project_id))
     for field in fields:
         if field.id == exclude_field_id:
             continue
@@ -166,6 +164,7 @@ def duplicate_project(
         name=name,
         sort_order=(session.scalar(select(func.max(Project.sort_order))) or -1) + 1,
         experiment_enabled=source.experiment_enabled,
+        duplicate_pathology_warning_enabled=source.duplicate_pathology_warning_enabled,
     )
     field_map: dict[str, FieldDefinition] = {}
     try:
@@ -290,6 +289,7 @@ def update_project(
         "name": project.name,
         "sort_order": project.sort_order,
         "experiment_enabled": project.experiment_enabled,
+        "duplicate_pathology_warning_enabled": project.duplicate_pathology_warning_enabled,
     }
     if payload.name is not None:
         duplicate = session.scalar(
@@ -302,6 +302,8 @@ def update_project(
         project.sort_order = payload.sort_order
     if payload.experiment_enabled is not None:
         project.experiment_enabled = payload.experiment_enabled
+    if payload.duplicate_pathology_warning_enabled is not None:
+        project.duplicate_pathology_warning_enabled = payload.duplicate_pathology_warning_enabled
     try:
         audit(
             session,
@@ -314,6 +316,7 @@ def update_project(
                     "name": project.name,
                     "sort_order": project.sort_order,
                     "experiment_enabled": project.experiment_enabled,
+                    "duplicate_pathology_warning_enabled": (project.duplicate_pathology_warning_enabled),
                 },
             },
         )
@@ -379,18 +382,14 @@ def force_delete_project(
     field_ids = list(
         session.scalars(select(FieldDefinition.id).where(FieldDefinition.project_id == project.id))
     )
-    record_ids = list(
-        session.scalars(select(ProjectRecord.id).where(ProjectRecord.project_id == project.id))
-    )
+    record_ids = list(session.scalars(select(ProjectRecord.id).where(ProjectRecord.project_id == project.id)))
     template_ids = list(
         session.scalars(select(ReportTemplate.id).where(ReportTemplate.project_id == project.id))
     )
     version_ids = (
         list(
             session.scalars(
-                select(ReportTemplateVersion.id).where(
-                    ReportTemplateVersion.template_id.in_(template_ids)
-                )
+                select(ReportTemplateVersion.id).where(ReportTemplateVersion.template_id.in_(template_ids))
             )
         )
         if template_ids
@@ -401,25 +400,31 @@ def force_delete_project(
     # ledger through a field reference.  The normal APIs prevent these relations,
     # but force-delete treats their presence as a hard safety error.
     if field_ids:
-        cross_ledger_values = session.scalar(
-            select(func.count())
-            .select_from(RecordValue)
-            .join(ProjectRecord, RecordValue.record_id == ProjectRecord.id)
-            .where(
-                RecordValue.field_id.in_(field_ids),
-                ProjectRecord.project_id != project.id,
+        cross_ledger_values = (
+            session.scalar(
+                select(func.count())
+                .select_from(RecordValue)
+                .join(ProjectRecord, RecordValue.record_id == ProjectRecord.id)
+                .where(
+                    RecordValue.field_id.in_(field_ids),
+                    ProjectRecord.project_id != project.id,
+                )
             )
-        ) or 0
-        cross_ledger_mappings = session.scalar(
-            select(func.count())
-            .select_from(ReportMapping)
-            .join(ReportTemplateVersion, ReportMapping.template_version_id == ReportTemplateVersion.id)
-            .join(ReportTemplate, ReportTemplateVersion.template_id == ReportTemplate.id)
-            .where(
-                ReportMapping.field_id.in_(field_ids),
-                ReportTemplate.project_id != project.id,
+            or 0
+        )
+        cross_ledger_mappings = (
+            session.scalar(
+                select(func.count())
+                .select_from(ReportMapping)
+                .join(ReportTemplateVersion, ReportMapping.template_version_id == ReportTemplateVersion.id)
+                .join(ReportTemplate, ReportTemplateVersion.template_id == ReportTemplate.id)
+                .where(
+                    ReportMapping.field_id.in_(field_ids),
+                    ReportTemplate.project_id != project.id,
+                )
             )
-        ) or 0
+            or 0
+        )
         if cross_ledger_values or cross_ledger_mappings:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -471,8 +476,7 @@ def force_delete_project(
                 or 0
             )
             deleted_records = (
-                session.execute(delete(ProjectRecord).where(ProjectRecord.id.in_(record_ids))).rowcount
-                or 0
+                session.execute(delete(ProjectRecord).where(ProjectRecord.id.in_(record_ids))).rowcount or 0
             )
         if version_ids:
             deleted_report_mappings = (
@@ -494,8 +498,7 @@ def force_delete_project(
             )
         if field_ids:
             deleted_field_options = (
-                session.execute(delete(FieldOption).where(FieldOption.field_id.in_(field_ids))).rowcount
-                or 0
+                session.execute(delete(FieldOption).where(FieldOption.field_id.in_(field_ids))).rowcount or 0
             )
             deleted_fields = (
                 session.execute(delete(FieldDefinition).where(FieldDefinition.id.in_(field_ids))).rowcount

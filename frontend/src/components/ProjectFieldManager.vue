@@ -229,6 +229,21 @@ async function renameProject(): Promise<void> {
   }
 }
 
+async function setDuplicatePathologyWarning(enabled: boolean): Promise<void> {
+  const project = currentProject.value;
+  if (!project) return;
+  saving.value = true;
+  try {
+    await updateProject(project.id, { duplicate_pathology_warning_enabled: enabled });
+    await reloadAndNotify();
+    ElMessage.success(enabled ? "病理号重复提醒已开启" : "病理号重复提醒已关闭");
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "项目设置保存失败");
+  } finally {
+    saving.value = false;
+  }
+}
+
 async function duplicateCurrentProject(): Promise<void> {
   const project = currentProject.value;
   if (!project) return;
@@ -859,6 +874,19 @@ onBeforeUnmount(clearFieldDrag);
           </el-button>
         </div>
 
+        <div v-if="currentProject" class="project-behavior-row">
+          <div>
+            <strong>病理号重复提醒</strong>
+            <p>开启后，在当前项目录入已存在的病理号时提醒；不会检查其他项目。</p>
+          </div>
+          <el-switch
+            :model-value="currentProject.duplicate_pathology_warning_enabled"
+            active-text="开启"
+            inactive-text="关闭"
+            @change="setDuplicatePathologyWarning(Boolean($event))"
+          />
+        </div>
+
         <div class="field-heading">
           <div>
             <strong>当前项目表头</strong>
@@ -1383,6 +1411,24 @@ onBeforeUnmount(clearFieldDrag);
 
 .project-name-row {
   margin-bottom: 18px;
+}
+
+.project-behavior-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface-soft);
+}
+
+.project-behavior-row p {
+  margin: 4px 0 0;
+  color: var(--app-muted);
+  font-size: 12px;
 }
 
 .field-heading {

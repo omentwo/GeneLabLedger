@@ -5771,7 +5771,7 @@ onBeforeUnmount(() => {
         :disabled="gridCellInternalEditing || (!selectedCount && !hasGridCellSelection)"
         @click="openCurrentHighlightDialog"
       >
-        {{ hasGridCellSelection ? "设置单元格底色" : "设置底色" }}
+        设置底色
       </el-button>
       <el-button
         :icon="Delete"
@@ -5780,7 +5780,7 @@ onBeforeUnmount(() => {
         :disabled="gridCellInternalEditing || (!selectedCount && !hasGridCellSelection)"
         @click="clearSelectedHighlight"
       >
-        {{ hasGridCellSelection ? "清除单元格底色" : "清除底色" }}
+        清除底色
       </el-button>
       <el-button @click="updateSelectedStatus('已完成')">
         已完成
@@ -5804,7 +5804,7 @@ onBeforeUnmount(() => {
         解锁
       </el-button>
       <el-button :icon="Setting" class="manage-project-button" @click="managerVisible = true">
-        管理检测项目与表头
+        管理项目与表头
       </el-button>
     </section>
 

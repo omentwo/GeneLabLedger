@@ -96,6 +96,87 @@ def test_duplicate_pathology_numbers_are_independent(
     assert client.get(f"/api/records/{second['id']}").json()["pathology_number"] == "26-00001"
 
 
+def test_duplicate_pathology_warning_is_same_project_and_configurable(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    tb_id = seeded_projects["TB"]["id"]
+    braf_id = seeded_projects["BRAFV600E"]["id"]
+    assert seeded_projects["TB"]["duplicate_pathology_warning_enabled"] is True
+    client.post(
+        "/api/records",
+        json={"project_id": tb_id, "pathology_number": "WARN-001"},
+    )
+
+    same_project = client.post(
+        "/api/records/validate-new",
+        json={"project_id": tb_id, "pathology_number": "WARN-001"},
+    )
+    assert same_project.status_code == 200
+    assert any(
+        issue["severity"] == "warning" and "当前项目已存在 1 条" in issue["message"]
+        for issue in same_project.json()["issues"]
+    )
+
+    other_project = client.post(
+        "/api/records/validate-new",
+        json={"project_id": braf_id, "pathology_number": "WARN-001"},
+    )
+    assert other_project.status_code == 200
+    assert not any(issue["severity"] == "warning" for issue in other_project.json()["issues"])
+
+    second = client.post(
+        "/api/records",
+        json={"project_id": tb_id, "pathology_number": "WARN-SECOND"},
+    ).json()
+    pathology_field = next(
+        field for field in seeded_projects["TB"]["fields"] if field["system_key"] == "pathology_number"
+    )
+    edit_preview = client.post(
+        "/api/records/cell-batches/preview",
+        json={
+            "project_id": tb_id,
+            "changes": [
+                {
+                    "record_id": second["id"],
+                    "field_id": pathology_field["id"],
+                    "value": "WARN-001",
+                    "expected_value": "WARN-SECOND",
+                }
+            ],
+        },
+    )
+    assert edit_preview.status_code == 200
+    assert any(issue["severity"] == "warning" for issue in edit_preview.json()["issues"])
+
+    disabled = client.patch(
+        f"/api/projects/{tb_id}",
+        json={"duplicate_pathology_warning_enabled": False},
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["duplicate_pathology_warning_enabled"] is False
+    after_disable = client.post(
+        "/api/records/validate-new",
+        json={"project_id": tb_id, "pathology_number": "WARN-001"},
+    )
+    assert not any(issue["severity"] == "warning" for issue in after_disable.json()["issues"])
+    edit_after_disable = client.post(
+        "/api/records/cell-batches/preview",
+        json={
+            "project_id": tb_id,
+            "changes": [
+                {
+                    "record_id": second["id"],
+                    "field_id": pathology_field["id"],
+                    "value": "WARN-001",
+                    "expected_value": "WARN-SECOND",
+                }
+            ],
+        },
+    )
+    assert not any(issue["severity"] == "warning" for issue in edit_after_disable.json()["issues"])
+
+
 def test_assign_project_endpoint_is_removed(client: TestClient) -> None:
     paths = client.get("/openapi.json").json()["paths"]
     assert "/api/records/{record_id}/assign-project" not in paths
@@ -164,9 +245,7 @@ def test_experiment_numbering_only_updates_numbers_and_remains_editable(
     assert refreshed_first["experiment_date"] == "2026-07-30"
     assert refreshed_second["experiment_date"] == "2026-07-31"
     assert refreshed_first["status"] == refreshed_second["status"] == "待实验"
-    assert client.get(f"/api/records/{same_number.json()['id']}").json()[
-        "experiment_number"
-    ] == "20260801-1"
+    assert client.get(f"/api/records/{same_number.json()['id']}").json()["experiment_number"] == "20260801-1"
 
     changed = client.patch(
         f"/api/records/{second['id']}",
@@ -221,30 +300,27 @@ def test_experiment_numbering_supports_multiple_ledgers_atomically(
     assert [record["id"] for record in applied.json()] == [second["id"], first["id"]]
     assert [record["experiment_number"] for record in applied.json()] == ["MIXED-1", "MIXED-2"]
 
-    assert client.patch(
-        f"/api/records/{first['id']}", json={"experiment_number": "TB-BEFORE-BLOCKED"}
-    ).status_code == 200
-    assert client.patch(
-        f"/api/records/{second['id']}", json={"experiment_number": "BRAF-BEFORE-BLOCKED"}
-    ).status_code == 200
     assert (
-        client.put(f"/api/records/{second['id']}/lock", json={"locked": True}).status_code
+        client.patch(
+            f"/api/records/{first['id']}", json={"experiment_number": "TB-BEFORE-BLOCKED"}
+        ).status_code
         == 200
     )
+    assert (
+        client.patch(
+            f"/api/records/{second['id']}", json={"experiment_number": "BRAF-BEFORE-BLOCKED"}
+        ).status_code
+        == 200
+    )
+    assert client.put(f"/api/records/{second['id']}/lock", json={"locked": True}).status_code == 200
 
     blocked = client.post(
         "/api/records/experiment-numbers",
         json={"record_ids": [first["id"], second["id"]], "prefix": "BLOCKED"},
     )
     assert blocked.status_code == 409
-    assert (
-        client.get(f"/api/records/{first['id']}").json()["experiment_number"]
-        == "TB-BEFORE-BLOCKED"
-    )
-    assert (
-        client.get(f"/api/records/{second['id']}").json()["experiment_number"]
-        == "BRAF-BEFORE-BLOCKED"
-    )
+    assert client.get(f"/api/records/{first['id']}").json()["experiment_number"] == "TB-BEFORE-BLOCKED"
+    assert client.get(f"/api/records/{second['id']}").json()["experiment_number"] == "BRAF-BEFORE-BLOCKED"
 
 
 def test_block_number_is_independent_and_numbering_keeps_canonical_pathology(
@@ -638,9 +714,9 @@ def test_record_operation_rejects_conflicts_without_partial_changes(
         },
     )
     assert response.status_code == 409
-    assert client.get(f"/api/records/{record['id']}").json()["pathology_number"] == changed[
-        "pathology_number"
-    ]
+    assert (
+        client.get(f"/api/records/{record['id']}").json()["pathology_number"] == changed["pathology_number"]
+    )
 
 
 def test_bulk_delete_by_ledger_date_requires_fresh_preview_and_unlocked_records(
@@ -709,10 +785,13 @@ def test_direct_print_uses_temporary_docx_and_document_download_is_removed(
             "block_number": " 2 ",
         },
     ).json()
-    assert client.patch(
-        f"/api/records/{record['id']}",
-        json={"experiment_number": "RPT-1"},
-    ).status_code == 200
+    assert (
+        client.patch(
+            f"/api/records/{record['id']}",
+            json={"experiment_number": "RPT-1"},
+        ).status_code
+        == 200
+    )
     record_without_block = client.post(
         "/api/records",
         json={"project_id": tb["id"], "pathology_number": "REPORT-002"},
@@ -743,9 +822,7 @@ def test_direct_print_uses_temporary_docx_and_document_download_is_removed(
         },
     )
     assert mapped.status_code == 200
-    combined_mapping = next(
-        item for item in mapped.json()["mappings"] if item["placeholder"] == "case_no"
-    )
+    combined_mapping = next(item for item in mapped.json()["mappings"] if item["placeholder"] == "case_no")
     assert combined_mapping["field_id"] is None
     assert combined_mapping["fixed_value"] is None
 
@@ -995,7 +1072,5 @@ def test_reorder_by_date_preserves_other_slots_and_detects_conflicts(
         serial_ten["id"],
     ]
     assert [row["position"] for row in rows] == [1, 2, 3, 4, 5]
-    other_rows = client.get(
-        f"/api/records?project_id={other_project_id}&limit=1000"
-    ).json()["items"]
+    other_rows = client.get(f"/api/records?project_id={other_project_id}&limit=1000").json()["items"]
     assert [row["id"] for row in other_rows] == [other_project_record.json()["id"]]

@@ -42,6 +42,7 @@ class Project(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     experiment_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    duplicate_pathology_warning_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     fields: Mapped[list[FieldDefinition]] = relationship(
         back_populates="project",
@@ -94,9 +95,7 @@ class FieldDefinition(Base, TimestampMixin):
     hidden: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     width: Mapped[int] = mapped_column(Integer, default=120, nullable=False)
-    validation_mode: Mapped[str] = mapped_column(
-        String(24), default="suggestion", nullable=False
-    )
+    validation_mode: Mapped[str] = mapped_column(String(24), default="suggestion", nullable=False)
     validation_rules: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     default_value: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -136,6 +135,7 @@ class ProjectRecord(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_record_project_status", "project_id", "status"),
         Index("ix_record_project_position", "project_id", "position"),
+        Index("ix_record_project_pathology", "project_id", "pathology_number"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)

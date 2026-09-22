@@ -26,6 +26,30 @@ def require_project(session: Session, project_id: str) -> Project:
     return project
 
 
+def count_project_pathology_number_duplicates(
+    session: Session,
+    project_id: str,
+    pathology_number: str,
+    *,
+    exclude_record_ids: set[str] | None = None,
+) -> int:
+    """Count exact pathology-number matches inside one project only."""
+    value = pathology_number.strip()
+    if not value:
+        return 0
+    statement = select(func.count(ProjectRecord.id)).where(
+        ProjectRecord.project_id == project_id,
+        ProjectRecord.pathology_number == value,
+    )
+    if exclude_record_ids:
+        statement = statement.where(ProjectRecord.id.not_in(exclude_record_ids))
+    return int(session.scalar(statement) or 0)
+
+
+def duplicate_pathology_warning_message(pathology_number: str, duplicate_count: int) -> str:
+    return f"当前项目已存在 {duplicate_count} 条病理号“{pathology_number}”的记录，请确认是否重复录入"
+
+
 def require_record(session: Session, record_id: str, *, include_values: bool = False) -> ProjectRecord:
     statement = (
         select(ProjectRecord)
@@ -159,9 +183,7 @@ def records_for_date_reorder(
     )
     if for_update:
         statement = statement.with_for_update()
-    return list(
-        session.scalars(statement)
-    )
+    return list(session.scalars(statement))
 
 
 def date_reorder_hash(records: list[ProjectRecord]) -> str:
@@ -242,11 +264,7 @@ def validate_record_values(
     field_ids = list(by_id) if include_required_missing else list(values)
     for field_id in field_ids:
         field = by_id[field_id]
-        raw_value = (
-            new_record_field_value(field, values)
-            if apply_defaults
-            else values.get(field_id, "")
-        )
+        raw_value = new_record_field_value(field, values) if apply_defaults else values.get(field_id, "")
         value, issues = validate_field_value(field, raw_value)
         normalized[field_id] = value
         errors.extend(issue.message for issue in issues if issue.severity == "error")

@@ -19,6 +19,7 @@ import {
   listRecords,
   previewCellBatch,
   quickCreateRecord,
+  validateNewRecord,
 } from "@/api/records";
 import { getSetting, putSetting } from "@/api/system";
 import EditableChoiceInput from "@/components/EditableChoiceInput.vue";
@@ -654,6 +655,22 @@ async function saveNewRecord(): Promise<void> {
   if (!project) return;
   const parsed = parseCombinedPathologyNumber(combinedPathologyInput.value);
   combinedPathologyInput.value = parsed.normalized;
+  const validation = await validateNewRecord({
+    project_id: project.id,
+    pathology_number: parsed.pathologyNumber,
+    block_number: parsed.blockNumber,
+    status: "待实验",
+    experiment_date: null,
+    experiment_number: null,
+    values: {},
+  });
+  const errors = validation.issues.filter((issue) => issue.severity === "error");
+  const warnings = validation.issues.filter((issue) => issue.severity === "warning");
+  if (errors.length) {
+    await ElMessageBox.alert(issueSummary(errors), "无法保存", { type: "error" });
+    return;
+  }
+  if (!(await confirmWarnings(warnings))) return;
   const created = await quickCreateRecord(project.id, parsed.normalized);
   unreportedRecords.value = unreportedQuickEntryRecords([
     ...unreportedRecords.value,

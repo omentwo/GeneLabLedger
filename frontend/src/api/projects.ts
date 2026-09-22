@@ -65,7 +65,12 @@ export function deleteLedgerTemplate(templateId: string): Promise<void> {
 
 export function updateProject(
   projectId: string,
-  payload: { name?: string; sort_order?: number; experiment_enabled?: boolean },
+  payload: {
+    name?: string;
+    sort_order?: number;
+    experiment_enabled?: boolean;
+    duplicate_pathology_warning_enabled?: boolean;
+  },
 ): Promise<Project> {
   return apiRequest<Project>(`/projects/${projectId}`, {
     method: "PATCH",

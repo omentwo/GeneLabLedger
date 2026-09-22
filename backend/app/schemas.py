@@ -74,11 +74,7 @@ class FieldValidationRules(BaseModel):
 
     @model_validator(mode="after")
     def validate_ranges(self) -> FieldValidationRules:
-        if (
-            self.min_number is not None
-            and self.max_number is not None
-            and self.min_number > self.max_number
-        ):
+        if self.min_number is not None and self.max_number is not None and self.min_number > self.max_number:
             raise ValueError("最小数字不能大于最大数字")
         if self.min_date is not None and self.max_date is not None and self.min_date > self.max_date:
             raise ValueError("最早日期不能晚于最晚日期")
@@ -127,7 +123,6 @@ class FieldCreate(BaseModel):
             if cleaned and cleaned not in result:
                 result.append(cleaned)
         return result
-
 
     @field_validator("default_value")
     @classmethod
@@ -216,6 +211,7 @@ class ProjectUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     sort_order: int | None = Field(default=None, ge=0)
     experiment_enabled: bool | None = None
+    duplicate_pathology_warning_enabled: bool | None = None
 
     @field_validator("name")
     @classmethod
@@ -230,6 +226,7 @@ class ProjectRead(BaseModel):
     name: str
     sort_order: int
     experiment_enabled: bool
+    duplicate_pathology_warning_enabled: bool
     fields: list[FieldRead] = Field(default_factory=list)
 
 
@@ -303,6 +300,7 @@ class LedgerTemplateField(BaseModel):
     def clean_default_value(cls, value: str | None) -> str | None:
         cleaned = value.strip() if value is not None else ""
         return cleaned or None
+
 
 class LedgerTemplateCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
@@ -1044,7 +1042,6 @@ class BulkDeleteExecute(BaseModel):
 class BulkDeleteResult(BaseModel):
     deleted: int
     deleted_records: list[RecordOperationSnapshot] = Field(default_factory=list)
-
 
 
 class AutoExportTaskInput(BaseModel):

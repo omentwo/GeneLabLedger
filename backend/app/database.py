@@ -49,9 +49,7 @@ class Base(DeclarativeBase):
 
 
 STRICT_DECIMAL_COLLATION = "STRICT_DECIMAL"
-_STRICT_NUMBER_PATTERN = re.compile(
-    r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
-)
+_STRICT_NUMBER_PATTERN = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
 
 
 def strict_decimal_text(value: object) -> str | None:
@@ -116,23 +114,19 @@ class Database:
         self._migrate_record_block_number()
         self._migrate_v010_field_validation()
         self._migrate_record_positions()
+        self._migrate_project_duplicate_pathology_warning()
         Base.metadata.create_all(self.engine)
 
     @staticmethod
     def _sqlite_unique_columns(connection: Connection, table_name: str) -> set[tuple[str, ...]]:
         result: set[tuple[str, ...]] = set()
         escaped_table = table_name.replace('"', '""')
-        for row in connection.exec_driver_sql(
-            f'PRAGMA index_list("{escaped_table}")'
-        ):
+        for row in connection.exec_driver_sql(f'PRAGMA index_list("{escaped_table}")'):
             if not bool(row[2]):
                 continue
             index_name = str(row[1]).replace('"', '""')
             columns = tuple(
-                str(item[2])
-                for item in connection.exec_driver_sql(
-                    f'PRAGMA index_info("{index_name}")'
-                )
+                str(item[2]) for item in connection.exec_driver_sql(f'PRAGMA index_info("{index_name}")')
             )
             result.add(columns)
         return result
@@ -149,20 +143,20 @@ class Database:
             return
         with self.engine.connect() as connection:
             field_columns = {
-                str(row[1])
-                for row in connection.exec_driver_sql("PRAGMA table_info(field_definitions)")
+                str(row[1]) for row in connection.exec_driver_sql("PRAGMA table_info(field_definitions)")
             }
             view_exists = bool(
                 connection.exec_driver_sql(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' "
-                    "AND name='ledger_view_presets'"
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ledger_view_presets'"
                 ).scalar()
             )
             record_columns = {
-                str(row[1])
-                for row in connection.exec_driver_sql("PRAGMA table_info(project_records)")
+                str(row[1]) for row in connection.exec_driver_sql("PRAGMA table_info(project_records)")
             }
             record_unique_columns = self._sqlite_unique_columns(connection, "project_records")
+            project_columns = {
+                str(row[1]) for row in connection.exec_driver_sql("PRAGMA table_info(projects)")
+            }
         needs_validation_upgrade = bool(field_columns) and not {
             "validation_mode",
             "validation_rules",
@@ -172,8 +166,9 @@ class Database:
         needs_view_removal = view_exists
         needs_position_upgrade = bool(record_columns) and "position" not in record_columns
         needs_block_upgrade = bool(record_columns) and "block_number" not in record_columns
-        needs_number_upgrade = any(
-            "experiment_number" in columns for columns in record_unique_columns
+        needs_number_upgrade = any("experiment_number" in columns for columns in record_unique_columns)
+        needs_duplicate_warning_upgrade = bool(project_columns) and (
+            "duplicate_pathology_warning_enabled" not in project_columns
         )
         needs_upgrade = (
             needs_v010_upgrade
@@ -182,6 +177,7 @@ class Database:
             or needs_position_upgrade
             or needs_block_upgrade
             or needs_number_upgrade
+            or needs_duplicate_warning_upgrade
         )
         if not needs_upgrade:
             return
@@ -190,6 +186,8 @@ class Database:
         timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         if needs_view_removal:
             version = "view-removal"
+        elif needs_duplicate_warning_upgrade:
+            version = "duplicate-warning"
         elif needs_position_upgrade:
             version = "v0.10.1"
         elif needs_v010_upgrade:
@@ -204,6 +202,30 @@ class Database:
             backup_path = backup_dir / f"ledger-before-{version}-{timestamp}-{suffix}.db"
             suffix += 1
         shutil.copy2(database_path, backup_path)
+
+    def _migrate_project_duplicate_pathology_warning(self) -> None:
+        """Add the per-project duplicate pathology-number warning switch."""
+        if self.engine.dialect.name != "sqlite":
+            return
+        with self.engine.begin() as connection:
+            project_exists = connection.exec_driver_sql(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='projects'"
+            ).scalar()
+            if project_exists:
+                columns = {str(row[1]) for row in connection.exec_driver_sql("PRAGMA table_info(projects)")}
+                if "duplicate_pathology_warning_enabled" not in columns:
+                    connection.exec_driver_sql(
+                        "ALTER TABLE projects ADD COLUMN "
+                        "duplicate_pathology_warning_enabled BOOLEAN NOT NULL DEFAULT 1"
+                    )
+            record_exists = connection.exec_driver_sql(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_records'"
+            ).scalar()
+            if record_exists:
+                connection.exec_driver_sql(
+                    "CREATE INDEX IF NOT EXISTS ix_record_project_pathology "
+                    "ON project_records (project_id, pathology_number)"
+                )
 
     def _remove_ledger_view_presets(self) -> None:
         """Drop the retired named-view table in packaged desktop databases."""
@@ -223,8 +245,7 @@ class Database:
             if not table_exists:
                 return
             columns = {
-                str(row[1])
-                for row in connection.exec_driver_sql("PRAGMA table_info(field_definitions)")
+                str(row[1]) for row in connection.exec_driver_sql("PRAGMA table_info(field_definitions)")
             }
             if "validation_mode" not in columns:
                 connection.exec_driver_sql(
@@ -233,13 +254,10 @@ class Database:
                 )
             if "validation_rules" not in columns:
                 connection.exec_driver_sql(
-                    "ALTER TABLE field_definitions ADD COLUMN validation_rules "
-                    "JSON NOT NULL DEFAULT '{}'"
+                    "ALTER TABLE field_definitions ADD COLUMN validation_rules JSON NOT NULL DEFAULT '{}'"
                 )
             if "default_value" not in columns:
-                connection.exec_driver_sql(
-                    "ALTER TABLE field_definitions ADD COLUMN default_value TEXT"
-                )
+                connection.exec_driver_sql("ALTER TABLE field_definitions ADD COLUMN default_value TEXT")
 
     def _migrate_record_positions(self) -> None:
         """Add and backfill stable per-project row positions for packaged desktops."""
@@ -252,18 +270,14 @@ class Database:
             if not table_exists:
                 return
             columns = {
-                str(row[1])
-                for row in connection.exec_driver_sql("PRAGMA table_info(project_records)")
+                str(row[1]) for row in connection.exec_driver_sql("PRAGMA table_info(project_records)")
             }
             if "position" not in columns:
                 connection.exec_driver_sql(
                     "ALTER TABLE project_records ADD COLUMN position INTEGER NOT NULL DEFAULT 0"
                 )
                 rows = connection.execute(
-                    text(
-                        "SELECT id, project_id FROM project_records "
-                        "ORDER BY project_id, created_at, id"
-                    )
+                    text("SELECT id, project_id FROM project_records ORDER BY project_id, created_at, id")
                 ).all()
                 counters: dict[str, int] = {}
                 updates = []
@@ -273,10 +287,7 @@ class Database:
                     updates.append({"record_id": record_id, "position": position})
                 if updates:
                     connection.execute(
-                        text(
-                            "UPDATE project_records SET position = :position "
-                            "WHERE id = :record_id"
-                        ),
+                        text("UPDATE project_records SET position = :position WHERE id = :record_id"),
                         updates,
                     )
             connection.exec_driver_sql(
@@ -295,16 +306,12 @@ class Database:
             if not table_exists:
                 return
             columns = {
-                str(row[1])
-                for row in connection.exec_driver_sql("PRAGMA table_info(project_records)")
+                str(row[1]) for row in connection.exec_driver_sql("PRAGMA table_info(project_records)")
             }
             if "block_number" not in columns:
-                connection.exec_driver_sql(
-                    "ALTER TABLE project_records ADD COLUMN block_number VARCHAR(80)"
-                )
+                connection.exec_driver_sql("ALTER TABLE project_records ADD COLUMN block_number VARCHAR(80)")
             connection.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_project_records_block_number "
-                "ON project_records (block_number)"
+                "CREATE INDEX IF NOT EXISTS ix_project_records_block_number ON project_records (block_number)"
             )
 
     def _migrate_record_experiment_number_uniqueness(self) -> None:
@@ -326,8 +333,7 @@ class Database:
             if not any("experiment_number" in columns for columns in unique_columns):
                 return
             legacy_columns = {
-                str(row[1])
-                for row in connection.exec_driver_sql("PRAGMA table_info(project_records)")
+                str(row[1]) for row in connection.exec_driver_sql("PRAGMA table_info(project_records)")
             }
             connection.commit()
             connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
@@ -405,44 +411,32 @@ class Database:
                         "ALTER TABLE project_records_number_new RENAME TO project_records"
                     )
                     rows = connection.exec_driver_sql(
-                        "SELECT id, project_id FROM project_records "
-                        "ORDER BY project_id, created_at, id"
+                        "SELECT id, project_id FROM project_records ORDER BY project_id, created_at, id"
                     ).all()
                     counters: dict[str, int] = {}
                     for record_id, project_id in rows:
                         position = counters.get(project_id, 0) + 1
                         counters[project_id] = position
                         connection.execute(
-                            text(
-                                "UPDATE project_records SET position = :position "
-                                "WHERE id = :record_id"
-                            ),
+                            text("UPDATE project_records SET position = :position WHERE id = :record_id"),
                             {"record_id": record_id, "position": position},
                         )
                     connection.exec_driver_sql(
-                        "CREATE INDEX ix_record_project_status "
-                        "ON project_records (project_id, status)"
+                        "CREATE INDEX ix_record_project_status ON project_records (project_id, status)"
                     )
                     connection.exec_driver_sql(
-                        "CREATE INDEX ix_record_project_position "
-                        "ON project_records (project_id, position)"
+                        "CREATE INDEX ix_record_project_position ON project_records (project_id, position)"
                     )
                     connection.exec_driver_sql(
                         "CREATE INDEX ix_project_records_pathology_number "
                         "ON project_records (pathology_number)"
                     )
                     connection.exec_driver_sql(
-                        "CREATE INDEX ix_project_records_block_number "
-                        "ON project_records (block_number)"
+                        "CREATE INDEX ix_project_records_block_number ON project_records (block_number)"
                     )
-                    foreign_key_errors = connection.exec_driver_sql(
-                        "PRAGMA foreign_key_check"
-                    ).all()
+                    foreign_key_errors = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
                     if foreign_key_errors:
-                        raise RuntimeError(
-                            "SQLite 外键检查失败，数据库升级已回滚："
-                            f"{foreign_key_errors[:3]}"
-                        )
+                        raise RuntimeError(f"SQLite 外键检查失败，数据库升级已回滚：{foreign_key_errors[:3]}")
             finally:
                 if connection.in_transaction():
                     connection.rollback()

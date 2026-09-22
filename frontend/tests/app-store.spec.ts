@@ -15,6 +15,7 @@ describe("backend health", () => {
       name: "缓存项目",
       sort_order: 1,
       experiment_enabled: true,
+      duplicate_pathology_warning_enabled: true,
       fields: [],
     }] satisfies Project[];
     const refreshed = [{
@@ -22,6 +23,7 @@ describe("backend health", () => {
       name: "刷新项目",
       sort_order: 2,
       experiment_enabled: true,
+      duplicate_pathology_warning_enabled: true,
       fields: [],
     }] satisfies Project[];
     vi.mocked(listProjects)

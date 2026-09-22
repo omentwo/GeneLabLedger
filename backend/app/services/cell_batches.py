@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
@@ -12,7 +13,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.audit import audit
 from app.database import begin_immediate_write
-from app.models import FieldDefinition, ProjectRecord, RecordValue
+from app.models import FieldDefinition, Project, ProjectRecord, RecordValue
 from app.schemas import RecordBatchNewRecord, RecordCellChange
 from app.services.field_validation import (
     FieldValueIssue,
@@ -20,7 +21,12 @@ from app.services.field_validation import (
     validate_field_value,
 )
 from app.services.record_operations import snapshot_record
-from app.services.records import allocate_record_position, next_record_position
+from app.services.records import (
+    allocate_record_position,
+    count_project_pathology_number_duplicates,
+    duplicate_pathology_warning_message,
+    next_record_position,
+)
 from app.services.serializers import record_dict
 
 PREVIEW_TTL = timedelta(minutes=10)
@@ -80,9 +86,7 @@ def _claim_preview(token: str, *, accept_warnings: bool) -> StoredCellBatch:
             raise HTTPException(status_code=status.HTTP_410_GONE, detail="预检查已过期，请重新预览")
         if any(issue["severity"] == "error" for issue in preview.issues):
             raise HTTPException(status_code=422, detail="存在严格验证错误，不能提交")
-        if not accept_warnings and any(
-            issue["severity"] == "warning" for issue in preview.issues
-        ):
+        if not accept_warnings and any(issue["severity"] == "warning" for issue in preview.issues):
             raise HTTPException(status_code=409, detail="存在警告，请确认后继续")
         if token in _claimed_previews:
             raise HTTPException(
@@ -185,6 +189,58 @@ def _new_issue_dict(
         "severity": issue.severity,
         "message": issue.message,
     }
+
+
+def _duplicate_pathology_issues(
+    session: Session,
+    project_id: str,
+    changes: list[StoredCellChange],
+    new_records: list[StoredNewRecord],
+) -> list[dict[str, str]]:
+    project = session.get(Project, project_id)
+    if not project or not project.duplicate_pathology_warning_enabled:
+        return []
+    pathology_field = session.scalar(
+        select(FieldDefinition).where(
+            FieldDefinition.project_id == project_id,
+            FieldDefinition.system_key == "pathology_number",
+        )
+    )
+    if not pathology_field:
+        return []
+
+    changed_record_ids = {change.record_id for change in changes if change.field_id == pathology_field.id}
+    targets = [
+        (change.record_id, change.value)
+        for change in changes
+        if change.field_id == pathology_field.id and change.value
+    ]
+    targets.extend(
+        (record.client_id, record.pathology_number) for record in new_records if record.pathology_number
+    )
+    target_counts = Counter(value for _, value in targets)
+    issues: list[dict[str, str]] = []
+    for record_id, value in targets:
+        duplicate_count = (
+            count_project_pathology_number_duplicates(
+                session,
+                project_id,
+                value,
+                exclude_record_ids=changed_record_ids,
+            )
+            + target_counts[value]
+            - 1
+        )
+        if duplicate_count:
+            issues.append(
+                {
+                    "record_id": record_id,
+                    "field_id": pathology_field.id,
+                    "severity": "warning",
+                    "message": duplicate_pathology_warning_message(value, duplicate_count),
+                }
+            )
+    return issues
 
 
 def _validate_new_records(
@@ -304,6 +360,7 @@ def preview_cell_changes(
         new_records or [],
     )
     issues.extend(new_issues)
+    issues.extend(_duplicate_pathology_issues(session, project_id, stored, stored_new_records))
     now = datetime.now(UTC)
     preview = StoredCellBatch(
         token=uuid.uuid4().hex,
@@ -439,6 +496,11 @@ def _commit_claimed_cell_batch(
         preview.project_id,
         fresh_new_rows,
     )
+    fresh_issues.extend(
+        _duplicate_pathology_issues(session, preview.project_id, applicable, normalized_new_rows)
+    )
+    if not accept_warnings and any(issue["severity"] == "warning" for issue in fresh_issues):
+        raise HTTPException(status_code=409, detail="病理号重复，请确认后继续")
     if any(issue["severity"] == "error" for issue in fresh_new_issues):
         raise HTTPException(status_code=422, detail="新增记录验证失败，请重新预览")
     if not accept_warnings and any(issue["severity"] == "warning" for issue in fresh_new_issues):
@@ -472,17 +534,14 @@ def _commit_claimed_cell_batch(
         for record_id, values in custom_by_record.items():
             _apply_custom_values(session, records[record_id], values)
         has_anchors = any(
-            row.insert_before_record_id or row.insert_after_record_id
-            for row in normalized_new_rows
+            row.insert_before_record_id or row.insert_after_record_id for row in normalized_new_rows
         )
         next_position = None if has_anchors else next_record_position(session, preview.project_id)
         before_anchor_tails: dict[str, str] = {}
         after_anchor_tails: dict[str, str] = {}
         for row in normalized_new_rows:
             before_tail_id = (
-                before_anchor_tails.get(row.insert_before_record_id)
-                if row.insert_before_record_id
-                else None
+                before_anchor_tails.get(row.insert_before_record_id) if row.insert_before_record_id else None
             )
             effective_before_id = row.insert_before_record_id if not before_tail_id else None
             effective_after_id = before_tail_id
