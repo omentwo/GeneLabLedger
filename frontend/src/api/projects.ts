@@ -3,11 +3,9 @@ import type {
   DataType,
   FieldBatchCreateResult,
   FieldDefinition,
-  FieldValidationRules,
   LedgerTemplate,
   Project,
   ProjectForceDeleteResult,
-  ValidationMode,
 } from "@/types/api";
 
 export function listProjects(): Promise<Project[]> {
@@ -99,8 +97,6 @@ export function createField(
     data_type: DataType;
     width: number;
     options: string[];
-    validation_mode?: ValidationMode;
-    validation_rules?: FieldValidationRules;
     default_value?: string | null;
   },
 ): Promise<FieldDefinition> {
@@ -128,8 +124,6 @@ export function updateField(
     sort_order?: number;
     width?: number;
     hidden?: boolean;
-    validation_mode?: ValidationMode;
-    validation_rules?: FieldValidationRules;
     default_value?: string | null;
   },
 ): Promise<FieldDefinition> {

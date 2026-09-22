@@ -181,8 +181,6 @@ def duplicate_project(
                 hidden=source_field.hidden,
                 sort_order=source_field.sort_order,
                 width=source_field.width,
-                validation_mode=source_field.validation_mode,
-                validation_rules=dict(source_field.validation_rules or {}),
                 default_value=source_field.default_value,
             )
             session.add(cloned_field)
@@ -583,8 +581,6 @@ def create_field(
         sort_order=max_order + 1,
         width=payload.width,
         is_core=False,
-        validation_mode=payload.validation_mode,
-        validation_rules=payload.validation_rules.model_dump(mode="json", exclude_none=True),
     )
     for index, value in enumerate(payload.options):
         field.options.append(FieldOption(value=value, sort_order=index))
@@ -653,8 +649,6 @@ def batch_create_fields(
             width=120,
             is_core=False,
             hidden=False,
-            validation_mode="suggestion",
-            validation_rules={},
             default_value=None,
         )
         for index, label in enumerate(new_labels)
@@ -699,8 +693,6 @@ def update_field(
         "sort_order": field.sort_order,
         "width": field.width,
         "hidden": field.hidden,
-        "validation_mode": field.validation_mode,
-        "validation_rules": dict(field.validation_rules or {}),
         "default_value": field.default_value,
     }
     if payload.label is not None:
@@ -725,20 +717,6 @@ def update_field(
         field.width = payload.width
     if payload.hidden is not None:
         field.hidden = payload.hidden
-    if payload.validation_mode is not None:
-        if field.is_core:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="核心字段的验证模式不能修改",
-            )
-        field.validation_mode = payload.validation_mode
-    if payload.validation_rules is not None:
-        if field.is_core:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="核心字段的验证规则不能修改",
-            )
-        field.validation_rules = payload.validation_rules.model_dump(mode="json", exclude_none=True)
     if "default_value" in payload.model_fields_set:
         if field.is_core:
             raise HTTPException(
@@ -761,8 +739,6 @@ def update_field(
                 "sort_order": field.sort_order,
                 "width": field.width,
                 "hidden": field.hidden,
-                "validation_mode": field.validation_mode,
-                "validation_rules": dict(field.validation_rules or {}),
                 "default_value": field.default_value,
             },
         },

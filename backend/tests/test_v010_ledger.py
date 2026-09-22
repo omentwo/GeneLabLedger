@@ -25,8 +25,6 @@ def create_custom_field(
     *,
     label: str,
     data_type: str = "text",
-    validation_mode: str = "suggestion",
-    validation_rules: dict | None = None,
     options: list[str] | None = None,
     default_value: str | None = None,
 ) -> dict:
@@ -35,8 +33,6 @@ def create_custom_field(
         json={
             "label": label,
             "data_type": data_type,
-            "validation_mode": validation_mode,
-            "validation_rules": validation_rules or {},
             "options": options or [],
             "default_value": default_value,
         },
@@ -226,61 +222,7 @@ def create_record(
     return response.json()
 
 
-def test_strict_field_validation_is_shared_by_create_update_and_preview(
-    client: TestClient,
-    seeded_projects: dict[str, dict],
-) -> None:
-    project_id = seeded_projects["TB"]["id"]
-    concentration = create_custom_field(
-        client,
-        project_id,
-        label="DNA浓度",
-        data_type="number",
-        validation_mode="strict",
-        validation_rules={"required": True, "min_number": 10, "decimal_places": 1},
-    )
-
-    missing = client.post(
-        "/api/records",
-        json={"project_id": project_id, "pathology_number": "V-EMPTY"},
-    )
-    assert missing.status_code == 422
-    below_minimum = client.post(
-        "/api/records",
-        json={
-            "project_id": project_id,
-            "pathology_number": "V-LOW",
-            "values": {concentration["id"]: "9"},
-        },
-    )
-    assert below_minimum.status_code == 422
-
-    record = create_record(
-        client,
-        project_id,
-        "V-OK",
-        values={concentration["id"]: "15.0"},
-    )
-    rejected_update = client.patch(
-        f"/api/records/{record['id']}",
-        json={"values": {concentration["id"]: "invalid"}},
-    )
-    assert rejected_update.status_code == 422
-    assert client.get(f"/api/records/{record['id']}").json()["values"][concentration["id"]] == "15.0"
-
-    validation = client.post(
-        "/api/records/validate-new",
-        json={
-            "project_id": project_id,
-            "pathology_number": "V-PREVIEW",
-            "values": {concentration["id"]: "10.123"},
-        },
-    )
-    assert validation.status_code == 200
-    assert any(issue["severity"] == "error" for issue in validation.json()["issues"])
-
-
-def test_warning_requires_confirmation_and_stale_preview_is_rejected(
+def test_stale_preview_is_rejected(
     client: TestClient,
     seeded_projects: dict[str, dict],
 ) -> None:
@@ -290,8 +232,6 @@ def test_warning_requires_confirmation_and_stale_preview_is_rejected(
         project_id,
         label="OD",
         data_type="number",
-        validation_mode="warning",
-        validation_rules={"min_number": 1},
     )
     record = create_record(client, project_id, "WARN-1", values={field["id"]: "2"})
 
@@ -311,14 +251,9 @@ def test_warning_requires_confirmation_and_stale_preview_is_rejected(
     )
     assert preview.status_code == 200
     body = preview.json()
-    assert [issue["severity"] for issue in body["issues"]] == ["warning"]
-    assert client.post(
-        "/api/records/cell-batches/commit",
-        json={"token": body["token"], "accept_warnings": False},
-    ).status_code == 409
     committed = client.post(
         "/api/records/cell-batches/commit",
-        json={"token": body["token"], "accept_warnings": True},
+        json={"token": body["token"], "accept_warnings": False},
     )
     assert committed.status_code == 200
     assert committed.json()["changes"][0] == {
@@ -466,8 +401,6 @@ def test_mixed_cell_and_new_record_batch_is_atomic_and_undoable(
         client,
         project_id,
         label="结果",
-        validation_mode="strict",
-        validation_rules={"required": True, "max_length": 20},
     )
     existing = create_record(
         client,
@@ -556,49 +489,6 @@ def test_mixed_cell_and_new_record_batch_is_atomic_and_undoable(
     assert undo.status_code == 200, undo.text
     assert set(result["created_record_ids"]).issubset(undo.json()["deleted_ids"])
     assert client.get(f"/api/records/{existing['id']}").json()["values"][custom["id"]] == "旧值"
-
-    invalid = client.post(
-        "/api/records/cell-batches/preview",
-        json={
-            "project_id": project_id,
-            "changes": [
-                {
-                    "record_id": existing["id"],
-                    "field_id": custom["id"],
-                    "value": "",
-                    "expected_value": "旧值",
-                }
-            ],
-            "new_records": [
-                {
-                    "client_id": "draft-invalid",
-                    "pathology_number": "SHOULD-NOT-EXIST",
-                    "status": "待实验",
-                    "experiment_date": None,
-                    "experiment_number": None,
-                    "values": {custom["id"]: "有效"},
-                }
-            ],
-        },
-    ).json()
-    assert any(issue["severity"] == "error" for issue in invalid["issues"])
-    blocked = client.post(
-        "/api/records/cell-batches/commit",
-        json={"token": invalid["token"], "accept_warnings": True},
-    )
-    assert blocked.status_code == 422
-    ids = client.post(
-        "/api/records/query/ids",
-        json={
-            "project_id": project_id,
-            "search": "SHOULD-NOT-EXIST",
-            "field_filters": [],
-            "limit": 1,
-            "offset": 0,
-        },
-    ).json()
-    assert ids == {"record_ids": [], "total": 0}
-
 
 def test_cell_batch_preserves_order_for_multiple_anchored_drafts(
     client: TestClient,
@@ -908,7 +798,8 @@ def test_batch_create_fields_retains_existing_headers_and_is_atomic(
     assert all(field["data_type"] == "text" for field in payload["created"])
     assert all(field["width"] == 120 for field in payload["created"])
     assert all(field["hidden"] is False for field in payload["created"])
-    assert all(field["validation_mode"] == "suggestion" for field in payload["created"])
+    assert all("validation_mode" not in field for field in payload["created"])
+    assert all("validation_rules" not in field for field in payload["created"])
     assert payload["created"][1]["sort_order"] == payload["created"][0]["sort_order"] + 1
 
     retained_only = client.post(
@@ -977,10 +868,16 @@ def test_batch_create_fields_rolls_back_when_a_late_step_fails(
     assert "事务字段二" not in labels
 
 
-def test_desktop_schema_upgrade_creates_backup_before_v010_changes(tmp_path: Path) -> None:
+def test_desktop_schema_upgrade_removes_field_validation_columns(tmp_path: Path) -> None:
     database_path = tmp_path / "legacy.db"
     with sqlite3.connect(database_path) as connection:
-        connection.execute("CREATE TABLE field_definitions (id VARCHAR(36) PRIMARY KEY)")
+        connection.execute(
+            "CREATE TABLE field_definitions ("
+            "id VARCHAR(36) PRIMARY KEY, "
+            "validation_mode VARCHAR(24) NOT NULL DEFAULT 'suggestion', "
+            "validation_rules JSON NOT NULL DEFAULT '{}'"
+            ")"
+        )
         connection.commit()
 
     database = Database(f"sqlite:///{database_path.as_posix()}")
@@ -989,20 +886,22 @@ def test_desktop_schema_upgrade_creates_backup_before_v010_changes(tmp_path: Pat
     finally:
         database.dispose()
 
-    backups = list((tmp_path / "backups").glob("ledger-before-v0.10.0-*.db"))
+    backups = list((tmp_path / "backups").glob("ledger-before-field-validation-removal-*.db"))
     assert len(backups) == 1
     with sqlite3.connect(database_path) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(field_definitions)")}
         view_exists = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ledger_view_presets'"
         ).fetchone()
-    assert {"validation_mode", "validation_rules"}.issubset(columns)
+    assert "validation_mode" not in columns
+    assert "validation_rules" not in columns
+    assert "default_value" in columns
     assert view_exists is None
     with sqlite3.connect(backups[0]) as connection:
         backup_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(field_definitions)")
         }
-    assert backup_columns == {"id"}
+    assert backup_columns == {"id", "validation_mode", "validation_rules"}
 
 
 def test_desktop_schema_upgrade_backfills_record_positions(tmp_path: Path) -> None:

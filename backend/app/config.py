@@ -46,8 +46,13 @@ class Settings(BaseSettings):
     def auto_export_dir(self) -> Path:
         return self.data_dir / "exports"
 
+    @property
+    def backup_dir(self) -> Path:
+        return self.data_dir / "backups"
+
     def ensure_directories(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.template_dir.mkdir(parents=True, exist_ok=True)
         self.report_work_dir.mkdir(parents=True, exist_ok=True)
         self.auto_export_dir.mkdir(parents=True, exist_ok=True)
+        self.backup_dir.mkdir(parents=True, exist_ok=True)

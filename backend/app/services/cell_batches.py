@@ -473,9 +473,9 @@ def _commit_claimed_cell_batch(
             )
         )
     if any(issue["severity"] == "error" for issue in fresh_issues):
-        raise HTTPException(status_code=422, detail="验证规则已变化，请重新预览")
+        raise HTTPException(status_code=422, detail="预检查结果已变化，请重新预览")
     if not accept_warnings and any(issue["severity"] == "warning" for issue in fresh_issues):
-        raise HTTPException(status_code=409, detail="验证规则产生警告，请确认后继续")
+        raise HTTPException(status_code=409, detail="预检查产生警告，请确认后继续")
 
     fresh_new_rows = [
         RecordBatchNewRecord(

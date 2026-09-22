@@ -11,6 +11,9 @@ export interface GeneLedgerDesktopBridge {
   chooseDirectory: (
     initialDirectory: string,
   ) => Promise<{ selected: boolean; directory: string }>;
+  chooseBackupFile: (
+    initialDirectory: string,
+  ) => Promise<{ selected: boolean; path: string }>;
   changeDataDirectory: () => Promise<{ changed: boolean; directory: string }>;
   getAlwaysOnTop: () => Promise<boolean>;
   setAlwaysOnTop: (value: boolean) => Promise<boolean>;

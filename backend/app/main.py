@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api import (
     auto_exports,
     dashboard,
+    database_backups,
     exports,
     ledger_templates,
     preview,
@@ -28,6 +29,7 @@ from app.config import Settings
 from app.database import Database
 from app.seed import seed_initial_data
 from app.services.auto_exports import AutoExportScheduler
+from app.services.database_backups import DatabaseBackupScheduler, apply_pending_restore
 from app.services.office_preview import OfficePreviewService
 from app.services.office_printing import OfficePrintService
 from app.services.preview_files import cleanup_print_previews
@@ -40,10 +42,12 @@ def create_app(
 ) -> FastAPI:
     app_settings = settings or Settings()
     app_settings.ensure_directories()
+    apply_pending_restore(app_settings)
     database = Database(app_settings.database_url or "")
     office_printer = printer_service or OfficePrintService()
     office_preview = preview_service or OfficePreviewService()
     auto_export_scheduler = AutoExportScheduler(database)
+    database_backup_scheduler = DatabaseBackupScheduler(database, app_settings)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -65,10 +69,14 @@ def create_app(
             )
             session.commit()
         await auto_export_scheduler.start()
+        await database_backup_scheduler.start()
         try:
             yield
         finally:
             await auto_export_scheduler.stop()
+            await database_backup_scheduler.stop(
+                create_shutdown_backup=os.environ.get("GENE_LEDGER_DESKTOP_MODE") == "1"
+            )
             await asyncio.to_thread(office_printer.shutdown)
             preview_shutdown = getattr(office_preview, "shutdown", None)
             if preview_shutdown is not None:
@@ -77,7 +85,7 @@ def create_app(
 
     app = FastAPI(
         title=app_settings.app_name,
-        version="0.12.7",
+        version="0.13.0",
         lifespan=lifespan,
     )
     app.add_middleware(
@@ -92,6 +100,7 @@ def create_app(
     app.state.printer_service = office_printer
     app.state.preview_service = office_preview
     app.state.auto_export_scheduler = auto_export_scheduler
+    app.state.database_backup_scheduler = database_backup_scheduler
 
     app.include_router(system.router, prefix="/api")
     app.include_router(dashboard.router, prefix="/api")
@@ -101,6 +110,7 @@ def create_app(
     app.include_router(records.router, prefix="/api")
     app.include_router(reports.router, prefix="/api")
     app.include_router(auto_exports.router, prefix="/api")
+    app.include_router(database_backups.router, prefix="/api")
     app.include_router(exports.router, prefix="/api")
 
     @app.api_route(

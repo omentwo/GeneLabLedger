@@ -16,10 +16,11 @@ Electron 主进程
               ├─ SQLAlchemy 2 + SQLite
               ├─ DOCX Open XML + Word/WPS COM 打印
               ├─ XLSX Open XML 生成
-              └─ asyncio 自动导出调度器
+              ├─ asyncio 自动导出调度器
+              └─ SQLite 完整业务备份调度器
 ```
 
-Electron 负责桌面边界和文件对话框，Vue 前端只通过 HTTP API 和 preload 暴露的少量桌面能力工作。后端在启动时初始化目录、数据库会话、打印服务和自动导出调度器；退出时停止调度器、打印服务和数据库连接。
+Electron 负责桌面边界和文件对话框，Vue 前端只通过 HTTP API 和 preload 暴露的少量桌面能力工作。后端在启动时初始化目录、数据库会话、打印服务、自动导出和数据库备份调度器；正常退出时先生成退出备份，再关闭打印服务和数据库连接。
 
 生产桌面版从 `frontend/dist/index.html` 加载 hash 路由；开发模式由 Vite `127.0.0.1:5173` 提供页面并代理 `/api`。后端构建了前端静态目录时也可直接提供 `/`，旧的 `/app` 路径重定向到根路径。
 
@@ -34,7 +35,7 @@ Electron 负责桌面边界和文件对话框，Vue 前端只通过 HTTP API 和
 | 持久化 | SQLAlchemy 2、SQLite、Alembic |
 | Excel | `POST /api/exports/workbook` | XLSX 生成（导入已移除） |
 | 文档与打印 | DOCX Open XML、pywin32 COM、Word/WPS |
-| 任务 | Python `asyncio` 自动导出调度器 |
+| 任务 | Python `asyncio` 自动导出与数据库备份调度器 |
 | 测试与质量 | pytest、HTTPX、Vitest/jsdom、vue-tsc、Ruff |
 | Windows 发布 | GitHub Actions、PyInstaller sidecar、Electron 安装包 |
 
@@ -60,7 +61,8 @@ Electron 负责桌面边界和文件对话框，Vue 前端只通过 HTTP API 和
 ├─ ledger.db                         SQLite 数据库
 ├─ templates/<template_id>/vN.docx   报告模板版本
 ├─ temp/reports/<print-id>/          打印期间的临时 DOCX
-└─ exports/                          默认自动导出目录
+├─ exports/                          默认自动导出目录
+└─ backups/YYYY-MM-DD/*.glbkp        默认完整业务备份目录
 ```
 
 设置页更换目录只原子更新桌面设置文件，重启后生效，不搬移旧数据库或模板。后端 `Settings.ensure_directories()` 负责创建上述目录；自动导出任务可以写入任意已选择的绝对目录。
@@ -81,7 +83,7 @@ AppSetting
 | 模型 | 关键字段与约束 |
 |---|---|
 | `Project` | UUID 主键；名称唯一；保存顺序、是否参与实验编排，以及默认开启的同项目病理号重复提醒开关 |
-| `FieldDefinition` | 项目内 `key`、`system_key` 唯一；支持 text/number/date/select、建议/警告/严格验证及 JSON 规则；核心字段不可删除 |
+| `FieldDefinition` | 项目内 `key`、`system_key` 唯一；支持 text/number/date/select、宽度、隐藏和新记录默认值；核心字段不可删除 |
 | `FieldOption` | 同一字段的选项值唯一，保存排序 |
 | `ProjectRecord` | UUID 主键；以项目内 `position` 保存稳定行序；`pathology_number` 可重复并建索引；`block_number` 可空并独立建索引；`experiment_number` 可空且可重复；保存状态、实验日期、报告标记和锁定标记 |
 | `RecordValue` | 记录与自定义字段的组合唯一；值以文本保存并由字段定义解释 |
@@ -98,7 +100,7 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 - 病理号仍允许重复；项目开关开启时，新增和单元格批量预检只在当前项目内检查精确重复并产生可确认的 warning，不执行跨项目检查。
 - 实验编排中的组合病理号由前端按 `pathology_number[-block_number]` 临时派生，用于编排显示、排序和 Excel 导出；报告映射选择 `pathology_with_block` 时由后端按同一规则临时生成。两者都不改台账中的病理号或蜡块号。
 - 批量删除执行时比较预览得到的完整 UUID 集合；集合变化或包含锁定记录即拒绝执行。
-- 单元格粘贴、填充和查找替换先预检查字段规则与预期旧值，再在一个事务中提交；严格错误阻止整批写入，锁定记录跳过，警告需显式确认。
+- 单元格粘贴、填充和查找替换先预检查字段类型、选项、预期旧值和锁定状态，再在一个事务中提交。
 
 所有创建/更新时间和审计时间由应用以 UTC 生成；`experiment_date` 是不带时区的业务日期，展示和调度时转换为 `Asia/Shanghai`。
 
@@ -117,6 +119,7 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 | 报告 | `GET/POST /api/report-templates`；`POST /api/report-templates/{template_id}/versions`；`PUT /api/report-template-versions/{version_id}/mappings`；`DELETE /api/report-templates/{template_id}`；`GET /api/printers`；`GET /api/print-engines`；`POST /api/reports/print` | 模板版本、映射、打印机和直接打印；前端默认按台账列表倒序提交所选记录，后端保持请求顺序逐份打印 |
 | Excel | `POST /api/exports/workbook` | XLSX 生成（导入已移除） |
 | 自动导出 | `GET /api/auto-export/config`；`GET/POST /api/auto-export/tasks`；`PUT/DELETE /api/auto-export/tasks/{task_id}`；`POST /api/auto-export/tasks/{task_id}/run`；`GET /api/auto-export/tasks/{task_id}/runs`；`POST /api/auto-export/validate-cron` | 任务配置、立即执行、历史查询、Cron 校验 |
+| 数据库备份 | `GET/PUT /api/database-backups/settings`；`GET /api/database-backups/status`；`GET /api/database-backups`；`POST /api/database-backups/run`；`POST /api/database-backups/restore` | 自动备份设置、状态与历史、立即备份、重启恢复 |
 
 兼容记录列表支持项目、状态、实验日期、报告状态、关键字、`include_locked` 和 `limit/offset`。主台账使用复杂查询接口，每页固定 200 条，并支持动态字段筛选、排序、锁定记录可见性和筛选结果的完整 ID 集合；台账、实验编排、快速录入和报告候选列表均传 `include_locked=false`，统计和导出保持包含锁定记录。未指定字段排序时按项目内 `position` 返回；创建请求可用 `insert_before_record_id` 或 `insert_after_record_id` 指定相对插入位置，其他新增路径追加到末尾。
 
@@ -138,18 +141,26 @@ Excel 导入入口、API 和解析服务已移除；粘贴使用单元格批量�
 
 `AutoExportScheduler` 启动时先把上次遗留的 `running` 运行标记为失败，再为启用任务补齐 `next_run_at`；主循环每 20 秒查找到期任务。周期计算先在 `Asia/Shanghai` 本地时间进行，再转成 UTC 保存。失败重试次数由任务配置控制；成功后按保留数量删除同一任务更早的成功文件，删除前校验文件仍在任务目录内。
 
+### 6.4 完整业务备份与恢复
+
+`DatabaseBackupScheduler` 默认每 1 小时使用 SQLite Online Backup API 取得一致性快照，并把 `ledger.db`、完整 `templates/` 和带 SHA-256 的 `manifest.json` 写入 `.glbkp` 压缩包。文件先在临时目录生成并校验，通过同目录 `.partial` 文件原子替换到目标位置，避免把半成品识别为有效备份。用户可在设置页选择任意可写的绝对备份目录、立即备份或选择备份包恢复。
+
+备份按上海日期存入 `YYYY-MM-DD` 子目录。保留策略以“实际存在有效备份的日期”计数，而不是按当前日期向前减 7 个自然日：每个日期最多保留 30 份，只保留最近 7 个有备份的日期，因此默认上限为 210 份。即使软件每周只启动一天，上一次运行日也不会仅因跨过七个自然日而被清除。
+
+桌面应用正常退出时会等待一次 `shutdown` 备份完成。恢复前先创建 `pre-restore` 安全备份，再校验压缩包路径、文件数量、解压大小、清单和哈希；恢复内容在受控临时目录中展开，并在后端下次启动、打开数据库之前替换数据库和模板。强制结束进程、断电及 Windows 无法通知应用的关机路径不保证触发退出备份。
+
 ## 7. 安全边界与并发行为
 
 - 主窗口和快速录入 BrowserWindow 均使用 `contextIsolation=true`、`nodeIntegration=false`、`sandbox=true`；渲染进程只能使用 `preload.cjs` 暴露的白名单能力。
 - 渲染器自行调用 `window.open` 仍会被拒绝，生产导航只允许打包入口及其 hash 路由。普通桌面 IPC 只接受主窗口发送者；打开快速录入只允许主窗口调用，返回主程序及变更通知只允许当前快速录入窗口调用。
 - 后端仅绑定 `127.0.0.1`，CORS 只允许 `null` 和本地 Vite origin。当前没有用户认证，文件系统和数据目录权限由 Windows 环境负责。
-- 自动导出同一任务使用运行中集合避免重复执行；批量单元格预览 token 在提交前原子认领，事务失败时释放、成功时消费；打印、批删和编号回写均在服务层完成关键状态复核。
+- 自动导出同一任务使用运行中集合避免重复执行；数据库备份使用异步锁避免定时、手动、恢复前和退出备份并发；批量单元格预览 token 在提交前原子认领，事务失败时释放、成功时消费；打印、批删和编号回写均在服务层完成关键状态复核。
 
 ## 8. 配置、迁移与数据恢复
 
 主要环境变量使用 `GENE_LEDGER_` 前缀：`DATA_DIR`、`DATABASE_URL`、`HOST`、`PORT`、`AUTO_CREATE_SCHEMA`、`MAX_TEMPLATE_SIZE_MB`、`PREVIEW_TTL_SECONDS`、`AUDIT_LOG_RETENTION_DAYS`、`AUDIT_LOG_MAX_ROWS`。PDF 打印预览默认保留 24 小时，启动及生成新预览时会清理过期文件。桌面启动通过命令行参数覆盖数据目录、主机和端口。
 
-迁移脚本位于 `backend/migrations/versions/`。历史迁移 `e5f6a7b8c9d0` 曾增加字段验证配置和项目命名视图；`f1a2b3c4d5e6` 移除已退役的命名视图表。台账排序和筛选改由通用 `AppSetting` 中的 `ledger_layout_settings` 按项目保存，表头顺序、宽度和隐藏仍由 `FieldDefinition` 管理。启动检测到旧 SQLite 结构时，会先在数据目录的 `backups/` 下生成带时间戳的数据库副本，再执行迁移或桌面兼容升级；报告模板目录仍应纳入外部备份。
+迁移脚本位于 `backend/migrations/versions/`。台账排序和筛选由通用 `AppSetting` 中的 `ledger_layout_settings` 按项目保存，表头顺序、宽度、隐藏和默认值由 `FieldDefinition` 管理。启动检测到旧 SQLite 结构时，仍会先生成迁移前数据库副本；日常完整业务备份则同时包含数据库和报告模板，并支持从设置页恢复。重要数据仍建议再复制到另一块磁盘或受控网络位置。
 
 普通开发后端的初始化流程由 `backend/run_backend.ps1` 执行：必要时 `uv sync --dev`，构建前端，运行 `alembic upgrade head`，再启动 `uvicorn app.main:app --host 127.0.0.1 --port 8000`。桌面 launcher 使用 `auto_create_schema=True`，不应把该行为误认为 `Settings` 的默认值。
 
@@ -166,7 +177,7 @@ npm run test
 npm run build
 ```
 
-后端测试覆盖 API、自动导出、桌面 launcher、DOCX 模板和现代前端集成；前端测试覆盖客户端、报告 API、病理号排序、实验 API 和数据操作 API。Electron JavaScript 可用 `node --check` 做语法检查。
+后端测试覆盖 API、自动导出、数据库备份/恢复、桌面 launcher、DOCX 模板和现代前端集成；前端测试覆盖客户端、报告 API、数据库备份 API、病理号排序、实验 API 和数据操作 API。Electron JavaScript 可用 `node --check` 做语法检查。
 
 `.github/workflows/windows-pyinstaller.yml` 使用 PyInstaller 构建 Python sidecar，将其放入 Electron `extraResources/backend`，再由 electron-builder 生成 NSIS 安装包。除 CI 外，不在本机执行 PyInstaller 或安装包构建。
 
@@ -178,16 +189,17 @@ backend/app/config.py                  Settings 与业务目录
 backend/app/database.py                SQLAlchemy 引擎与 SQLite 外键
 backend/app/models.py                  ORM 模型与约束
 backend/app/api/system.py              健康、审计、设置
-backend/app/api/projects.py            项目、动态字段、批量表头与验证规则
+backend/app/api/projects.py            项目、动态字段、批量表头与选项
 backend/app/api/records.py             台账、复杂查询、单元格批处理、编号与批量删除
 backend/app/api/exports.py              Excel 字节流导出
 backend/app/api/reports.py              模板、映射、打印
 backend/app/api/auto_exports.py         自动导出任务与运行历史
+backend/app/api/database_backups.py     完整业务备份、历史与恢复
 backend/app/services/workbooks.py       XLSX 生成
 backend/app/services/docx_template.py   DOCX 占位符处理
 backend/app/services/cell_batches.py    单元格预检查、并发校验与原子提交
-backend/app/services/field_validation.py 字段归一化与验证规则
 backend/app/services/auto_exports.py    调度、执行、重试、保留
+backend/app/services/database_backups.py SQLite 快照、打包、保留与恢复
 backend/app/services/office_printing.py Word/WPS 打印
 backend/desktop/launcher.py             桌面 sidecar 入口
 frontend/electron/main.cjs              Electron 生命周期与原生对话框

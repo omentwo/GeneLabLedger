@@ -29,7 +29,6 @@ def test_numeric_filters_exclude_partial_and_invalid_numbers(client, seeded_proj
         json={
             "label": "数值",
             "data_type": "number",
-            "validation_mode": "suggestion",
         },
     ).json()
     for value in ("abc", "3 pcs", "0", "3.5", "1e1", "", "NaN", "Infinity"):

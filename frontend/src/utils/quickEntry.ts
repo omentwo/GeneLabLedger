@@ -112,7 +112,7 @@ export function normalizeQuickEntrySettings(value: unknown): QuickEntrySettingsD
 }
 
 export function isMandatoryQuickEntryField(field: FieldDefinition): boolean {
-  return field.system_key === "pathology_number" || field.validation_rules?.required === true;
+  return field.system_key === "pathology_number";
 }
 
 export function resolveQuickEntryProjectSettings(

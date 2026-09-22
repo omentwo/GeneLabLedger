@@ -44,8 +44,6 @@ function fieldsFromSource(): LedgerTemplateField[] {
       hidden: field.hidden,
       sort_order: field.sort_order,
       width: field.width,
-      validation_mode: field.validation_mode,
-      validation_rules: { ...(field.validation_rules ?? {}) },
       default_value: field.default_value,
       options: field.options
         .slice()
@@ -106,8 +104,6 @@ function addDraftField(): void {
     hidden: false,
     sort_order: index,
     width: 120,
-    validation_mode: "suggestion",
-    validation_rules: {},
     default_value: null,
     options: [],
   });

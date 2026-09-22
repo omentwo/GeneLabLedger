@@ -8,7 +8,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 DataType = Literal["text", "number", "date", "select"]
 RecordStatus = Literal["待实验", "已完成"]
-ValidationMode = Literal["suggestion", "warning", "strict"]
 _HEX_COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
@@ -63,24 +62,6 @@ class FieldOptionRead(BaseModel):
     sort_order: int
 
 
-class FieldValidationRules(BaseModel):
-    required: bool = False
-    min_number: float | None = None
-    max_number: float | None = None
-    decimal_places: int | None = Field(default=None, ge=0, le=12)
-    min_date: date | None = None
-    max_date: date | None = None
-    max_length: int | None = Field(default=None, ge=1, le=10000)
-
-    @model_validator(mode="after")
-    def validate_ranges(self) -> FieldValidationRules:
-        if self.min_number is not None and self.max_number is not None and self.min_number > self.max_number:
-            raise ValueError("最小数字不能大于最大数字")
-        if self.min_date is not None and self.max_date is not None and self.min_date > self.max_date:
-            raise ValueError("最早日期不能晚于最晚日期")
-        return self
-
-
 class FieldRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -94,8 +75,6 @@ class FieldRead(BaseModel):
     hidden: bool
     sort_order: int
     width: int
-    validation_mode: ValidationMode = "suggestion"
-    validation_rules: dict[str, object] = Field(default_factory=dict)
     default_value: str | None = None
     options: list[FieldOptionRead] = Field(default_factory=list)
 
@@ -105,8 +84,6 @@ class FieldCreate(BaseModel):
     data_type: DataType = "text"
     width: int = Field(default=120, ge=32, le=600)
     options: list[str] = Field(default_factory=list)
-    validation_mode: ValidationMode = "suggestion"
-    validation_rules: FieldValidationRules = Field(default_factory=FieldValidationRules)
     default_value: str | None = Field(default=None, max_length=10000)
 
     @field_validator("label")
@@ -163,8 +140,6 @@ class FieldUpdate(BaseModel):
     sort_order: int | None = Field(default=None, ge=0)
     width: int | None = Field(default=None, ge=32, le=600)
     hidden: bool | None = None
-    validation_mode: ValidationMode | None = None
-    validation_rules: FieldValidationRules | None = None
     default_value: str | None = Field(default=None, max_length=10000)
 
     @field_validator("label")
@@ -276,8 +251,6 @@ class LedgerTemplateField(BaseModel):
     sort_order: int = Field(default=0, ge=0)
     width: int = Field(default=120, ge=32, le=600)
     options: list[str] = Field(default_factory=list)
-    validation_mode: ValidationMode = "suggestion"
-    validation_rules: FieldValidationRules = Field(default_factory=FieldValidationRules)
     default_value: str | None = Field(default=None, max_length=10000)
 
     @field_validator("key", "label")
@@ -972,6 +945,50 @@ class AppSettingRead(BaseModel):
 class AppSettingUpdate(BaseModel):
     value: object
     expected_value: object = None
+
+
+class DatabaseBackupSettings(BaseModel):
+    enabled: bool = True
+    directory: str = Field(default="", max_length=1000)
+    interval_hours: int = Field(default=1, ge=1, le=168)
+    retention_backup_days: int = Field(default=7, ge=1, le=365)
+    copies_per_day: int = Field(default=30, ge=1, le=1000)
+    backup_on_shutdown: bool = True
+
+
+class DatabaseBackupStatusRead(BaseModel):
+    running: bool = False
+    last_success_at: datetime | None = None
+    last_failure_at: datetime | None = None
+    last_error: str | None = None
+    last_path: str | None = None
+    last_reason: str | None = None
+    next_run_at: datetime | None = None
+
+
+class DatabaseBackupItemRead(BaseModel):
+    path: str
+    filename: str
+    backup_date: date
+    created_at: datetime
+    size_bytes: int
+
+
+class DatabaseBackupRunRead(BaseModel):
+    path: str
+    created_at: datetime
+    size_bytes: int
+    reason: str
+
+
+class DatabaseBackupRestoreCreate(BaseModel):
+    path: str = Field(min_length=1, max_length=2000)
+
+
+class DatabaseBackupRestoreRead(BaseModel):
+    restart_required: bool = True
+    safety_backup_path: str
+    source_backup_path: str
 
 
 WorkbookCell = str | int | float | bool | None

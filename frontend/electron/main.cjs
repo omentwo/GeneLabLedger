@@ -564,6 +564,28 @@ function registerDesktopHandlers() {
     return { changed: true, directory: saved };
   });
 
+  ipcMain.handle("gene-ledger:choose-backup-file", async (event, initialDirectory) => {
+    assertTrustedIpcSender(event);
+    const defaultPath =
+      typeof initialDirectory === "string" && fs.existsSync(initialDirectory)
+        ? initialDirectory
+        : app.getPath("documents");
+    const result = await dialog.showOpenDialog(mainWindow ?? undefined, {
+      title: "选择完整业务备份包",
+      defaultPath,
+      buttonLabel: "选择并恢复",
+      properties: ["openFile"],
+      filters: [
+        { name: "基因检测台账完整备份", extensions: ["glbkp"] },
+        { name: "所有文件", extensions: ["*"] },
+      ],
+    });
+    return {
+      selected: !result.canceled && result.filePaths.length > 0,
+      path: result.canceled ? "" : path.resolve(result.filePaths[0] || ""),
+    };
+  });
+
   ipcMain.handle("gene-ledger:get-always-on-top", (event) => {
     assertTrustedIpcSender(event);
     return mainWindow?.isAlwaysOnTop?.() ?? alwaysOnTop;
@@ -774,7 +796,7 @@ async function stopBackend() {
       return;
     }
   }
-  const exited = await waitForProcessExit(processToStop, accepted ? 7000 : 1500);
+  const exited = await waitForProcessExit(processToStop, accepted ? 300000 : 1500);
   if (exited) return;
   await forceStopBackend(processToStop);
   await waitForProcessExit(processToStop, 2000);

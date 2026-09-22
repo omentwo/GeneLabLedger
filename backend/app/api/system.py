@@ -58,6 +58,9 @@ AUDIT_ACTION_SEARCH_LABELS = {
     "auto_export.task.delete": "删除自动导出任务",
     "auto_export.run.success": "自动导出成功",
     "auto_export.run.failed": "自动导出失败",
+    "database_backup.settings.update": "修改数据库备份设置",
+    "database_backup.run.success": "完整业务备份成功",
+    "database_backup.run.failed": "完整业务备份失败",
     "setting.update": "修改系统设置",
 }
 
@@ -68,6 +71,7 @@ AUDIT_ENTITY_SEARCH_LABELS = {
     "report_template": "报告模板",
     "report_template_version": "模板版本",
     "auto_export_task": "自动导出任务",
+    "database_backup": "完整业务备份",
     "app_setting": "系统设置",
 }
 

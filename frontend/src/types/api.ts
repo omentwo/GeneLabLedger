@@ -1,16 +1,5 @@
 export type DataType = "text" | "number" | "date" | "select";
 export type RecordStatus = "待实验" | "已完成";
-export type ValidationMode = "suggestion" | "warning" | "strict";
-
-export interface FieldValidationRules {
-  required?: boolean;
-  min_number?: number | null;
-  max_number?: number | null;
-  decimal_places?: number | null;
-  min_date?: string | null;
-  max_date?: string | null;
-  max_length?: number | null;
-}
 export type MappingSourceType =
   | "unmapped"
   | "field"
@@ -37,8 +26,6 @@ export interface FieldDefinition {
   hidden: boolean;
   sort_order: number;
   width: number;
-  validation_mode?: ValidationMode;
-  validation_rules?: FieldValidationRules;
   default_value?: string | null;
   options: FieldOption[];
 }
@@ -81,8 +68,6 @@ export interface LedgerTemplateField {
   hidden: boolean;
   sort_order: number;
   width: number;
-  validation_mode?: ValidationMode;
-  validation_rules?: FieldValidationRules;
   default_value?: string | null;
   options: string[];
 }

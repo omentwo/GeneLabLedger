@@ -95,8 +95,6 @@ class FieldDefinition(Base, TimestampMixin):
     hidden: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     width: Mapped[int] = mapped_column(Integer, default=120, nullable=False)
-    validation_mode: Mapped[str] = mapped_column(String(24), default="suggestion", nullable=False)
-    validation_rules: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     default_value: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="fields")

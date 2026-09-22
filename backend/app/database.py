@@ -110,9 +110,10 @@ class Database:
 
         self.backup_sqlite_before_schema_upgrade()
         self._remove_ledger_view_presets()
+        self._remove_field_validation_columns()
         self._migrate_record_experiment_number_uniqueness()
         self._migrate_record_block_number()
-        self._migrate_v010_field_validation()
+        self._migrate_field_defaults()
         self._migrate_record_positions()
         self._migrate_project_duplicate_pathology_warning()
         Base.metadata.create_all(self.engine)
@@ -157,12 +158,10 @@ class Database:
             project_columns = {
                 str(row[1]) for row in connection.exec_driver_sql("PRAGMA table_info(projects)")
             }
-        needs_validation_upgrade = bool(field_columns) and not {
-            "validation_mode",
-            "validation_rules",
-        }.issubset(field_columns)
+        needs_validation_removal = bool(
+            {"validation_mode", "validation_rules"}.intersection(field_columns)
+        )
         needs_default_upgrade = bool(field_columns) and "default_value" not in field_columns
-        needs_v010_upgrade = needs_validation_upgrade
         needs_view_removal = view_exists
         needs_position_upgrade = bool(record_columns) and "position" not in record_columns
         needs_block_upgrade = bool(record_columns) and "block_number" not in record_columns
@@ -171,7 +170,7 @@ class Database:
             "duplicate_pathology_warning_enabled" not in project_columns
         )
         needs_upgrade = (
-            needs_v010_upgrade
+            needs_validation_removal
             or needs_view_removal
             or needs_default_upgrade
             or needs_position_upgrade
@@ -184,14 +183,14 @@ class Database:
         backup_dir = database_path.parent / "backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-        if needs_view_removal:
+        if needs_validation_removal:
+            version = "field-validation-removal"
+        elif needs_view_removal:
             version = "view-removal"
         elif needs_duplicate_warning_upgrade:
             version = "duplicate-warning"
         elif needs_position_upgrade:
             version = "v0.10.1"
-        elif needs_v010_upgrade:
-            version = "v0.10.0"
         elif needs_block_upgrade:
             version = "v0.10.4"
         else:
@@ -234,8 +233,8 @@ class Database:
         with self.engine.begin() as connection:
             connection.exec_driver_sql("DROP TABLE IF EXISTS ledger_view_presets")
 
-    def _migrate_v010_field_validation(self) -> None:
-        """Keep packaged desktop upgrades compatible with ``create_all``."""
+    def _remove_field_validation_columns(self) -> None:
+        """Remove retired configurable field-validation data from desktop databases."""
         if self.engine.dialect.name != "sqlite":
             return
         with self.engine.begin() as connection:
@@ -247,15 +246,25 @@ class Database:
             columns = {
                 str(row[1]) for row in connection.exec_driver_sql("PRAGMA table_info(field_definitions)")
             }
-            if "validation_mode" not in columns:
-                connection.exec_driver_sql(
-                    "ALTER TABLE field_definitions ADD COLUMN validation_mode "
-                    "VARCHAR(24) NOT NULL DEFAULT 'suggestion'"
-                )
-            if "validation_rules" not in columns:
-                connection.exec_driver_sql(
-                    "ALTER TABLE field_definitions ADD COLUMN validation_rules JSON NOT NULL DEFAULT '{}'"
-                )
+            for column in ("validation_rules", "validation_mode"):
+                if column in columns:
+                    connection.exec_driver_sql(
+                        f'ALTER TABLE field_definitions DROP COLUMN "{column}"'
+                    )
+
+    def _migrate_field_defaults(self) -> None:
+        """Add field defaults to older packaged desktop databases."""
+        if self.engine.dialect.name != "sqlite":
+            return
+        with self.engine.begin() as connection:
+            table_exists = connection.exec_driver_sql(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='field_definitions'"
+            ).scalar()
+            if not table_exists:
+                return
+            columns = {
+                str(row[1]) for row in connection.exec_driver_sql("PRAGMA table_info(field_definitions)")
+            }
             if "default_value" not in columns:
                 connection.exec_driver_sql("ALTER TABLE field_definitions ADD COLUMN default_value TEXT")
 

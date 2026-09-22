@@ -36,10 +36,7 @@ const fields = [
   field("pathology", "pathology_number", { sort_order: 1 }),
   field("number", "experiment_number", { sort_order: 2 }),
   field("status", "status", { data_type: "select", sort_order: 3 }),
-  field("required", null, {
-    sort_order: 4,
-    validation_rules: { required: true },
-  }),
+  field("custom", null, { sort_order: 4 }),
   field("hidden", null, { hidden: true, sort_order: 5 }),
 ];
 
@@ -56,7 +53,7 @@ function record(id: string, reportGenerated = false): ProjectRecord {
     report_generated: reportGenerated,
     locked: false,
     highlight_color: null,
-    values: { required: "旧值", hidden: "隐藏值" },
+    values: { custom: "旧值", hidden: "隐藏值" },
     created_at: "",
     updated_at: "",
   };
@@ -88,7 +85,7 @@ describe("quick entry field settings", () => {
     });
   });
 
-  it("keeps pathology and required fields selected and removes stale pinned fields", () => {
+  it("keeps pathology selected and removes stale pinned fields", () => {
     expect(resolveQuickEntryProjectSettings(
       fields,
       {
@@ -101,7 +98,7 @@ describe("quick entry field settings", () => {
         autoAdvanceAfterUpdate: false,
       },
     )).toEqual({
-      selectedFieldIds: ["hidden", "pathology", "required"],
+      selectedFieldIds: ["hidden", "pathology"],
       pinnedFieldIds: ["hidden"],
       fieldWidth: 600,
       quickCreateFieldWidth: 160,
@@ -116,7 +113,7 @@ describe("quick entry field settings", () => {
       selectedFieldIds: ["pathology", "number"],
       pinnedFieldIds: ["number"],
     })).toEqual({
-      selectedFieldIds: ["pathology", "number", "required"],
+      selectedFieldIds: ["pathology", "number"],
       pinnedFieldIds: ["number"],
       fieldWidth: 320,
       quickCreateFieldWidth: 320,
@@ -131,7 +128,7 @@ describe("quick entry field settings", () => {
       selectedFieldIds: [],
       pinnedFieldIds: [],
     })).toEqual({
-      selectedFieldIds: ["pathology", "required"],
+      selectedFieldIds: ["pathology"],
       pinnedFieldIds: [],
       fieldWidth: 320,
       quickCreateFieldWidth: 320,
@@ -156,12 +153,12 @@ describe("quick entry record operations", () => {
     expect(buildQuickEntryCreatePayload(
       "project-1",
       fields,
-      ["date", "pathology", "status", "required"],
+      ["date", "pathology", "status", "custom"],
       {
         date: "2026/8/3",
         pathology: " P-100 ",
         status: "已完成",
-        required: " 新值 ",
+        custom: " 新值 ",
         hidden: "不应提交",
       },
     )).toEqual({
@@ -170,7 +167,7 @@ describe("quick entry record operations", () => {
       status: "已完成",
       experiment_date: "2026-08-03",
       experiment_number: null,
-      values: { required: "新值" },
+      values: { custom: "新值" },
     });
   });
 
@@ -178,13 +175,13 @@ describe("quick entry record operations", () => {
     expect(buildQuickEntryChanges(
       record("1"),
       fields,
-      ["pathology", "required"],
-      { pathology: "P-1", required: "新值", hidden: "被忽略" },
-      { pathology: "P-1", required: "旧值", hidden: "隐藏值" },
+      ["pathology", "custom"],
+      { pathology: "P-1", custom: "新值", hidden: "被忽略" },
+      { pathology: "P-1", custom: "旧值", hidden: "隐藏值" },
     )).toEqual([
       {
         record_id: "1",
-        field_id: "required",
+        field_id: "custom",
         value: "新值",
         expected_value: "旧值",
       },
