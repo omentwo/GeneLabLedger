@@ -183,7 +183,7 @@ def list_records(
     experiment_date: date | None = None,
     report_generated: bool | None = None,
     include_locked: bool = True,
-    limit: int = Query(default=100, ge=1, le=1000),
+    limit: int = Query(default=100, ge=1, le=10_000),
     offset: int = Query(default=0, ge=0),
     session: Session = Depends(get_session),
 ) -> dict:
@@ -365,7 +365,7 @@ def query_record_ids(
     payload: RecordQueryRequest,
     session: Session = Depends(get_session),
 ) -> dict:
-    statement = _complex_record_statement(session, payload).order_by(None)
+    statement = _complex_record_statement(session, payload)
     ids = list(session.scalars(statement.with_only_columns(ProjectRecord.id)))
     return {"record_ids": ids, "total": len(ids)}
 

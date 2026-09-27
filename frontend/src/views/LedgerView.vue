@@ -148,6 +148,10 @@ import {
   resolveLedgerCellEditState,
 } from "@/utils/ledgerPersistence";
 import {
+  buildValidationPromptCopy,
+  isValidationSnapshotCurrent,
+} from "@/utils/validationPrompt";
+import {
   applyLedgerTableView,
   getLedgerFieldValue,
   reanchorInsertedDraftGroup,
@@ -163,6 +167,7 @@ import {
   LedgerRecordCache,
   ledgerRecordQueryKey,
 } from "@/utils/ledgerRecordCache";
+import { clampLedgerPage, ledgerPageForRecord } from "@/utils/ledgerPagination";
 import {
   readLastLedgerProjectId,
   rememberLastLedgerProjectId,
@@ -297,6 +302,14 @@ const historyReplayLoading = ref(false);
 const savingIds = ref(new Set<string>());
 type CellSaveStatus = "dirty" | "saving" | "saved" | "error";
 type CellSaveState = { status: CellSaveStatus; message?: string };
+type ValidationCellRollbackSnapshot = {
+  key: string;
+  recordId: string;
+  fieldId: string;
+  beforeValue: string;
+  previousSaveState: CellSaveState | null;
+  previousFieldError: string | null;
+};
 const cellSaveStatusLabels: Record<CellSaveStatus | "idle", string> = {
   dirty: "未保存",
   saving: "保存中",
@@ -329,7 +342,11 @@ const findReplaceForm = reactive({
 type ValidationPanelState = {
   token: string;
   projectId: string;
+  title: string;
   label: string;
+  outcomeText: string;
+  cancelText: string;
+  continueText: string;
   issues: RecordValidationIssue[];
   affectedCount: number;
   skippedLocked: number;
@@ -340,6 +357,7 @@ type ValidationPanelState = {
 const validationPanel = ref<ValidationPanelState | null>(null);
 const validationCommitLoading = ref(false);
 let pendingValidationAction: (() => Promise<void>) | null = null;
+let pendingValidationCancel: (() => void) | null = null;
 const previewScope = ref<LedgerPreviewScope>(DEFAULT_LEDGER_PREVIEW_SCOPE);
 const previewEngine = ref<PrintEngine>("auto");
 const previewCapabilities = ref<PreviewCapabilities | null>(null);
@@ -525,7 +543,7 @@ let ledgerDisposed = false;
 let removeQuickEntryChangedListener: (() => void) | undefined;
 let quickEntryRefreshPromise: Promise<void> = Promise.resolve();
 const currentPage = ref(1);
-const pageSize = 200;
+const pageSize = computed(() => ledgerDisplaySettings.value.pageSize);
 const recordTotal = ref(0);
 const selectedRecordIds = ref(new Set<string>());
 const selectedRecordCache = new Map<string, ProjectRecord>();
@@ -3069,6 +3087,74 @@ function clearAllCellSaveStates(): void {
   cellSaveVersions.clear();
 }
 
+function captureValidationCellRollback(
+  record: LedgerRow,
+  field: FieldDefinition,
+): ValidationCellRollbackSnapshot {
+  const key = persistedKey(record.id, field.id);
+  const previousSaveState = cellSaveStates.value.get(key);
+  return {
+    key,
+    recordId: record.id,
+    fieldId: field.id,
+    beforeValue: valueFor(record, field),
+    previousSaveState: previousSaveState ? { ...previousSaveState } : null,
+    previousFieldError: fieldErrors.value[key] ?? null,
+  };
+}
+
+function rollbackValidationCells(
+  snapshots: ValidationCellRollbackSnapshot[],
+  versions: Record<string, number>,
+): void {
+  snapshots.forEach((snapshot) => {
+    const snapshotVersion = versions[snapshot.key];
+    if (
+      snapshotVersion === undefined
+      || !isValidationSnapshotCurrent(snapshotVersion, cellSaveVersions.get(snapshot.key))
+    ) return;
+    const record = tableRows.value.find((item) => item.id === snapshot.recordId);
+    const field = fields.value.find((item) => item.id === snapshot.fieldId);
+    if (!record || !field) return;
+    setValue(record, field, snapshot.beforeValue, { markDirty: false });
+    cellSaveVersions.set(snapshot.key, snapshotVersion + 1);
+    if (snapshot.previousFieldError) {
+      setFieldError(record, field, snapshot.previousFieldError);
+    } else {
+      clearFieldError(record, field);
+    }
+    if (snapshot.previousSaveState) {
+      setCellSaveState(record.id, field.id, snapshot.previousSaveState);
+    } else {
+      clearCellSaveState(snapshot.key);
+    }
+  });
+}
+
+function removeDraftRows(recordIds: Set<string>): void {
+  if (!recordIds.size) return;
+  fields.value.forEach((field) => {
+    recordIds.forEach((recordId) => {
+      const key = persistedKey(recordId, field.id);
+      clearCellSaveState(key);
+      cellSaveVersions.delete(key);
+      cellSaveInFlightCounts.delete(key);
+      const nextErrors = { ...fieldErrors.value };
+      delete nextErrors[key];
+      fieldErrors.value = nextErrors;
+    });
+  });
+  draftRows.value = draftRows.value.filter((record) => !recordIds.has(record.id));
+  cleanupInsertedGroupRegistry();
+  if (editingGridSnapshot.value && recordIds.has(editingGridSnapshot.value.rowId)) {
+    editingGridCell.value = null;
+    editingGridSnapshot.value = null;
+  }
+  activeGridCell.value = null;
+  clearGridCellSelection();
+  recordIds.forEach((recordId) => setSaving(recordId, false));
+}
+
 function beginCellSave(key: string): void {
   cellSaveInFlightCounts.set(key, (cellSaveInFlightCounts.get(key) ?? 0) + 1);
 }
@@ -3446,15 +3532,33 @@ async function persistDraft(record: LedgerRow, notify = true): Promise<boolean> 
     const errors = validation.issues.filter((issue) => issue.severity === "error");
     const warnings = validation.issues.filter((issue) => issue.severity === "warning");
     if (errors.length || warnings.length) {
+      const prompt = errors.length
+        ? {
+            title: "无法保存",
+            outcomeText: "当前内容尚未保存，请按提示修改后重试。",
+            cancelText: "返回修改",
+            continueText: "",
+          }
+        : buildValidationPromptCopy(warnings, {
+            context: "create",
+            cancelBehavior: "discard",
+          });
       pendingValidationAction = errors.length
         ? null
         : async () => {
             const created = await createRecord(payload);
-            finishPersistedDraft(record, created, projectId, notify);
+            await finishPersistedDraft(record, created, projectId, notify);
+          };
+      pendingValidationCancel = errors.length
+        ? null
+        : () => {
+            removeDraftRows(new Set([record.id]));
+            ElMessage.info("已放弃本次新增，未写入台账");
           };
       validationPanel.value = {
         token: "",
         projectId,
+        ...prompt,
         label: "新增台账记录",
         issues: validation.issues,
         affectedCount: 1,
@@ -3466,7 +3570,7 @@ async function persistDraft(record: LedgerRow, notify = true): Promise<boolean> 
       return false;
     }
     const created = await createRecord(payload);
-    finishPersistedDraft(record, created, projectId, notify);
+    await finishPersistedDraft(record, created, projectId, notify);
     return true;
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "记录自动保存失败");
@@ -3476,45 +3580,91 @@ async function persistDraft(record: LedgerRow, notify = true): Promise<boolean> 
   }
 }
 
-function finishPersistedDraft(
+type PersistedRecordLocation = "focused" | "filtered-out" | "skipped" | "failed";
+
+async function locatePersistedRecord(
+  recordId: string,
+  projectId: string,
+): Promise<PersistedRecordLocation> {
+  if (activeProjectId.value !== projectId || appliedSearch.scope !== "current") {
+    return "skipped";
+  }
+  try {
+    const result = await queryRecordIds(buildRecordQuery(projectId, { page: 1 }));
+    if (activeProjectId.value !== projectId || appliedSearch.scope !== "current") {
+      return "skipped";
+    }
+    recordTotal.value = result.total;
+    const targetPage = ledgerPageForRecord(result.record_ids, recordId, pageSize.value);
+    if (targetPage === null) {
+      const lastPage = Math.max(1, Math.ceil(result.total / pageSize.value));
+      currentPage.value = Math.min(currentPage.value, lastPage);
+      focusRecordId.value = "";
+      await loadRecords(projectId, { preserveHistory: true, preserveSelection: true });
+      return "filtered-out";
+    }
+    currentPage.value = targetPage;
+    focusRecordId.value = recordId;
+    const loaded = await loadRecords(projectId, {
+      preserveHistory: true,
+      preserveSelection: true,
+    });
+    if (!loaded) {
+      focusRecordId.value = "";
+      return "failed";
+    }
+    return "focused";
+  } catch {
+    focusRecordId.value = "";
+    return "failed";
+  }
+}
+
+async function finishPersistedDraft(
   record: LedgerRow,
   created: ProjectRecord,
   projectId: string,
   notify: boolean,
-): void {
-    invalidateProjectRecordCache(projectId);
-    if (editingGridSnapshot.value?.rowId === record.id) {
-      editingGridCell.value = null;
-      editingGridSnapshot.value = null;
-    }
-    const draftIndex = draftRows.value.findIndex((item) => item.id === record.id);
-    reanchorPendingInsertedDrafts(record, created);
-    if (draftIndex >= 0) draftRows.value.splice(draftIndex, 1);
-    cleanupInsertedGroupRegistry();
-    if (activeProjectId.value === projectId) {
-      if (record._insertAnchorId) {
-        records.value = records.value.map((item) =>
-          item.position >= created.position
-            ? { ...item, position: item.position + 1 }
-            : item,
-        );
-      }
-      records.value.push(created);
-      records.value.sort(
-        (left, right) => left.position - right.position || left.id.localeCompare(right.id),
+): Promise<void> {
+  invalidateProjectRecordCache(projectId);
+  if (editingGridSnapshot.value?.rowId === record.id) {
+    editingGridCell.value = null;
+    editingGridSnapshot.value = null;
+  }
+  const draftIndex = draftRows.value.findIndex((item) => item.id === record.id);
+  reanchorPendingInsertedDrafts(record, created);
+  if (draftIndex >= 0) draftRows.value.splice(draftIndex, 1);
+  cleanupInsertedGroupRegistry();
+  if (activeProjectId.value === projectId) {
+    if (record._insertAnchorId) {
+      records.value = records.value.map((item) =>
+        item.position >= created.position
+          ? { ...item, position: item.position + 1 }
+          : item,
       );
-      recordTotal.value += 1;
-      rememberRecord(created);
-      if (!record._insertAnchorId) scrollTableToBottom();
     }
-    pushHistory("新增台账记录", [], [created], projectId);
-    if (notify) {
+    records.value.push(created);
+    records.value.sort(
+      (left, right) => left.position - right.position || left.id.localeCompare(right.id),
+    );
+    recordTotal.value += 1;
+    rememberRecord(created);
+  }
+  pushHistory("新增台账记录", [], [created], projectId);
+  const location = await locatePersistedRecord(created.id, projectId);
+  if (notify) {
+    if (location === "filtered-out") {
+      ElMessage.success("病理号已保存，但该记录不符合当前筛选条件；可使用撤销删除本次新增");
+    } else if (location === "failed") {
+      ElMessage.warning("病理号已保存，但自动定位失败；刷新或搜索后可查看该记录");
+    } else {
       ElMessage.success(
-        record._insertAnchorId
-          ? "病理号已保存并创建台账记录，位置已保留；可使用撤销删除本次新增"
-          : "病理号已保存并创建台账记录，已加入表格底部；可使用撤销删除本次新增",
+        location === "focused"
+          ? `病理号已保存并定位到第 ${currentPage.value} 页；可使用撤销删除本次新增`
+          : "病理号已保存并创建台账记录；可使用撤销删除本次新增",
       );
     }
+  }
 }
 
 async function saveField(
@@ -3546,8 +3696,7 @@ async function saveField(
   if (record.locked) return false;
   const key = persistedKey(record.id, field.id);
   if (validationPanel.value?.cellKeys.includes(key)) {
-    validationPanel.value = null;
-    pendingValidationAction = null;
+    dismissValidationPanel();
   }
   const initialBefore = persistedValues.get(key) ?? "";
   const current = valueFor(record, field);
@@ -3600,9 +3749,38 @@ async function saveField(
       const errors = preview.issues.filter((issue) => issue.severity === "error");
       const warnings = preview.issues.filter((issue) => issue.severity === "warning");
       if (errors.length || warnings.length) {
+        const prompt = errors.length
+          ? {
+              title: "无法保存",
+              outcomeText: "当前修改尚未保存，请按提示调整后重试。",
+              cancelText: "返回修改",
+              continueText: "",
+            }
+          : buildValidationPromptCopy(warnings, {
+              context: "edit",
+              cancelBehavior: "discard",
+              originalValue: initialBefore,
+            });
+        pendingValidationAction = null;
+        pendingValidationCancel = errors.length
+          ? null
+          : () => {
+              rollbackValidationCells([
+                {
+                  key,
+                  recordId: record.id,
+                  fieldId: field.id,
+                  beforeValue: initialBefore,
+                  previousSaveState: null,
+                  previousFieldError: null,
+                },
+              ], { [key]: version });
+              ElMessage.info("已取消修改并恢复原值");
+            };
         validationPanel.value = {
           token: preview.token,
           projectId: record.project_id,
+          ...prompt,
           label: `编辑 ${field.label}`,
           issues: preview.issues,
           affectedCount: preview.affected_count,
@@ -3614,10 +3792,16 @@ async function saveField(
         throw new Error(errors[0]?.message ?? "存在警告，请在验证面板中确认后继续");
       }
       if (preview.issues.length) {
+        pendingValidationAction = null;
+        pendingValidationCancel = null;
         validationPanel.value = {
           token: "",
           projectId: record.project_id,
+          title: "操作提示",
           label: `编辑 ${field.label}`,
+          outcomeText: "修改已经通过校验并将继续保存。",
+          cancelText: "我知道了",
+          continueText: "",
           issues: preview.issues,
           affectedCount: preview.affected_count,
           skippedLocked: preview.skipped_locked,
@@ -3688,9 +3872,8 @@ async function continueValidationCommit(): Promise<void> {
   try {
     if (pendingValidationAction) {
       const action = pendingValidationAction;
-      pendingValidationAction = null;
       await action();
-      validationPanel.value = null;
+      if (validationPanel.value === panel) dismissValidationPanel();
       return;
     }
     if (!panel.token) return;
@@ -3702,7 +3885,7 @@ async function continueValidationCommit(): Promise<void> {
       if (recordId && fieldId) setCellSaveState(recordId, fieldId, { status: "saved" });
     });
     pushCellHistory(panel.label, result.changes, panel.projectId);
-    validationPanel.value = null;
+    if (validationPanel.value === panel) dismissValidationPanel();
     ElMessage.success(`已保存 ${new Set(result.changes.map((change) => change.record_id)).size} 条记录`);
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "批量保存失败");
@@ -3713,7 +3896,14 @@ async function continueValidationCommit(): Promise<void> {
 
 function dismissValidationPanel(): void {
   pendingValidationAction = null;
+  pendingValidationCancel = null;
   validationPanel.value = null;
+}
+
+function cancelValidationPanel(): void {
+  const cancel = pendingValidationCancel;
+  dismissValidationPanel();
+  cancel?.();
 }
 
 async function loadPreviewEngineSetting(): Promise<void> {
@@ -4085,8 +4275,8 @@ function buildRecordQuery(
           direction: sort.order === "descending" ? "desc" : "asc",
         }
       : null,
-    limit: pageSize,
-    offset: (page - 1) * pageSize,
+    limit: pageSize.value,
+    offset: (page - 1) * pageSize.value,
   };
 }
 
@@ -4274,10 +4464,18 @@ function refreshRecords(): void {
   void loadRecords(activeProjectId.value, { preserveHistory: true, preserveSelection: true });
 }
 
-function handleLockedVisibilityChange(): void {
-  currentPage.value = 1;
+async function handleLockedVisibilityChange(): Promise<void> {
+  const requestedPage = currentPage.value;
   clearSelectionsAfterLedgerViewChange();
-  void loadRecords(activeProjectId.value, { preserveHistory: true });
+  const loaded = await loadRecords(activeProjectId.value, { preserveHistory: true });
+  if (!loaded) return;
+  const availablePage = clampLedgerPage(requestedPage, recordTotal.value, pageSize.value);
+  if (availablePage === requestedPage) {
+    currentPage.value = requestedPage;
+    return;
+  }
+  currentPage.value = availablePage;
+  await loadRecords(activeProjectId.value, { preserveHistory: true });
 }
 
 function openReorderDialog(): void {
@@ -4945,6 +5143,9 @@ async function pasteGrid(
     );
   if (!entries.length) return [];
   const changedDraftRows = new Map<string, { record: LedgerRow; rowNumber: number }>();
+  const rollbackSnapshots = new Map<string, ValidationCellRollbackSnapshot>();
+  const draftIdsBeforePaste = new Set(draftRows.value.map((record) => record.id));
+  let appendedDraftIds = new Set<string>();
   const existingChanges: RecordCellChange[] = [];
   const changedPositions: GridCellPosition[] = [];
   const changedPositionKeys = new Set<string>();
@@ -4955,6 +5156,11 @@ async function pasteGrid(
     const maxRowOffset = Math.max(...entries.map((entry) => entry.rowOffset), 0);
     const missingRows = startRowIndex + maxRowOffset + 1 - tableRows.value.length;
     for (let index = 0; index < missingRows; index += 1) appendDraftRow(false);
+    appendedDraftIds = new Set(
+      draftRows.value
+        .filter((record) => !draftIdsBeforePaste.has(record.id))
+        .map((record) => record.id),
+    );
     const rows = tableRows.value;
 
     entries.forEach((entry) => {
@@ -4976,6 +5182,10 @@ async function pasteGrid(
       }
       const value = exactCells ? entry.value : entry.value.trim();
       const expectedValue = valueFor(record, field);
+      const key = persistedKey(record.id, field.id);
+      if (!rollbackSnapshots.has(key)) {
+        rollbackSnapshots.set(key, captureValidationCellRollback(record, field));
+      }
       if (!isDraft(record)) {
         existingChanges.push({
           record_id: record.id,
@@ -5088,10 +5298,30 @@ async function pasteGrid(
     };
 
     if (errors.length || warnings.length) {
+      const prompt = errors.length
+        ? {
+            title: "无法保存",
+            outcomeText: "本次更改尚未保存，请按提示调整后重试。",
+            cancelText: "返回修改",
+            continueText: "",
+          }
+        : buildValidationPromptCopy(warnings, {
+            context: "batch",
+            cancelBehavior: "discard",
+            operationLabel,
+          });
       pendingValidationAction = errors.length ? null : () => commitPasteChanges(true);
+      pendingValidationCancel = errors.length
+        ? null
+        : () => {
+            rollbackValidationCells([...rollbackSnapshots.values()], cellVersions);
+            removeDraftRows(appendedDraftIds);
+            ElMessage.info(`已取消${operationLabel}，并恢复操作前的内容`);
+          };
       validationPanel.value = {
         token: "",
         projectId,
+        ...prompt,
         label: `${operationLabel}台账数据`,
         issues: allIssues,
         affectedCount: batchPreview?.affected_count ?? 0,
@@ -5111,10 +5341,16 @@ async function pasteGrid(
 
     await commitPasteChanges(false);
     if (allIssues.length) {
+      pendingValidationAction = null;
+      pendingValidationCancel = null;
       validationPanel.value = {
         token: "",
         projectId,
+        title: "操作提示",
         label: `${operationLabel}台账数据`,
+        outcomeText: `本次${operationLabel}已经完成。`,
+        cancelText: "我知道了",
+        continueText: "",
         issues: allIssues,
         affectedCount: batchPreview?.affected_count ?? 0,
         skippedLocked: (batchPreview?.skipped_locked ?? 0) + skippedLocked,
@@ -5440,6 +5676,7 @@ watch(activeProjectId, async (projectId, previousProjectId) => {
 }, { flush: "sync" });
 
 async function initializeLedger(): Promise<void> {
+  await loadLedgerDisplaySettings();
   try {
     await appStore.bootstrap();
   } catch {
@@ -5500,7 +5737,6 @@ onMounted(() => {
     removeQuickEntryChangedListener = bridge.onQuickEntryChanged(handleQuickEntryChanged);
     void requestPendingQuickEntryChanges();
   }
-  void loadLedgerDisplaySettings();
   void loadPreviewEngineSetting();
   void loadPreviewCapabilities();
   void initializeLedger();
@@ -5870,7 +6106,12 @@ onBeforeUnmount(() => {
           reserve-selection
           :selectable="recordRowSelectable"
         />
-        <el-table-column width="42" fixed="left" align="center">
+        <el-table-column
+          width="42"
+          fixed="left"
+          align="center"
+          class-name="ledger-lock-column"
+        >
           <template #default="{ row }: { row: LedgerRow }">
             <el-icon v-if="row.locked" class="row-lock" title="整条记录已锁定">
               <Lock />
@@ -5985,7 +6226,14 @@ onBeforeUnmount(() => {
                 {{ fieldErrorFor(row, field) }}
               </span>
               <span
-                v-if="cellSaveStateFor(row, field)"
+                v-if="isDraft(row) && field.system_key === 'pathology_number' && valueFor(row, field).trim()"
+                class="cell-save-state is-dirty"
+                title="这条记录尚未写入台账"
+              >
+                未保存
+              </span>
+              <span
+                v-else-if="cellSaveStateFor(row, field)"
                 class="cell-save-state"
                 :class="`is-${cellSaveStateFor(row, field)?.status}`"
                 :title="cellSaveStateFor(row, field)?.message ?? ''"
@@ -6190,11 +6438,13 @@ onBeforeUnmount(() => {
               <span>状态 {{ cellSaveStatusLabels[selectedGridStats.saveStatus] }}</span>
             </template>
           </div>
+          <span class="ledger-record-total">共 {{ recordTotal }} 条</span>
           <el-pagination
+            v-if="recordTotal > pageSize"
             v-model:current-page="currentPage"
             :page-size="pageSize"
             :total="recordTotal"
-            layout="total, prev, pager, next"
+            layout="prev, pager, next"
             size="small"
             @current-change="changeLedgerPage"
           />
@@ -6340,29 +6590,55 @@ onBeforeUnmount(() => {
     </template>
   </el-dialog>
 
-  <div v-if="validationPanel" class="validation-panel" role="status">
-    <div>
-      <strong>{{ validationPanel.label }}</strong>
-      <span>影响 {{ validationPanel.affectedCount }} 个单元格</span>
-      <span v-if="validationPanel.skippedLocked">，跳过锁定 {{ validationPanel.skippedLocked }} 个</span>
-      <ul>
-        <li v-for="(issue, index) in validationPanel.issues.slice(0, 20)" :key="index" :class="`is-${issue.severity}`">
+  <el-dialog
+    v-if="validationPanel"
+    :model-value="true"
+    class="ledger-dialog ledger-validation-dialog"
+    :title="validationPanel.title"
+    width="620px"
+    align-center
+    append-to-body
+    destroy-on-close
+    :close-on-click-modal="false"
+    :close-on-press-escape="false"
+    :show-close="false"
+    role="alertdialog"
+    aria-modal="true"
+    aria-describedby="ledger-validation-description"
+  >
+    <div id="ledger-validation-description" class="validation-dialog-content">
+      <div class="validation-dialog-summary">
+        <strong>{{ validationPanel.label }}</strong>
+        <span>影响 {{ validationPanel.affectedCount }} 个单元格</span>
+        <span v-if="validationPanel.skippedLocked">，跳过锁定 {{ validationPanel.skippedLocked }} 个</span>
+      </div>
+      <ul class="validation-dialog-issues">
+        <li
+          v-for="(issue, index) in validationPanel.issues.slice(0, 20)"
+          :key="index"
+          :class="`is-${issue.severity}`"
+        >
           {{ issue.message }}
         </li>
       </ul>
+      <p v-if="validationPanel.outcomeText" class="validation-dialog-outcome">
+        {{ validationPanel.outcomeText }}
+      </p>
     </div>
-    <div class="validation-panel-actions">
-      <el-button @click="dismissValidationPanel">关闭</el-button>
+    <template #footer>
+      <el-button :disabled="validationCommitLoading" @click="cancelValidationPanel">
+        {{ validationPanel.cancelText }}
+      </el-button>
       <el-button
         v-if="validationPanel.canContinue"
         type="primary"
         :loading="validationCommitLoading"
         @click="continueValidationCommit"
       >
-        忽略警告并继续
+        {{ validationPanel.continueText }}
       </el-button>
-    </div>
-  </div>
+    </template>
+  </el-dialog>
 
   <el-dialog
     class="ledger-dialog"
@@ -7193,6 +7469,13 @@ onBeforeUnmount(() => {
   padding-bottom: 2px;
 }
 
+.ledger-record-total {
+  color: var(--el-text-color-regular);
+  font-size: 12px;
+  line-height: 24px;
+  white-space: nowrap;
+}
+
 .ledger-zoom-control {
   display: inline-flex;
   min-width: 260px;
@@ -7554,6 +7837,19 @@ onBeforeUnmount(() => {
   height: 20px;
 }
 
+:deep(.el-table td.ledger-lock-column) {
+  padding: 0;
+  vertical-align: middle !important;
+}
+
+:deep(.el-table td.ledger-lock-column > .cell) {
+  display: flex;
+  min-height: var(--ledger-editor-height, 32px);
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
 :deep(.el-table.selection-dragging td.el-table-column--selection .el-checkbox__inner) {
   cursor: grabbing;
 }
@@ -7606,17 +7902,22 @@ onBeforeUnmount(() => {
 
 .cell-save-state {
   position: absolute;
-  right: 4px;
-  top: 2px;
+  right: 3px;
+  top: 1px;
   z-index: 3;
   color: var(--app-muted);
-  font-size: 10px;
-  line-height: 14px;
+  font-size: 9px;
+  line-height: 12px;
   pointer-events: none;
 }
 
 .cell-save-state.is-saving {
   color: var(--app-primary-text);
+}
+
+.cell-save-state.is-dirty {
+  color: var(--app-warning);
+  font-weight: 700;
 }
 
 .cell-save-state.is-saved {
@@ -7668,48 +7969,69 @@ onBeforeUnmount(() => {
   overflow-wrap: anywhere;
 }
 
-.replace-preview-panel ul,
-.validation-panel ul {
+.replace-preview-panel ul {
   max-height: 150px;
   overflow: auto;
   margin: 8px 0 0;
   padding-left: 20px;
 }
 
-.validation-panel {
-  position: fixed;
-  right: 24px;
-  bottom: 24px;
-  z-index: 3000;
-  display: flex;
-  width: min(680px, calc(100vw - 48px));
-  max-height: 320px;
-  justify-content: space-between;
-  gap: 16px;
-  border: 1px solid #f0b849;
-  border-radius: 10px;
-  padding: 16px;
-  background: var(--app-warning-soft);
-  box-shadow: 0 12px 36px rgb(16 24 40 / 20%);
+:deep(.ledger-validation-dialog) {
+  max-width: calc(100vw - 32px);
 }
 
-.validation-panel li.is-error {
+.validation-dialog-content {
+  display: grid;
+  gap: 14px;
+}
+
+.validation-dialog-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: baseline;
+}
+
+.validation-dialog-summary strong {
+  color: var(--app-text);
+  font-size: 15px;
+}
+
+.validation-dialog-summary span {
+  color: var(--app-muted);
+  font-size: 13px;
+}
+
+.validation-dialog-issues {
+  max-height: 220px;
+  overflow: auto;
+  margin: 0;
+  border: 1px solid #f0b849;
+  border-radius: 8px;
+  padding: 12px 12px 12px 32px;
+  background: var(--app-warning-soft);
+}
+
+.validation-dialog-issues li.is-error {
   color: var(--app-danger);
 }
 
-.validation-panel li.is-warning {
+.validation-dialog-issues li.is-warning {
   color: var(--app-warning);
+  font-weight: 600;
 }
 
-.validation-panel li.is-suggestion {
+.validation-dialog-issues li.is-suggestion {
   color: var(--app-primary-text);
 }
 
-.validation-panel-actions {
-  display: flex;
-  flex-shrink: 0;
-  align-items: flex-start;
-  gap: 8px;
+.validation-dialog-outcome {
+  margin: 0;
+  border-left: 3px solid var(--app-warning);
+  padding: 8px 10px;
+  background: var(--app-warning-soft);
+  color: var(--app-text);
+  line-height: 1.6;
 }
 
 @media (max-width: 1200px) {

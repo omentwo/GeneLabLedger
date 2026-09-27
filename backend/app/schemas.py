@@ -636,7 +636,7 @@ class RecordQueryRequest(BaseModel):
     report_generated: bool | None = None
     field_filters: list[RecordFieldFilter] = Field(default_factory=list, max_length=200)
     sort: RecordQuerySort | None = None
-    limit: int = Field(default=200, ge=1, le=1000)
+    limit: int = Field(default=200, ge=1, le=10_000)
     offset: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")

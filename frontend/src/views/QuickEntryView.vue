@@ -51,6 +51,7 @@ import {
   type QuickEntryProjectSettings,
   type QuickEntrySettingsDocument,
 } from "@/utils/quickEntry";
+import { buildValidationPromptCopy } from "@/utils/validationPrompt";
 
 const route = useRoute();
 const router = useRouter();
@@ -627,13 +628,23 @@ function issueSummary(issues: RecordValidationIssue[]): string {
   return [...new Set(issues.map((issue) => issue.message))].join("；");
 }
 
-async function confirmWarnings(issues: RecordValidationIssue[]): Promise<boolean> {
+async function confirmWarnings(
+  issues: RecordValidationIssue[],
+  context: "create" | "edit",
+): Promise<boolean> {
   if (!issues.length) return true;
+  const prompt = buildValidationPromptCopy(issues, {
+    context,
+    cancelBehavior: "return",
+  });
   try {
-    await ElMessageBox.confirm(issueSummary(issues), "字段校验警告", {
-      confirmButtonText: "仍然保存",
-      cancelButtonText: "返回修改",
+    await ElMessageBox.confirm(`${issueSummary(issues)}；${prompt.outcomeText}`, prompt.title, {
+      confirmButtonText: prompt.continueText,
+      cancelButtonText: prompt.cancelText,
       type: "warning",
+      closeOnClickModal: false,
+      closeOnPressEscape: false,
+      showClose: false,
     });
     return true;
   } catch {
@@ -670,7 +681,7 @@ async function saveNewRecord(): Promise<void> {
     await ElMessageBox.alert(issueSummary(errors), "无法保存", { type: "error" });
     return;
   }
-  if (!(await confirmWarnings(warnings))) return;
+  if (!(await confirmWarnings(warnings, "create"))) return;
   const created = await quickCreateRecord(project.id, parsed.normalized);
   unreportedRecords.value = unreportedQuickEntryRecords([
     ...unreportedRecords.value,
@@ -718,7 +729,7 @@ async function saveExistingRecord(): Promise<void> {
     await ElMessageBox.alert(issueSummary(errors), "无法保存", { type: "error" });
     return;
   }
-  if (!(await confirmWarnings(warnings))) return;
+  if (!(await confirmWarnings(warnings, "edit"))) return;
   const result = await commitCellBatch(preview.token, warnings.length > 0);
   const updated = result.records.find((item) => item.id === record.id);
   if (updated) {

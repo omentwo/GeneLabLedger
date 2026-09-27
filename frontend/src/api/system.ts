@@ -14,6 +14,9 @@ export const LEDGER_FONT_SIZE_STEP = 1;
 export const LEDGER_ZOOM_MIN = 50;
 export const LEDGER_ZOOM_MAX = 200;
 export const LEDGER_ZOOM_STEP = 5;
+export const LEDGER_PAGE_SIZE_MIN = 200;
+export const LEDGER_PAGE_SIZE_MAX = 10_000;
+export const LEDGER_PAGE_SIZE_STEP = 100;
 
 export const LEDGER_FONT_FAMILY_VALUES = [
   "system",
@@ -58,6 +61,7 @@ export type LedgerDisplaySettings = {
   fontFamily: LedgerFontFamily;
   fontSizePx: number;
   zoomPercent: number;
+  pageSize: number;
 };
 
 export const DEFAULT_LEDGER_DISPLAY_SETTINGS = {
@@ -67,6 +71,7 @@ export const DEFAULT_LEDGER_DISPLAY_SETTINGS = {
   fontFamily: "system",
   fontSizePx: 14,
   zoomPercent: 100,
+  pageSize: 200,
 } as const;
 
 export function normalizeLedgerDisplaySettings(value: unknown): LedgerDisplaySettings {
@@ -105,6 +110,11 @@ export function normalizeLedgerDisplaySettings(value: unknown): LedgerDisplaySet
     typeof rawZoom === "number" && Number.isFinite(rawZoom)
       ? Math.min(LEDGER_ZOOM_MAX, Math.max(LEDGER_ZOOM_MIN, Math.round(rawZoom / LEDGER_ZOOM_STEP) * LEDGER_ZOOM_STEP))
       : DEFAULT_LEDGER_DISPLAY_SETTINGS.zoomPercent;
+  const rawPageSize = candidate.pageSize;
+  const pageSize =
+    typeof rawPageSize === "number" && Number.isFinite(rawPageSize)
+      ? Math.min(LEDGER_PAGE_SIZE_MAX, Math.max(LEDGER_PAGE_SIZE_MIN, Math.round(rawPageSize)))
+      : DEFAULT_LEDGER_DISPLAY_SETTINGS.pageSize;
 
   return {
     rowPaddingY,
@@ -113,6 +123,7 @@ export function normalizeLedgerDisplaySettings(value: unknown): LedgerDisplaySet
     fontFamily,
     fontSizePx,
     zoomPercent,
+    pageSize,
   };
 }
 

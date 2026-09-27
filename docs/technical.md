@@ -121,7 +121,7 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 | 自动导出 | `GET /api/auto-export/config`；`GET/POST /api/auto-export/tasks`；`PUT/DELETE /api/auto-export/tasks/{task_id}`；`POST /api/auto-export/tasks/{task_id}/run`；`GET /api/auto-export/tasks/{task_id}/runs`；`POST /api/auto-export/validate-cron` | 任务配置、立即执行、历史查询、Cron 校验 |
 | 数据库备份 | `GET/PUT /api/database-backups/settings`；`GET /api/database-backups/status`；`GET /api/database-backups`；`POST /api/database-backups/run`；`POST /api/database-backups/restore` | 自动备份设置、状态与历史、立即备份、重启恢复 |
 
-兼容记录列表支持项目、状态、实验日期、报告状态、关键字、`include_locked` 和 `limit/offset`。主台账使用复杂查询接口，每页固定 200 条，并支持动态字段筛选、排序、锁定记录可见性和筛选结果的完整 ID 集合；台账、实验编排、快速录入和报告候选列表均传 `include_locked=false`，统计和导出保持包含锁定记录。未指定字段排序时按项目内 `position` 返回；创建请求可用 `insert_before_record_id` 或 `insert_after_record_id` 指定相对插入位置，其他新增路径追加到末尾。
+兼容记录列表支持项目、状态、实验日期、报告状态、关键字、`include_locked` 和 `limit/offset`。主台账使用复杂查询接口，每页记录数可在 200–10,000 条之间设置，并支持动态字段筛选、排序、锁定记录可见性和按当前排序返回的完整 ID 集合；台账、实验编排、快速录入和报告候选列表均传 `include_locked=false`，统计和导出保持包含锁定记录。未指定字段排序时按项目内 `position` 返回；创建请求可用 `insert_before_record_id` 或 `insert_after_record_id` 指定相对插入位置，其他新增路径追加到末尾。新增记录保存后，主台账根据完整 ID 顺序定位真实页码并滚动到该记录。
 
 ## 6. 文件处理与业务服务
 

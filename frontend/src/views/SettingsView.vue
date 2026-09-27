@@ -20,6 +20,9 @@ import {
   LEDGER_FONT_SIZE_MAX,
   LEDGER_FONT_SIZE_MIN,
   LEDGER_FONT_SIZE_STEP,
+  LEDGER_PAGE_SIZE_MAX,
+  LEDGER_PAGE_SIZE_MIN,
+  LEDGER_PAGE_SIZE_STEP,
   LEDGER_EDITOR_HEIGHT_MIN,
   LEDGER_EDITOR_SIZE_MAX,
   LEDGER_EDITOR_SIZE_STEP,
@@ -381,6 +384,24 @@ onMounted(() => {
               只调整台账表格区域，不改变其他页面。
             </p>
           </div>
+        </div>
+
+        <div class="grid max-w-2xl gap-2">
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-sm font-semibold text-slate-700">每页记录数</span>
+            <span class="text-sm text-slate-500">{{ ledgerDisplaySettings.pageSize }} 条</span>
+          </div>
+          <el-input-number
+            v-model="ledgerDisplaySettings.pageSize"
+            :min="LEDGER_PAGE_SIZE_MIN"
+            :max="LEDGER_PAGE_SIZE_MAX"
+            :step="LEDGER_PAGE_SIZE_STEP"
+            :disabled="ledgerDisplayLoading || ledgerDisplaySaving"
+            controls-position="right"
+          />
+          <p class="text-xs leading-5 text-slate-500">
+            可设置 200–10000 条。数值越大，同页加载和渲染的内容越多。
+          </p>
         </div>
 
         <div class="grid max-w-2xl gap-2">

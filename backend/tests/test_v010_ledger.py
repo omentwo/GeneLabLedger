@@ -659,7 +659,13 @@ def test_dynamic_query_pagination_sort_filters_and_all_ids(
     assert [item["pathology_number"] for item in second_page["items"]] == ["QUERY-2"]
     all_ids = client.post("/api/records/query/ids", json={**payload, "limit": 1}).json()
     assert all_ids["total"] == 3
-    assert len(all_ids["record_ids"]) == 3
+    assert all_ids["record_ids"] == [
+        *[item["id"] for item in first_page.json()["items"]],
+        *[item["id"] for item in second_page["items"]],
+    ]
+
+    assert client.post("/api/records/query", json={**payload, "limit": 10_000}).status_code == 200
+    assert client.post("/api/records/query", json={**payload, "limit": 10_001}).status_code == 422
 
 
 def test_record_queries_can_exclude_locked_records(
