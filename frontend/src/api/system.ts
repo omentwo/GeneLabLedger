@@ -14,9 +14,9 @@ export const LEDGER_FONT_SIZE_STEP = 1;
 export const LEDGER_ZOOM_MIN = 50;
 export const LEDGER_ZOOM_MAX = 200;
 export const LEDGER_ZOOM_STEP = 5;
-export const LEDGER_PAGE_SIZE_MIN = 200;
-export const LEDGER_PAGE_SIZE_MAX = 10_000;
-export const LEDGER_PAGE_SIZE_STEP = 100;
+export const LEDGER_LOAD_BATCH_SIZE_MIN = 500;
+export const LEDGER_LOAD_BATCH_SIZE_MAX = 10_000;
+export const LEDGER_LOAD_BATCH_SIZE_STEP = 500;
 
 export const LEDGER_FONT_FAMILY_VALUES = [
   "system",
@@ -61,7 +61,7 @@ export type LedgerDisplaySettings = {
   fontFamily: LedgerFontFamily;
   fontSizePx: number;
   zoomPercent: number;
-  pageSize: number;
+  loadBatchSize: number;
 };
 
 export const DEFAULT_LEDGER_DISPLAY_SETTINGS = {
@@ -71,7 +71,7 @@ export const DEFAULT_LEDGER_DISPLAY_SETTINGS = {
   fontFamily: "system",
   fontSizePx: 14,
   zoomPercent: 100,
-  pageSize: 200,
+  loadBatchSize: 2_000,
 } as const;
 
 export function normalizeLedgerDisplaySettings(value: unknown): LedgerDisplaySettings {
@@ -110,11 +110,17 @@ export function normalizeLedgerDisplaySettings(value: unknown): LedgerDisplaySet
     typeof rawZoom === "number" && Number.isFinite(rawZoom)
       ? Math.min(LEDGER_ZOOM_MAX, Math.max(LEDGER_ZOOM_MIN, Math.round(rawZoom / LEDGER_ZOOM_STEP) * LEDGER_ZOOM_STEP))
       : DEFAULT_LEDGER_DISPLAY_SETTINGS.zoomPercent;
-  const rawPageSize = candidate.pageSize;
-  const pageSize =
-    typeof rawPageSize === "number" && Number.isFinite(rawPageSize)
-      ? Math.min(LEDGER_PAGE_SIZE_MAX, Math.max(LEDGER_PAGE_SIZE_MIN, Math.round(rawPageSize)))
-      : DEFAULT_LEDGER_DISPLAY_SETTINGS.pageSize;
+  // `pageSize` was used before the virtualized ledger removed visible pages.
+  // Keep accepting it so existing installations migrate without losing their
+  // preference; the value now controls only the transport batch size.
+  const rawLoadBatchSize = candidate.loadBatchSize ?? candidate.pageSize;
+  const loadBatchSize =
+    typeof rawLoadBatchSize === "number" && Number.isFinite(rawLoadBatchSize)
+      ? Math.min(
+          LEDGER_LOAD_BATCH_SIZE_MAX,
+          Math.max(LEDGER_LOAD_BATCH_SIZE_MIN, Math.round(rawLoadBatchSize)),
+        )
+      : DEFAULT_LEDGER_DISPLAY_SETTINGS.loadBatchSize;
 
   return {
     rowPaddingY,
@@ -123,7 +129,7 @@ export function normalizeLedgerDisplaySettings(value: unknown): LedgerDisplaySet
     fontFamily,
     fontSizePx,
     zoomPercent,
-    pageSize,
+    loadBatchSize,
   };
 }
 

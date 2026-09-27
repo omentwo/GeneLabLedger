@@ -20,9 +20,9 @@ import {
   LEDGER_FONT_SIZE_MAX,
   LEDGER_FONT_SIZE_MIN,
   LEDGER_FONT_SIZE_STEP,
-  LEDGER_PAGE_SIZE_MAX,
-  LEDGER_PAGE_SIZE_MIN,
-  LEDGER_PAGE_SIZE_STEP,
+  LEDGER_LOAD_BATCH_SIZE_MAX,
+  LEDGER_LOAD_BATCH_SIZE_MIN,
+  LEDGER_LOAD_BATCH_SIZE_STEP,
   LEDGER_EDITOR_HEIGHT_MIN,
   LEDGER_EDITOR_SIZE_MAX,
   LEDGER_EDITOR_SIZE_STEP,
@@ -388,19 +388,19 @@ onMounted(() => {
 
         <div class="grid max-w-2xl gap-2">
           <div class="flex items-center justify-between gap-3">
-            <span class="text-sm font-semibold text-slate-700">每页记录数</span>
-            <span class="text-sm text-slate-500">{{ ledgerDisplaySettings.pageSize }} 条</span>
+            <span class="text-sm font-semibold text-slate-700">后台加载批次</span>
+            <span class="text-sm text-slate-500">{{ ledgerDisplaySettings.loadBatchSize }} 条</span>
           </div>
           <el-input-number
-            v-model="ledgerDisplaySettings.pageSize"
-            :min="LEDGER_PAGE_SIZE_MIN"
-            :max="LEDGER_PAGE_SIZE_MAX"
-            :step="LEDGER_PAGE_SIZE_STEP"
+            v-model="ledgerDisplaySettings.loadBatchSize"
+            :min="LEDGER_LOAD_BATCH_SIZE_MIN"
+            :max="LEDGER_LOAD_BATCH_SIZE_MAX"
+            :step="LEDGER_LOAD_BATCH_SIZE_STEP"
             :disabled="ledgerDisplayLoading || ledgerDisplaySaving"
             controls-position="right"
           />
           <p class="text-xs leading-5 text-slate-500">
-            可设置 200–10000 条。数值越大，同页加载和渲染的内容越多。
+            台账不再分页；该值仅控制后台每批传输的记录数，可设置 500–10000 条。
           </p>
         </div>
 

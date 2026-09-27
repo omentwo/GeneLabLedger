@@ -18,7 +18,7 @@ describe("ledger display settings", () => {
         editorHeightPercent: 50,
         fontSizePx: 30,
         zoomPercent: 206,
-        pageSize: 20_000,
+        loadBatchSize: 20_000,
       }),
     ).toEqual({
       rowPaddingY: 12,
@@ -27,7 +27,7 @@ describe("ledger display settings", () => {
       fontFamily: "system",
       fontSizePx: 28,
       zoomPercent: 200,
-      pageSize: 10_000,
+      loadBatchSize: 10_000,
     });
     expect(normalizeLedgerDisplaySettings({ rowPaddingY: -4, fillEditors: true })).toEqual({
       rowPaddingY: 0,
@@ -36,7 +36,7 @@ describe("ledger display settings", () => {
       fontFamily: "system",
       fontSizePx: 14,
       zoomPercent: 100,
-      pageSize: 200,
+      loadBatchSize: 2_000,
     });
     expect(normalizeLedgerDisplaySettings({ rowPaddingY: -4, fillEditors: false })).toEqual({
       rowPaddingY: 0,
@@ -45,12 +45,12 @@ describe("ledger display settings", () => {
       fontFamily: "system",
       fontSizePx: 14,
       zoomPercent: 100,
-      pageSize: 200,
+      loadBatchSize: 2_000,
     });
     expect(normalizeLedgerDisplaySettings({ fontSizePx: 1, zoomPercent: 49, pageSize: 199 })).toMatchObject({
       fontSizePx: 8,
       zoomPercent: 50,
-      pageSize: 200,
+      loadBatchSize: 500,
     });
   });
 });

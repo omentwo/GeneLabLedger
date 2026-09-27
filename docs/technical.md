@@ -30,7 +30,7 @@ Electron 负责桌面边界和文件对话框，Vue 前端只通过 HTTP API 和
 |---|---|
 | 桌面容器 | Electron 43、electron-builder、NSIS |
 | 前端 | Vue 3、TypeScript、Vite 7、Pinia、Vue Router |
-| UI | Element Plus、Tailwind CSS 4（未启用 Preflight） |
+| UI | Element Plus 2.14.3（主台账使用 Table V2）、Tailwind CSS 4（未启用 Preflight） |
 | 后端 | Python 3.13、FastAPI、Uvicorn、Pydantic v2 |
 | 持久化 | SQLAlchemy 2、SQLite、Alembic |
 | Excel | `POST /api/exports/workbook` | XLSX 生成（导入已移除） |
@@ -114,14 +114,14 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 | 项目 | `GET/POST /api/projects`；`PATCH/DELETE /api/projects/{project_id}` | 项目列表、创建、编辑、删除 |
 | 表头 | `GET/POST /api/projects/{project_id}/fields`；`POST /api/projects/{project_id}/fields/batch`；`PATCH/DELETE /api/projects/fields/{field_id}`；`PUT /api/projects/fields/{field_id}/options`；`PUT /api/projects/{project_id}/fields/reorder` | 动态字段、批量表头及选项管理 |
 | 台账 | `GET/POST /api/records`；`GET/PATCH/DELETE /api/records/{record_id}`；`PUT /api/records/{record_id}/lock`；`PUT /api/records/report-status` | 记录查询、CRUD、相对目标行插入、锁定、报告标记 |
-| 动态查询与批量单元格 | `POST /api/records/query`；`POST /api/records/query/ids`；`POST /api/records/cell-batches/preview`；`POST /api/records/cell-batches/commit`；`POST /api/records/replace/preview`；`POST /api/records/replace/commit` | 动态字段分页筛选排序、跨页 ID、粘贴/填充与查找替换的预检查和原子提交 |
+| 动态查询与批量单元格 | `POST /api/records/query`；`POST /api/records/query/ids`；`POST /api/records/cell-batches/preview`；`POST /api/records/cell-batches/commit`；`POST /api/records/replace/preview`；`POST /api/records/replace/commit` | 动态字段分批筛选排序、完整结果 ID、粘贴/填充与查找替换的预检查和原子提交 |
 | 编号与批删 | `POST /api/records/experiment-numbers`；`POST /api/records/bulk-delete/preview`；`POST /api/records/bulk-delete/execute` | 实验编号原子回写、预览/执行批量删除 |
 | 报告 | `GET/POST /api/report-templates`；`POST /api/report-templates/{template_id}/versions`；`PUT /api/report-template-versions/{version_id}/mappings`；`DELETE /api/report-templates/{template_id}`；`GET /api/printers`；`GET /api/print-engines`；`POST /api/reports/print` | 模板版本、映射、打印机和直接打印；前端默认按台账列表倒序提交所选记录，后端保持请求顺序逐份打印 |
 | Excel | `POST /api/exports/workbook` | XLSX 生成（导入已移除） |
 | 自动导出 | `GET /api/auto-export/config`；`GET/POST /api/auto-export/tasks`；`PUT/DELETE /api/auto-export/tasks/{task_id}`；`POST /api/auto-export/tasks/{task_id}/run`；`GET /api/auto-export/tasks/{task_id}/runs`；`POST /api/auto-export/validate-cron` | 任务配置、立即执行、历史查询、Cron 校验 |
 | 数据库备份 | `GET/PUT /api/database-backups/settings`；`GET /api/database-backups/status`；`GET /api/database-backups`；`POST /api/database-backups/run`；`POST /api/database-backups/restore` | 自动备份设置、状态与历史、立即备份、重启恢复 |
 
-兼容记录列表支持项目、状态、实验日期、报告状态、关键字、`include_locked` 和 `limit/offset`。主台账使用复杂查询接口，每页记录数可在 200–10,000 条之间设置，并支持动态字段筛选、排序、锁定记录可见性和按当前排序返回的完整 ID 集合；台账、实验编排、快速录入和报告候选列表均传 `include_locked=false`，统计和导出保持包含锁定记录。未指定字段排序时按项目内 `position` 返回；创建请求可用 `insert_before_record_id` 或 `insert_after_record_id` 指定相对插入位置，其他新增路径追加到末尾。新增记录保存后，主台账根据完整 ID 顺序定位真实页码并滚动到该记录。
+兼容记录列表支持项目、状态、实验日期、报告状态、关键字、`include_locked` 和 `limit/offset`。主台账使用复杂查询接口，前端按 500–10,000 条的可配置批次循环读取当前查询的全部结果，再交给 Element Plus Table V2 做固定行高虚拟渲染；界面不暴露页码。查询仍支持动态字段筛选、排序、锁定记录可见性和按当前排序返回的完整 ID 集合。台账、实验编排、快速录入和报告候选列表均传 `include_locked=false`，统计和导出保持包含锁定记录。未指定字段排序时按项目内 `position` 返回；创建请求可用 `insert_before_record_id` 或 `insert_after_record_id` 指定相对插入位置，其他新增路径追加到末尾。新增记录保存后，主台账按 UUID 在完整结果中定位并通过虚拟表格滚动到该行。
 
 ## 6. 文件处理与业务服务
 

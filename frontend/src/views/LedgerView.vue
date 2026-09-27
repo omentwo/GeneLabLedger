@@ -19,7 +19,13 @@ import {
   Redo2,
   Check,
 } from "@lucide/vue";
-import { ElMessage, ElMessageBox, type TableColumnCtx } from "element-plus";
+import {
+  ElMessage,
+  ElMessageBox,
+  TableV2FixedDir,
+  type Column,
+  type TableV2Instance,
+} from "element-plus";
 import {
   computed,
   nextTick,
@@ -27,6 +33,7 @@ import {
   onMounted,
   reactive,
   ref,
+  shallowRef,
   watch,
   type CSSProperties,
 } from "vue";
@@ -167,16 +174,19 @@ import {
   LedgerRecordCache,
   ledgerRecordQueryKey,
 } from "@/utils/ledgerRecordCache";
-import { clampLedgerPage, ledgerPageForRecord } from "@/utils/ledgerPagination";
 import {
   readLastLedgerProjectId,
   rememberLastLedgerProjectId,
   resolveInitialLedgerProjectId,
 } from "@/utils/ledgerProjectPreference";
 import {
+  applyRecordSelectionRange,
   applyVisibleRecordSelection,
+  normalizeRecordSelectionRange,
+  recordSelectionRangeContains,
   recordMatchesSelectionScope,
   type RecordSelectionAction,
+  type RecordSelectionRange,
   type RecordSelectionScope,
 } from "@/utils/ledgerRecordSelection";
 import { exportWorkbook } from "@/utils/workbook";
@@ -197,14 +207,7 @@ const ledgerDisplaySettings = ref<LedgerDisplaySettings>({
 });
 const ledgerTableCardRef = ref<HTMLElement | null>(null);
 const projectStripRef = ref<HTMLElement | null>(null);
-const tableRef = ref<{
-  clearSelection: () => void;
-  doLayout: () => void;
-  setScrollLeft?: (left: number) => void;
-  setScrollTop?: (top: number) => void;
-  toggleAllSelection: () => void;
-  toggleRowSelection: (row: LedgerRow, selected?: boolean) => void;
-} | null>(null);
+const tableRef = ref<TableV2Instance | null>(null);
 type AutosizeTextareaInstance = { resizeTextarea: () => void };
 const autosizeTextareaRefs = new Map<string, AutosizeTextareaInstance>();
 type GridCellPosition = { rowIndex: number; columnIndex: number };
@@ -247,6 +250,26 @@ type GridFillDragState = {
   tableElement: HTMLElement;
   finishPromise: Promise<boolean>;
 };
+type RecordSelectionDragPreview = {
+  range: RecordSelectionRange;
+  selected: boolean;
+  initialSelectedIds: ReadonlySet<string>;
+};
+type RecordSelectionDragState = {
+  pointerId: number;
+  anchorIndex: number;
+  focusIndex: number;
+  startX: number;
+  startY: number;
+  lastX: number;
+  lastY: number;
+  dragging: boolean;
+  selected: boolean;
+  initialSelectedIds: Set<string>;
+  tableElement: HTMLElement;
+  lastAppliedIndex: number | null;
+  verticalScrollDirection: GridAutoScrollDirection;
+};
 const activeGridCell = ref<GridCellPosition | null>(null);
 const gridCellRange = ref<GridCellRange | null>(null);
 const selectedGridCellKeys = ref<Set<string>>(new Set());
@@ -270,32 +293,16 @@ const gridFillPreviewValues = ref(new Map<string, string>());
 const gridFillPreviewSummary = ref("");
 const gridFillPreviewPointer = reactive({ left: 0, top: 0 });
 let suppressGridFocusReset = false;
-type SelectionRowInfo = {
-  row: LedgerRow;
-  index: number;
-  element: HTMLTableRowElement;
-};
-type SelectionDragRange = { start: number; end: number };
-type SelectionDragState = {
-  pointerId: number;
-  anchorIndex: number;
-  currentIndex: number;
-  lastRange: SelectionDragRange | null;
-  dragging: boolean;
-  mode: boolean;
-  initialSelectionIds: Set<string>;
-  startX: number;
-  startY: number;
-  lastX: number;
-  lastY: number;
-  tableElement: HTMLElement;
-  scrollDirection: -1 | 0 | 1;
-};
-const selectionDragging = ref(false);
-let selectionDragState: SelectionDragState | null = null;
-let selectionAutoScrollTimer: number | null = null;
-let suppressSelectionClick = false;
-const selectionDragThreshold = 10;
+const pointerDragThreshold = 10;
+const recordSelectionDragging = ref(false);
+const recordSelectionDragPreview = shallowRef<RecordSelectionDragPreview | null>(null);
+let recordSelectionDragState: RecordSelectionDragState | null = null;
+let recordSelectionDragFrame: number | null = null;
+let pendingRecordSelectionIndex: number | null = null;
+let recordSelectionAutoScrollFrame: number | null = null;
+let recordSelectionAutoScrollTimestamp: number | null = null;
+let recordSelectionAnchorId: string | null = null;
+let suppressRecordSelectionClick = false;
 let bottomScrollTimers: number[] = [];
 const loading = ref(false);
 const historyReplayLoading = ref(false);
@@ -524,27 +531,18 @@ const highlightPalette = [
 ];
 const persistedValues = new Map<string, string>();
 const insertedGroupRegistry: LedgerInsertedGroupRegistry = new Map();
+const LEDGER_RECORD_CACHE_MAX_RECORDS = 10_000;
 let draftSequence = 0;
 let loadSequence = 0;
 let recordsAbortController: AbortController | null = null;
-const ledgerRecordCache = new LedgerRecordCache();
-type PrefetchedRecordPage = {
-  result: Awaited<ReturnType<typeof queryRecords>>;
-  generation: number;
-};
-const recordPrefetchInFlight = new Map<
-  string,
-  Promise<PrefetchedRecordPage>
->();
+const ledgerRecordCache = new LedgerRecordCache({ maxEntries: 2 });
 const projectRecordCacheGenerations = new Map<string, number>();
-let projectPrefetchTimer: number | null = null;
-let adjacentProjectPrefetchTimer: number | null = null;
 let ledgerDisposed = false;
 let removeQuickEntryChangedListener: (() => void) | undefined;
 let quickEntryRefreshPromise: Promise<void> = Promise.resolve();
-const currentPage = ref(1);
-const pageSize = computed(() => ledgerDisplaySettings.value.pageSize);
+const loadBatchSize = computed(() => ledgerDisplaySettings.value.loadBatchSize);
 const recordTotal = ref(0);
+const loadedRecordCount = ref(0);
 const selectedRecordIds = ref(new Set<string>());
 const selectedRecordCache = new Map<string, ProjectRecord>();
 const recordSelectionScope = ref<RecordSelectionScope>("all");
@@ -662,6 +660,63 @@ const fields = computed(() =>
     .slice()
     .sort((left, right) => left.sort_order - right.sort_order),
 );
+type LedgerVirtualColumnKind = "selection" | "lock" | "field";
+type LedgerVirtualColumn = Column<unknown> & {
+  kind: LedgerVirtualColumnKind;
+  fieldId?: string;
+  fieldIndex?: number;
+};
+const ledgerZoomScale = computed(() => ledgerDisplaySettings.value.zoomPercent / 100);
+const ledgerBaseEditorHeight = computed(() => Math.round(
+  (Math.max(32, ledgerDisplaySettings.value.fontSizePx + 18)
+    * ledgerDisplaySettings.value.editorHeightPercent) / 100,
+));
+const ledgerVirtualRowHeight = computed(() => Math.max(
+  34,
+  Math.round(
+    (ledgerBaseEditorHeight.value + ledgerDisplaySettings.value.rowPaddingY)
+      * ledgerZoomScale.value,
+  ),
+));
+const ledgerVirtualHeaderHeight = computed(() => Math.max(
+  36,
+  Math.round(44 * ledgerZoomScale.value),
+));
+const showLockColumn = computed(
+  () => showLockedRecords.value && records.value.some((record) => record.locked),
+);
+const ledgerVirtualColumns = computed<LedgerVirtualColumn[]>(() => {
+  const scale = ledgerZoomScale.value;
+  return [
+    {
+      key: "__selection",
+      dataKey: "id",
+      kind: "selection",
+      width: Math.max(44, Math.round(55 * scale)),
+      fixed: TableV2FixedDir.LEFT,
+      align: "center",
+    },
+    ...(showLockColumn.value
+      ? [{
+          key: "__lock",
+          kind: "lock" as const,
+          width: Math.max(36, Math.round(42 * scale)),
+          fixed: TableV2FixedDir.LEFT,
+          align: "center" as const,
+        }]
+      : []),
+    ...fields.value.map((field, fieldIndex) => ({
+      key: field.id,
+      dataKey: field.id,
+      kind: "field" as const,
+      fieldId: field.id,
+      fieldIndex,
+      title: field.label,
+      width: Math.max(48, Math.round(field.width * scale)),
+      align: "center" as const,
+    })),
+  ];
+});
 const selectedCount = computed(() => selectedRecordIds.value.size);
 const baseTableRows = computed<LedgerRow[]>(() => [...records.value, ...draftRows.value]);
 const tableRows = computed<LedgerRow[]>(() =>
@@ -720,17 +775,18 @@ const ledgerFontOption = computed(
 );
 const globalSearchActive = computed(() => appliedSearch.scope !== "current");
 const ledgerTableStyle = computed<CSSProperties>(
-  () =>
-    ({
-      "--ledger-row-gap": `${ledgerDisplaySettings.value.rowPaddingY}px`,
+  () => {
+    const scale = ledgerZoomScale.value;
+    return ({
+      "--ledger-row-gap": `${Math.round(ledgerDisplaySettings.value.rowPaddingY * scale)}px`,
       "--ledger-editor-width": `${ledgerDisplaySettings.value.editorWidthPercent}%`,
-      "--ledger-editor-height": `${Math.round((Math.max(32, ledgerDisplaySettings.value.fontSizePx + 18) * ledgerDisplaySettings.value.editorHeightPercent) / 100)}px`,
-      "--ledger-selection-min-height": `${Math.max(32, ledgerDisplaySettings.value.fontSizePx + 18)}px`,
-      "--ledger-cell-padding-x": `${ledgerCellHorizontalPadding(ledgerDisplaySettings.value.fontSizePx)}px`,
+      "--ledger-editor-height": `${Math.max(28, Math.round(ledgerBaseEditorHeight.value * scale))}px`,
+      "--ledger-selection-min-height": `${ledgerVirtualRowHeight.value}px`,
+      "--ledger-cell-padding-x": `${Math.max(2, Math.round(ledgerCellHorizontalPadding(ledgerDisplaySettings.value.fontSizePx) * scale))}px`,
       "--ledger-font-family": ledgerFontOption.value?.css ?? "system-ui, sans-serif",
-      "--ledger-font-size": `${ledgerDisplaySettings.value.fontSizePx}px`,
-      "--ledger-zoom": String(ledgerDisplaySettings.value.zoomPercent / 100),
-    }) as CSSProperties,
+      "--ledger-font-size": `${Math.max(8, Math.round(ledgerDisplaySettings.value.fontSizePx * scale))}px`,
+    }) as CSSProperties;
+  },
 );
 function isDraft(record: LedgerRow): boolean {
   return record._draft === true;
@@ -786,7 +842,8 @@ function restoreGridIdentity(identity: { rowId: string; fieldId: string } | null
 }
 
 function clearRecordSelection(): void {
-  tableRef.value?.clearSelection();
+  stopRecordSelectionDrag(false);
+  recordSelectionAnchorId = null;
   selectedRecords.value = [];
   selectedRecordIds.value = new Set();
   selectedRecordCache.clear();
@@ -889,7 +946,6 @@ function setLedgerSort(field: FieldDefinition, order: "ascending" | "descending"
   ledgerSort.value = order ? { fieldId: field.id, order } : null;
   void persistLedgerProjectLayout();
   closeColumnTools();
-  currentPage.value = 1;
   if (!draftRows.value.length) {
     void loadRecords(activeProjectId.value, { preserveHistory: true });
     return;
@@ -933,7 +989,6 @@ function applyColumnFilter(): void {
   void persistLedgerProjectLayout();
   clearSelectionsAfterLedgerViewChange();
   closeColumnTools();
-  currentPage.value = 1;
   void loadRecords(activeProjectId.value, { preserveHistory: true });
 }
 
@@ -947,15 +1002,13 @@ function clearColumnFilter(): void {
   void persistLedgerProjectLayout();
   clearSelectionsAfterLedgerViewChange();
   closeColumnTools();
-  currentPage.value = 1;
   void loadRecords(activeProjectId.value, { preserveHistory: true });
 }
 
 function gridCellFromElement(element: EventTarget | null): GridCellPosition | null {
   if (!(element instanceof Element)) return null;
   const editor = element.closest<HTMLElement>("[data-row-id][data-field-index]");
-  const cell = element.closest("td.ledger-editor-column");
-  if (!editor || !cell) return null;
+  if (!editor) return null;
   const rowId = editor.dataset.rowId;
   const columnIndex = Number(editor.dataset.fieldIndex);
   if (!rowId || !Number.isInteger(columnIndex) || columnIndex < 0) return null;
@@ -1112,9 +1165,9 @@ function selectGridCell(position: GridCellPosition): void {
   );
 }
 
-function fieldIndexForTableColumn(column: TableColumnCtx<LedgerRow>): number {
-  if (!column.columnKey || column.type === "selection") return -1;
-  return fields.value.findIndex((field) => field.id === column.columnKey);
+function virtualColumnField(column: LedgerVirtualColumn): FieldDefinition | undefined {
+  if (column.kind !== "field" || !column.fieldId) return undefined;
+  return fields.value.find((field) => field.id === column.fieldId);
 }
 
 function gridColumnPositions(fieldIndex: number): GridCellPosition[] {
@@ -1140,32 +1193,10 @@ const gridHeaderSelectionState = computed(() => {
   return states;
 });
 
-function gridHeaderCellClassName({
-  column,
-}: {
-  row: LedgerRow;
-  rowIndex: number;
-  column: TableColumnCtx<LedgerRow>;
-  columnIndex: number;
-}): string {
-  const state = column.columnKey
-    ? gridHeaderSelectionState.value.get(column.columnKey)
-    : undefined;
-  if (state === "selected") return "grid-header-selected";
-  if (state === "partial") return "grid-header-partial";
-  return "";
-}
-
 async function handleLedgerHeaderClick(
-  column: TableColumnCtx<LedgerRow>,
+  fieldIndex: number,
   event: PointerEvent,
 ): Promise<void> {
-  const header = event.target instanceof Element ? event.target.closest("th") : null;
-  // Element Plus marks a header with `noclick` while its resize handle is being
-  // dragged. Do not turn a column-width adjustment into a grid selection.
-  if (header?.classList.contains("noclick")) return;
-
-  const fieldIndex = fieldIndexForTableColumn(column);
   if (fieldIndex < 0 || !tableRows.value.length) return;
 
   if (editingGridCell.value) {
@@ -1224,8 +1255,7 @@ async function handleLedgerHeaderClick(
   void focusGridCell(active);
 }
 
-const gridCellClassName = computed(() => {
-  const currentRowIndexes = tableRowIndexById.value;
+function gridCellClassName(row: LedgerRow, rowIndex: number, fieldIndex: number): string {
   const currentFields = fields.value;
   const active = activeGridCell.value;
   const editing = editingGridCell.value;
@@ -1235,54 +1265,43 @@ const gridCellClassName = computed(() => {
     : null;
   const fillPreview = gridFillPreviewRange.value;
   const fillSource = gridFillPreviewSource.value;
-  return ({ row, columnIndex }: { row: LedgerRow; columnIndex: number }): string => {
-    const fieldIndex = columnIndex - 2;
-    if (fieldIndex < 0 || fieldIndex >= currentFields.length) return "";
-    const rowIndex = currentRowIndexes.get(row.id) ?? -1;
-    if (rowIndex < 0) return "";
-    const classes: string[] = [];
-    const field = currentFields[fieldIndex];
-    if (field && row.cell_highlight_colors?.[field.id]) {
-      classes.push("cell-highlighted");
-    }
-    const selectedByRange = Boolean(
-      selectedRange &&
-      rowIndex >= selectedRange.rowStart &&
-      rowIndex <= selectedRange.rowEnd &&
-      fieldIndex >= selectedRange.columnStart &&
-      fieldIndex <= selectedRange.columnEnd,
-    );
-    if (
-      field &&
-      (selectedRange
-        ? selectedByRange
-        : selectedKeys.has(`${row.id}${GRID_CELL_KEY_SEPARATOR}${field.id}`))
-    ) {
-      classes.push("grid-cell-selected");
-    }
-    if (active?.rowIndex === rowIndex && active?.columnIndex === fieldIndex) {
-      classes.push("grid-cell-active");
-    }
-    if (editing?.rowIndex === rowIndex && editing?.columnIndex === fieldIndex) {
-      classes.push("grid-cell-editing");
-    }
-    if (
-      fillPreview &&
-      rowIndex >= fillPreview.rowStart &&
-      rowIndex <= fillPreview.rowEnd &&
-      fieldIndex >= fillPreview.columnStart &&
-      fieldIndex <= fillPreview.columnEnd &&
-      (!fillSource ||
-        rowIndex < fillSource.rowStart ||
-        rowIndex > fillSource.rowEnd ||
-        fieldIndex < fillSource.columnStart ||
-        fieldIndex > fillSource.columnEnd)
-    ) {
-      classes.push("grid-cell-fill-preview");
-    }
-    return classes.join(" ");
-  };
-});
+  if (fieldIndex < 0 || fieldIndex >= currentFields.length) return "";
+  const classes: string[] = [];
+  const field = currentFields[fieldIndex];
+  if (field && row.cell_highlight_colors?.[field.id]) classes.push("cell-highlighted");
+  const selectedByRange = Boolean(
+    selectedRange
+    && rowIndex >= selectedRange.rowStart
+    && rowIndex <= selectedRange.rowEnd
+    && fieldIndex >= selectedRange.columnStart
+    && fieldIndex <= selectedRange.columnEnd
+  );
+  if (
+    field
+    && (selectedRange
+      ? selectedByRange
+      : selectedKeys.has(`${row.id}${GRID_CELL_KEY_SEPARATOR}${field.id}`))
+  ) classes.push("grid-cell-selected");
+  if (active?.rowIndex === rowIndex && active?.columnIndex === fieldIndex) {
+    classes.push("grid-cell-active");
+  }
+  if (editing?.rowIndex === rowIndex && editing?.columnIndex === fieldIndex) {
+    classes.push("grid-cell-editing");
+  }
+  if (
+    fillPreview
+    && rowIndex >= fillPreview.rowStart
+    && rowIndex <= fillPreview.rowEnd
+    && fieldIndex >= fillPreview.columnStart
+    && fieldIndex <= fillPreview.columnEnd
+    && (!fillSource
+      || rowIndex < fillSource.rowStart
+      || rowIndex > fillSource.rowEnd
+      || fieldIndex < fillSource.columnStart
+      || fieldIndex > fillSource.columnEnd)
+  ) classes.push("grid-cell-fill-preview");
+  return classes.join(" ");
+}
 
 function isGridFillHandleCell(rowIndex: number, columnIndex: number): boolean {
   const range = gridCellRange.value;
@@ -1371,6 +1390,48 @@ function gridCellData(position: GridCellPosition): {
   return record && field ? { record, field } : null;
 }
 
+function spreadsheetColumnLabel(columnIndex: number): string {
+  let value = columnIndex + 1;
+  let label = "";
+  while (value > 0) {
+    value -= 1;
+    label = String.fromCharCode(65 + (value % 26)) + label;
+    value = Math.floor(value / 26);
+  }
+  return label;
+}
+
+const ledgerCellEditorPosition = computed(
+  () => editingGridCell.value ?? activeGridCell.value,
+);
+const ledgerCellEditorCell = computed(() => {
+  const position = ledgerCellEditorPosition.value;
+  return position ? gridCellData(position) : null;
+});
+const ledgerCellEditorAddress = computed(() => {
+  const position = ledgerCellEditorPosition.value;
+  return position
+    ? `${spreadsheetColumnLabel(position.columnIndex)}${position.rowIndex + 1}`
+    : "—";
+});
+const ledgerCellEditorValue = computed(() => {
+  const data = ledgerCellEditorCell.value;
+  return data ? valueFor(data.record, data.field) : "";
+});
+const ledgerCellEditorDisabled = computed(
+  () => !ledgerCellEditorCell.value || loading.value,
+);
+const ledgerCellEditorReadonly = computed(
+  () => Boolean(ledgerCellEditorCell.value?.record.locked),
+);
+const ledgerCellEditorTitle = computed(() => {
+  const data = ledgerCellEditorCell.value;
+  if (!data) return "尚未选择台账单元格";
+  return `${ledgerCellEditorAddress.value} · ${data.field.label}${
+    data.record.locked ? "（记录已锁定，只读）" : ""
+  }`;
+});
+
 async function finishGridCellEdit(commit = true, focusAfter = true): Promise<boolean> {
   if (gridCellEditFinishPromise) return gridCellEditFinishPromise;
   const editing = editingGridCell.value;
@@ -1423,17 +1484,23 @@ async function finishGridCellEdit(commit = true, focusAfter = true): Promise<boo
   }
 }
 
-function enterGridCellEdit(position: GridCellPosition, replaceValue?: string): void {
+function enterGridCellEdit(
+  position: GridCellPosition,
+  replaceValue?: string,
+  focusEditor = true,
+): void {
   const nextPosition = clampGridCell(position);
   const data = gridCellData(nextPosition);
   if (!data || data.record.locked) return;
   if (isGridCellEditing(nextPosition)) {
-    void focusGridCell(nextPosition);
+    if (focusEditor) void focusGridCell(nextPosition);
     return;
   }
   if (editingGridCell.value) {
     void finishGridCellEdit(true, false).then((saved) => {
-      if (saved && !editingGridCell.value) enterGridCellEdit(nextPosition, replaceValue);
+      if (saved && !editingGridCell.value) {
+        enterGridCellEdit(nextPosition, replaceValue, focusEditor);
+      }
     });
     return;
   }
@@ -1448,17 +1515,67 @@ function enterGridCellEdit(position: GridCellPosition, replaceValue?: string): v
     value: valueFor(data.record, data.field),
   };
   if (replaceValue !== undefined) setValue(data.record, data.field, replaceValue);
-  void focusGridCell(nextPosition);
+  if (focusEditor) void focusGridCell(nextPosition);
+}
+
+function beginLedgerCellEditorEdit(): void {
+  const position = ledgerCellEditorPosition.value;
+  const data = position ? gridCellData(position) : null;
+  if (!position || !data || data.record.locked || loading.value) return;
+  enterGridCellEdit(position, undefined, false);
+}
+
+function updateLedgerCellEditorValue(value: string): void {
+  const position = ledgerCellEditorPosition.value;
+  const data = position ? gridCellData(position) : null;
+  if (!position || !data || data.record.locked || loading.value) return;
+  if (!isGridCellEditing(position)) enterGridCellEdit(position, undefined, false);
+  if (!isGridCellEditing(position)) return;
+  setValue(data.record, data.field, value);
+}
+
+function handleLedgerCellEditorBlur(): void {
+  if (editingGridCell.value) void finishGridCellEdit(true, false);
+}
+
+function handleLedgerCellEditorKeydown(event: KeyboardEvent): void {
+  if (event.isComposing || !editingGridCell.value) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    void finishGridCellEdit(false);
+    return;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    event.stopPropagation();
+    void finishGridCellEdit(true);
+    return;
+  }
+  if (event.key === "Tab") {
+    const editing = editingGridCell.value;
+    const nextCell = moveGridCellByTab(editing, event.shiftKey);
+    event.preventDefault();
+    event.stopPropagation();
+    void finishGridCellEdit(true, false).then((saved) => {
+      if (!saved) return;
+      selectGridCell(nextCell);
+      void focusGridCell(nextCell);
+    });
+  }
 }
 
 function handleGridFocusOut(event: FocusEvent): void {
   const editing = editingGridCell.value;
   if (!editing) return;
+  const relatedTarget = event.relatedTarget instanceof Element ? event.relatedTarget : null;
+  if (relatedTarget?.closest(".ledger-cell-editor-bar")) return;
   const relatedCell = gridCellFromElement(event.relatedTarget);
   if (sameGridCell(relatedCell, editing)) return;
   window.setTimeout(() => {
     if (!isGridCellEditing(editing)) return;
     const activeElement = document.activeElement;
+    if (activeElement instanceof Element && activeElement.closest(".ledger-cell-editor-bar")) return;
     if (sameGridCell(gridCellFromElement(activeElement), editing)) return;
     const dropdown = document.querySelector<HTMLElement>(".el-select-dropdown");
     if (dropdown?.contains(activeElement)) return;
@@ -1532,11 +1649,290 @@ function gridCellAtPoint(x: number, y: number): GridCellPosition | null {
 }
 
 function gridTableBodyScrollElement(tableElement: HTMLElement): HTMLElement | null {
-  return (
-    tableElement.querySelector<HTMLElement>(
-      ".el-table__body-wrapper .el-scrollbar__wrap",
-    ) ?? tableElement.querySelector<HTMLElement>(".el-table__body-wrapper")
+  return tableElement.querySelector<HTMLElement>(
+    ".el-table-v2__main .el-table-v2__body",
   );
+}
+
+function recordSelectionRowFromElement(element: EventTarget | null): {
+  row: LedgerRow;
+  index: number;
+} | null {
+  if (!(element instanceof Element)) return null;
+  const control = element.closest<HTMLElement>(
+    ".ledger-v2-selection-control[data-row-id]",
+  );
+  const rowId = control?.dataset.rowId;
+  if (!rowId) return null;
+  const index = tableRowIndexById.value.get(rowId) ?? -1;
+  const row = tableRows.value[index];
+  return index >= 0 && row?.id === rowId ? { row, index } : null;
+}
+
+function recordSelectionIndexForScrollTop(
+  state: RecordSelectionDragState,
+  scrollTop: number,
+): number | null {
+  const body = gridTableBodyScrollElement(state.tableElement);
+  const rect = body?.getBoundingClientRect();
+  if (!rect || rect.height <= 0 || !tableRows.value.length) return null;
+  const tableRect = state.tableElement.getBoundingClientRect();
+  if (state.lastX < tableRect.left || state.lastX > tableRect.right) return null;
+  const pointerY = Math.max(rect.top + 1, Math.min(rect.bottom - 1, state.lastY));
+  const index = Math.floor(
+    (scrollTop + pointerY - rect.top) / ledgerVirtualRowHeight.value,
+  );
+  return Math.max(0, Math.min(tableRows.value.length - 1, index));
+}
+
+function recordSelectionIndexAtDragPoint(state: RecordSelectionDragState): number | null {
+  const element = document.elementFromPoint?.(state.lastX, state.lastY) ?? null;
+  const rowInfo = recordSelectionRowFromElement(element);
+  if (rowInfo) return rowInfo.index;
+  const body = gridTableBodyScrollElement(state.tableElement);
+  return recordSelectionIndexForScrollTop(state, body?.scrollTop ?? 0);
+}
+
+function clearRecordSelectionDragFrame(): void {
+  if (recordSelectionDragFrame !== null) {
+    window.cancelAnimationFrame(recordSelectionDragFrame);
+  }
+  recordSelectionDragFrame = null;
+  pendingRecordSelectionIndex = null;
+}
+
+function applyRecordSelectionDragIndex(index: number): void {
+  const state = recordSelectionDragState;
+  if (!state || index === state.lastAppliedIndex) return;
+  const clampedIndex = Math.max(0, Math.min(tableRows.value.length - 1, index));
+  state.focusIndex = clampedIndex;
+  state.lastAppliedIndex = clampedIndex;
+  recordSelectionDragPreview.value = {
+    range: normalizeRecordSelectionRange(state.anchorIndex, clampedIndex),
+    selected: state.selected,
+    initialSelectedIds: state.initialSelectedIds,
+  };
+}
+
+function flushRecordSelectionDragFrame(): void {
+  if (recordSelectionDragFrame !== null) {
+    window.cancelAnimationFrame(recordSelectionDragFrame);
+  }
+  recordSelectionDragFrame = null;
+  const index = pendingRecordSelectionIndex;
+  pendingRecordSelectionIndex = null;
+  if (index !== null) applyRecordSelectionDragIndex(index);
+}
+
+function scheduleRecordSelectionDragIndex(index: number): void {
+  pendingRecordSelectionIndex = index;
+  if (recordSelectionDragFrame !== null) return;
+  recordSelectionDragFrame = window.requestAnimationFrame(() => {
+    recordSelectionDragFrame = null;
+    const nextIndex = pendingRecordSelectionIndex;
+    pendingRecordSelectionIndex = null;
+    if (nextIndex !== null) applyRecordSelectionDragIndex(nextIndex);
+  });
+}
+
+function clearRecordSelectionAutoScroll(): void {
+  if (recordSelectionAutoScrollFrame !== null) {
+    window.cancelAnimationFrame(recordSelectionAutoScrollFrame);
+  }
+  recordSelectionAutoScrollFrame = null;
+  recordSelectionAutoScrollTimestamp = null;
+}
+
+function updateRecordSelectionAutoScroll(event: PointerEvent): void {
+  const state = recordSelectionDragState;
+  if (!state?.dragging) return;
+  const body = gridTableBodyScrollElement(state.tableElement);
+  const rect = body?.getBoundingClientRect() ?? state.tableElement.getBoundingClientRect();
+  const tableRect = state.tableElement.getBoundingClientRect();
+  const edgeSize = 42;
+  const direction: GridAutoScrollDirection =
+    event.clientX < tableRect.left || event.clientX > tableRect.right
+      ? 0
+      : event.clientY < rect.top + edgeSize
+        ? -1
+        : event.clientY > rect.bottom - edgeSize
+          ? 1
+          : 0;
+  if (state.verticalScrollDirection === direction) return;
+  state.verticalScrollDirection = direction;
+  clearRecordSelectionAutoScroll();
+  if (direction === 0) return;
+
+  const scrollFrame = (timestamp: number): void => {
+    recordSelectionAutoScrollFrame = null;
+    const currentState = recordSelectionDragState;
+    if (!currentState?.dragging || currentState.verticalScrollDirection === 0) {
+      clearRecordSelectionAutoScroll();
+      return;
+    }
+    const elapsed = recordSelectionAutoScrollTimestamp === null
+      ? 1000 / 60
+      : Math.min(50, timestamp - recordSelectionAutoScrollTimestamp);
+    recordSelectionAutoScrollTimestamp = timestamp;
+    const currentBody = gridTableBodyScrollElement(currentState.tableElement);
+    const currentTop = currentBody?.scrollTop ?? 0;
+    const maxTop = currentBody
+      ? Math.max(0, currentBody.scrollHeight - currentBody.clientHeight)
+      : 0;
+    const nextTop = nextGridScrollOffset(
+      currentTop,
+      maxTop,
+      currentState.verticalScrollDirection,
+      480 * elapsed / 1000,
+    );
+    if (nextTop === currentTop) {
+      currentState.verticalScrollDirection = 0;
+      clearRecordSelectionAutoScroll();
+      return;
+    }
+    if (tableRef.value) tableRef.value.scrollToTop(nextTop);
+    else if (currentBody) currentBody.scrollTop = nextTop;
+    const index = recordSelectionIndexForScrollTop(currentState, nextTop);
+    if (index !== null) applyRecordSelectionDragIndex(index);
+    recordSelectionAutoScrollFrame = window.requestAnimationFrame(scrollFrame);
+  };
+  recordSelectionAutoScrollFrame = window.requestAnimationFrame(scrollFrame);
+}
+
+function stopRecordSelectionDrag(resetClickSuppression = true): void {
+  clearRecordSelectionAutoScroll();
+  clearRecordSelectionDragFrame();
+  document.removeEventListener("pointermove", handleRecordSelectionPointerMove);
+  document.removeEventListener("pointerup", handleRecordSelectionPointerUp, true);
+  document.removeEventListener("pointercancel", handleRecordSelectionPointerCancel, true);
+  recordSelectionDragState = null;
+  recordSelectionDragPreview.value = null;
+  recordSelectionDragging.value = false;
+  if (resetClickSuppression) {
+    window.setTimeout(() => {
+      suppressRecordSelectionClick = false;
+    }, 0);
+  }
+}
+
+function commitRecordSelectionDrag(): void {
+  const state = recordSelectionDragState;
+  if (!state?.dragging) return;
+  flushRecordSelectionDragFrame();
+  const next = applyRecordSelectionRange({
+    records: tableRows.value,
+    initialSelectedIds: state.initialSelectedIds,
+    startIndex: state.anchorIndex,
+    endIndex: state.focusIndex,
+    selected: state.selected,
+    isSelectable: recordRowSelectable,
+  });
+  commitRecordSelectionIds(next);
+}
+
+function handleRecordSelectionPointerDown(
+  event: PointerEvent,
+  row: LedgerRow,
+  renderedRowIndex: number,
+): void {
+  if (event.button !== 0 || event.isPrimary === false) return;
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target?.closest(".el-checkbox") || !recordRowSelectable(row)) return;
+  if (event.shiftKey) return;
+  const tableElement = target.closest<HTMLElement>(".el-table-v2");
+  if (!tableElement) return;
+  const rowIndex = tableRowIndexById.value.get(row.id) ?? renderedRowIndex;
+  if (rowIndex < 0) return;
+
+  stopRecordSelectionDrag(false);
+  suppressRecordSelectionClick = false;
+  recordSelectionAnchorId = row.id;
+  const initialSelectedIds = new Set(selectedRecordIds.value);
+  recordSelectionDragState = {
+    pointerId: event.pointerId,
+    anchorIndex: rowIndex,
+    focusIndex: rowIndex,
+    startX: event.clientX,
+    startY: event.clientY,
+    lastX: event.clientX,
+    lastY: event.clientY,
+    dragging: false,
+    selected: !initialSelectedIds.has(row.id),
+    initialSelectedIds,
+    tableElement,
+    lastAppliedIndex: null,
+    verticalScrollDirection: 0,
+  };
+  document.addEventListener("pointermove", handleRecordSelectionPointerMove, { passive: false });
+  document.addEventListener("pointerup", handleRecordSelectionPointerUp, true);
+  document.addEventListener("pointercancel", handleRecordSelectionPointerCancel, true);
+}
+
+function handleRecordSelectionPointerMove(event: PointerEvent): void {
+  const state = recordSelectionDragState;
+  if (!state || state.pointerId !== event.pointerId) return;
+  if ((event.buttons & 1) !== 1) {
+    commitRecordSelectionDrag();
+    stopRecordSelectionDrag();
+    return;
+  }
+  state.lastX = event.clientX;
+  state.lastY = event.clientY;
+  if (!state.dragging) {
+    if (Math.hypot(event.clientX - state.startX, event.clientY - state.startY)
+      < pointerDragThreshold) return;
+    state.dragging = true;
+    recordSelectionDragging.value = true;
+    suppressRecordSelectionClick = true;
+    applyRecordSelectionDragIndex(state.anchorIndex);
+  }
+  event.preventDefault();
+  const index = recordSelectionIndexAtDragPoint(state);
+  if (index !== null) scheduleRecordSelectionDragIndex(index);
+  updateRecordSelectionAutoScroll(event);
+}
+
+function handleRecordSelectionPointerUp(event: PointerEvent): void {
+  const state = recordSelectionDragState;
+  if (!state || state.pointerId !== event.pointerId) return;
+  if (state.dragging) {
+    event.preventDefault();
+    commitRecordSelectionDrag();
+    stopRecordSelectionDrag();
+    return;
+  }
+  stopRecordSelectionDrag(false);
+}
+
+function handleRecordSelectionPointerCancel(event: PointerEvent): void {
+  if (!recordSelectionDragState || recordSelectionDragState.pointerId !== event.pointerId) return;
+  stopRecordSelectionDrag();
+}
+
+function handleRecordSelectionClickCapture(event: MouseEvent): void {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target?.closest(".ledger-v2-selection-control[data-row-id] .el-checkbox")) return;
+  if (suppressRecordSelectionClick) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    suppressRecordSelectionClick = false;
+    return;
+  }
+  if (!event.shiftKey || !recordSelectionAnchorId) return;
+  const rowInfo = recordSelectionRowFromElement(target);
+  const anchorIndex = tableRowIndexById.value.get(recordSelectionAnchorId) ?? -1;
+  if (!rowInfo || anchorIndex < 0 || !recordRowSelectable(rowInfo.row)) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  const next = applyRecordSelectionRange({
+    records: tableRows.value,
+    initialSelectedIds: selectedRecordIds.value,
+    startIndex: anchorIndex,
+    endIndex: rowInfo.index,
+    selected: !selectedRecordIds.value.has(rowInfo.row.id),
+    isSelectable: recordRowSelectable,
+  });
+  commitRecordSelectionIds(next);
 }
 
 function clearGridCellAutoScroll(): void {
@@ -1617,11 +2013,11 @@ function updateGridCellAutoScroll(event: PointerEvent): void {
       return;
     }
     if (nextLeft !== currentLeft) {
-      if (tableRef.value?.setScrollLeft) tableRef.value.setScrollLeft(nextLeft);
+      if (tableRef.value) tableRef.value.scrollToLeft(nextLeft);
       else if (currentBody) currentBody.scrollLeft = nextLeft;
     }
     if (nextTop !== currentTop) {
-      if (tableRef.value?.setScrollTop) tableRef.value.setScrollTop(nextTop);
+      if (tableRef.value) tableRef.value.scrollToTop(nextTop);
       else if (currentBody) currentBody.scrollTop = nextTop;
     }
     const cell = gridCellAtDragPoint(currentState);
@@ -1684,7 +2080,7 @@ function handleGridPointerMove(event: PointerEvent): void {
   if (!state.dragging) {
     const movedX = event.clientX - state.startX;
     const movedY = event.clientY - state.startY;
-    if (Math.hypot(movedX, movedY) < selectionDragThreshold) return;
+    if (Math.hypot(movedX, movedY) < pointerDragThreshold) return;
     state.dragging = true;
     gridSelectionDragging.value = true;
     suppressGridClick = true;
@@ -1817,7 +2213,7 @@ function handleGridFillPointerDown(event: PointerEvent): void {
   const cell = gridCellFromElement(event.target);
   if (!cell || cell.rowIndex !== source.rowEnd || cell.columnIndex !== source.columnEnd) return;
   const tableElement =
-    event.target instanceof Element ? event.target.closest<HTMLElement>(".el-table") : null;
+    event.target instanceof Element ? event.target.closest<HTMLElement>(".el-table-v2") : null;
   if (!tableElement) return;
   const finishPromise = editingGridCell.value
     ? finishGridCellEdit(true, false)
@@ -1849,7 +2245,7 @@ function handleGridFillPointerMove(event: PointerEvent): void {
   state.lastX = event.clientX;
   state.lastY = event.clientY;
   if (!state.dragging) {
-    if (Math.hypot(event.clientX - state.startX, event.clientY - state.startY) < selectionDragThreshold) {
+    if (Math.hypot(event.clientX - state.startX, event.clientY - state.startY) < pointerDragThreshold) {
       return;
     }
     state.dragging = true;
@@ -1934,7 +2330,7 @@ function handleGridPointerDown(event: PointerEvent): void {
   if (!cell) return;
   if (isGridCellEditing(cell)) return;
   const tableElement =
-    event.target instanceof Element ? event.target.closest<HTMLElement>(".el-table") : null;
+    event.target instanceof Element ? event.target.closest<HTMLElement>(".el-table-v2") : null;
   if (!tableElement) return;
   if (editingGridCell.value) void finishGridCellEdit(true, false);
 
@@ -2383,8 +2779,10 @@ function handleLedgerContextMenu(event: MouseEvent): void {
   if (target?.closest(".ledger-column-tools-popover, .ledger-column-tools-trigger")) return;
   const cell = gridCellFromElement(event.target);
   if (cell && isGridCellEditing(cell)) return;
-  const rowInfo = selectionRowFromElement(target);
-  const row = cell ? tableRows.value[cell.rowIndex] : rowInfo?.row;
+  const rowId = target?.closest<HTMLElement>("[data-row-id]")?.dataset.rowId;
+  const row = cell
+    ? tableRows.value[cell.rowIndex]
+    : tableRows.value.find((item) => item.id === rowId);
   if (!row || isDraft(row)) return;
 
   event.preventDefault();
@@ -2617,216 +3015,6 @@ async function clearGridCellRange(): Promise<void> {
   if (skippedRequired) ElMessage.info(`已跳过 ${skippedRequired} 个必填状态单元格`);
 }
 
-function selectionRowFromElement(element: Element | null): SelectionRowInfo | null {
-  const candidate = element?.closest("tr.el-table__row");
-  if (!candidate || candidate.tagName !== "TR") return null;
-  const rowElement = candidate as HTMLTableRowElement;
-  const body = rowElement.parentElement;
-  if (!body || body.tagName !== "TBODY") return null;
-
-  const rows = Array.from(body.children).filter(
-    (child): child is HTMLTableRowElement =>
-      child.tagName === "TR" && child.classList.contains("el-table__row"),
-  );
-  const index = rows.indexOf(rowElement);
-  const row = index >= 0 ? tableRows.value[index] : undefined;
-  if (!row) return null;
-  return { row, index, element: rowElement };
-}
-
-function selectionRowAtPoint(x: number, y: number): SelectionRowInfo | null {
-  const element = document.elementFromPoint?.(x, y) ?? null;
-  return selectionRowFromElement(element);
-}
-
-function selectionRange(start: number, end: number): SelectionDragRange {
-  return start <= end ? { start, end } : { start: end, end: start };
-}
-
-function applySelectionDragRange(state: SelectionDragState, index: number): void {
-  const nextRange = selectionRange(state.anchorIndex, index);
-  const previousRange = state.lastRange;
-  if (
-    previousRange &&
-    previousRange.start === nextRange.start &&
-    previousRange.end === nextRange.end
-  ) {
-    return;
-  }
-
-  const affectedIndexes = new Set<number>();
-  if (previousRange) {
-    for (let current = previousRange.start; current <= previousRange.end; current += 1) {
-      affectedIndexes.add(current);
-    }
-  }
-  for (let current = nextRange.start; current <= nextRange.end; current += 1) {
-    affectedIndexes.add(current);
-  }
-
-  affectedIndexes.forEach((rowIndex) => {
-    const row = tableRows.value[rowIndex];
-    if (!row || !recordRowSelectable(row)) return;
-    const shouldSelect =
-      rowIndex >= nextRange.start && rowIndex <= nextRange.end
-        ? state.mode
-        : state.initialSelectionIds.has(row.id);
-    tableRef.value?.toggleRowSelection(row, shouldSelect);
-  });
-  state.lastRange = nextRange;
-}
-
-function clearSelectionAutoScroll(): void {
-  if (selectionAutoScrollTimer === null) return;
-  window.clearInterval(selectionAutoScrollTimer);
-  selectionAutoScrollTimer = null;
-}
-
-function updateSelectionAutoScroll(event: PointerEvent): void {
-  const state = selectionDragState;
-  if (!state) return;
-  const rect = state.tableElement.getBoundingClientRect();
-  const edgeSize = 42;
-  let direction: -1 | 0 | 1 = 0;
-  if (event.clientX >= rect.left && event.clientX <= rect.right) {
-    if (event.clientY < rect.top + edgeSize) direction = -1;
-    else if (event.clientY > rect.bottom - edgeSize) direction = 1;
-  }
-  if (state.scrollDirection === direction) return;
-
-  state.scrollDirection = direction;
-  clearSelectionAutoScroll();
-  if (direction === 0) return;
-
-  selectionAutoScrollTimer = window.setInterval(() => {
-    const currentState = selectionDragState;
-    if (!currentState) {
-      clearSelectionAutoScroll();
-      return;
-    }
-    const body =
-      currentState.tableElement.querySelector<HTMLElement>(
-        ".el-table__body-wrapper .el-scrollbar__wrap",
-      ) ??
-      currentState.tableElement.querySelector<HTMLElement>(".el-table__body-wrapper");
-    const currentTop = body?.scrollTop ?? 0;
-    const maxTop = body ? Math.max(0, body.scrollHeight - body.clientHeight) : 0;
-    const nextTop = Math.max(0, Math.min(maxTop, currentTop + direction * 24));
-    if (nextTop === currentTop) {
-      currentState.scrollDirection = 0;
-      clearSelectionAutoScroll();
-      return;
-    }
-    tableRef.value?.setScrollTop?.(nextTop);
-    const rowInfo = selectionRowAtPoint(currentState.lastX, currentState.lastY);
-    if (rowInfo) {
-      currentState.currentIndex = rowInfo.index;
-      applySelectionDragRange(currentState, rowInfo.index);
-    }
-  }, 50);
-}
-
-function stopSelectionDrag(resetClickSuppression = true): void {
-  clearSelectionAutoScroll();
-  document.removeEventListener("pointermove", handleSelectionPointerMove);
-  document.removeEventListener("pointerup", handleSelectionPointerUp, true);
-  document.removeEventListener("pointercancel", handleSelectionPointerCancel, true);
-  selectionDragState = null;
-  selectionDragging.value = false;
-  if (resetClickSuppression) {
-    window.setTimeout(() => {
-      suppressSelectionClick = false;
-    }, 0);
-  }
-}
-
-function handleSelectionPointerDown(event: PointerEvent): void {
-  if (event.button !== 0 || event.isPrimary === false) return;
-  const target = event.target instanceof Element ? event.target : null;
-  const selectionCell = target?.closest("td.el-table-column--selection");
-  if (!selectionCell || !target?.closest(".el-checkbox__input, .el-checkbox__original")) return;
-  const rowInfo = selectionRowFromElement(selectionCell);
-  if (!rowInfo || !recordRowSelectable(rowInfo.row)) return;
-  const tableElement = selectionCell.closest(".el-table");
-  if (!(tableElement instanceof HTMLElement)) return;
-
-  stopSelectionDrag(false);
-  suppressSelectionClick = false;
-  const initialSelectionIds = new Set(selectedRecords.value.map((record) => record.id));
-  selectionDragState = {
-    pointerId: event.pointerId,
-    anchorIndex: rowInfo.index,
-    currentIndex: rowInfo.index,
-    lastRange: null,
-    dragging: false,
-    mode: !initialSelectionIds.has(rowInfo.row.id),
-    initialSelectionIds,
-    startX: event.clientX,
-    startY: event.clientY,
-    lastX: event.clientX,
-    lastY: event.clientY,
-    tableElement,
-    scrollDirection: 0,
-  };
-  document.addEventListener("pointermove", handleSelectionPointerMove, { passive: false });
-  document.addEventListener("pointerup", handleSelectionPointerUp, true);
-  document.addEventListener("pointercancel", handleSelectionPointerCancel, true);
-}
-
-function handleSelectionPointerMove(event: PointerEvent): void {
-  const state = selectionDragState;
-  if (!state || state.pointerId !== event.pointerId) return;
-  if ((event.buttons & 1) !== 1) {
-    stopSelectionDrag();
-    return;
-  }
-  state.lastX = event.clientX;
-  state.lastY = event.clientY;
-  if (!state.dragging) {
-    const movedX = event.clientX - state.startX;
-    const movedY = event.clientY - state.startY;
-    if (Math.hypot(movedX, movedY) < selectionDragThreshold) return;
-    state.dragging = true;
-    selectionDragging.value = true;
-    suppressSelectionClick = true;
-    event.preventDefault();
-    applySelectionDragRange(state, state.anchorIndex);
-  } else {
-    event.preventDefault();
-  }
-  const rowInfo = selectionRowAtPoint(event.clientX, event.clientY);
-  if (rowInfo) {
-    state.currentIndex = rowInfo.index;
-    applySelectionDragRange(state, rowInfo.index);
-  }
-  updateSelectionAutoScroll(event);
-}
-
-function handleSelectionPointerUp(event: PointerEvent): void {
-  if (!selectionDragState || selectionDragState.pointerId !== event.pointerId) return;
-  if (selectionDragState.dragging) {
-    event.preventDefault();
-    stopSelectionDrag();
-    return;
-  }
-  stopSelectionDrag(false);
-}
-
-function handleSelectionPointerCancel(event: PointerEvent): void {
-  if (!selectionDragState || selectionDragState.pointerId !== event.pointerId) return;
-  stopSelectionDrag();
-}
-
-function handleSelectionClickCapture(event: MouseEvent): void {
-  if (!suppressSelectionClick) return;
-  const target = event.target instanceof Element ? event.target : null;
-  if (target?.closest("td.el-table-column--selection .el-checkbox")) {
-    event.preventDefault();
-    event.stopPropagation();
-  }
-  suppressSelectionClick = false;
-}
-
 function makeDraftRow(
   insertion?: {
     anchorId: string;
@@ -2876,7 +3064,8 @@ function clearBottomScrollTimers(): void {
 function scrollTableToBottom(): void {
   clearBottomScrollTimers();
   const applyScroll = () => {
-    tableRef.value?.setScrollTop?.(Number.MAX_SAFE_INTEGER);
+    const lastRowIndex = tableRows.value.length - 1;
+    if (lastRowIndex >= 0) tableRef.value?.scrollToRow(lastRowIndex, "end");
   };
   void nextTick(() => {
     applyScroll();
@@ -2898,10 +3087,11 @@ async function scrollTableToBottomOnce(
   await nextTick();
   await nextAnimationFrame();
   if (!shouldApply()) return false;
-  tableRef.value?.setScrollTop?.(Number.MAX_SAFE_INTEGER);
+  const lastRowIndex = tableRows.value.length - 1;
+  if (lastRowIndex >= 0) tableRef.value?.scrollToRow(lastRowIndex, "end");
   await nextAnimationFrame();
   if (!shouldApply()) return false;
-  tableRef.value?.setScrollTop?.(Number.MAX_SAFE_INTEGER);
+  if (lastRowIndex >= 0) tableRef.value?.scrollToRow(lastRowIndex, "end");
   return true;
 }
 
@@ -2930,7 +3120,6 @@ async function remeasureVisibleTextareas(
   });
   await nextTick();
   if (!shouldApply()) return;
-  tableRef.value?.doLayout();
 }
 
 async function refreshTableLayout(
@@ -2991,15 +3180,12 @@ async function scrollToFocusedRecord(
   const targetRecordId = focusRecordId.value;
   await nextTick();
   if (!shouldApply() || focusRecordId.value !== targetRecordId) return false;
-  const row = ledgerTableCardRef.value?.querySelector<HTMLElement>(
-    ".search-focus-row",
-  );
+  const rowIndex = tableRowIndexById.value.get(targetRecordId) ?? -1;
+  if (rowIndex >= 0) tableRef.value?.scrollToRow(rowIndex, "center");
   window.setTimeout(() => {
     if (focusRecordId.value === targetRecordId) focusRecordId.value = "";
   }, 2200);
-  if (!row) return false;
-  row.scrollIntoView({ block: "center" });
-  return true;
+  return rowIndex >= 0;
 }
 
 function setValue(
@@ -3319,11 +3505,12 @@ function handleTableSelectionChange(rows: ProjectRecord[]): void {
   // Off-page rows are accepted only while explicitly retained in our selection.
   // A stale reserve-selection event must not resurrect a deleted/reset record.
   rows = rows.filter((record) => visibleIds.has(record.id) || selectedRecordIds.value.has(record.id));
+  const rowIds = new Set(rows.map((record) => record.id));
   selectedRecords.value = rows;
   const next = new Set(selectedRecordIds.value);
   visibleIds.forEach((recordId) => next.delete(recordId));
   visibleIds.forEach((recordId) => {
-    if (!rows.some((record) => record.id === recordId)) selectedRecordCache.delete(recordId);
+    if (!rowIds.has(recordId)) selectedRecordCache.delete(recordId);
   });
   rows.forEach((record) => {
     next.add(record.id);
@@ -3590,20 +3777,16 @@ async function locatePersistedRecord(
     return "skipped";
   }
   try {
-    const result = await queryRecordIds(buildRecordQuery(projectId, { page: 1 }));
+    const result = await queryRecordIds(buildRecordQuery(projectId));
     if (activeProjectId.value !== projectId || appliedSearch.scope !== "current") {
       return "skipped";
     }
     recordTotal.value = result.total;
-    const targetPage = ledgerPageForRecord(result.record_ids, recordId, pageSize.value);
-    if (targetPage === null) {
-      const lastPage = Math.max(1, Math.ceil(result.total / pageSize.value));
-      currentPage.value = Math.min(currentPage.value, lastPage);
+    if (!result.record_ids.includes(recordId)) {
       focusRecordId.value = "";
       await loadRecords(projectId, { preserveHistory: true, preserveSelection: true });
       return "filtered-out";
     }
-    currentPage.value = targetPage;
     focusRecordId.value = recordId;
     const loaded = await loadRecords(projectId, {
       preserveHistory: true,
@@ -3660,7 +3843,7 @@ async function finishPersistedDraft(
     } else {
       ElMessage.success(
         location === "focused"
-          ? `病理号已保存并定位到第 ${currentPage.value} 页；可使用撤销删除本次新增`
+          ? "病理号已保存并定位；可使用撤销删除本次新增"
           : "病理号已保存并创建台账记录；可使用撤销删除本次新增",
       );
     }
@@ -4099,6 +4282,25 @@ async function handleHistoryReplayError(
   }
 }
 
+async function queryAllRecordBatches(
+  query: RecordComplexQuery,
+  signal?: AbortSignal,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<Awaited<ReturnType<typeof queryRecords>>> {
+  const items: ProjectRecord[] = [];
+  let total = 0;
+  let offset = 0;
+  while (true) {
+    const batch = await queryRecords({ ...query, offset }, signal);
+    total = batch.total;
+    items.push(...batch.items);
+    offset += batch.items.length;
+    onProgress?.(items.length, total);
+    if (!batch.items.length || offset >= total) break;
+  }
+  return { items, total, limit: query.limit, offset: 0 };
+}
+
 async function loadRecords(
   projectId = activeProjectId.value,
   options: {
@@ -4113,6 +4315,8 @@ async function loadRecords(
   const isGlobalScope = appliedSearch.scope !== "current";
   if (!projectId && !isGlobalScope) {
     records.value = [];
+    recordTotal.value = 0;
+    loadedRecordCount.value = 0;
     globalSearchResults.value = [];
     globalSearchTotal.value = 0;
     return true;
@@ -4125,9 +4329,12 @@ async function loadRecords(
   const currentQuery = isGlobalScope ? null : buildRecordQuery(projectId);
   const currentQueryKey = currentQuery ? ledgerRecordQueryKey(currentQuery) : "";
   const queryCacheGeneration = projectRecordCacheGeneration(projectId);
-  const cacheHit = options.preferCache && currentQuery
+  const cacheHit = options.preferCache
+    && currentQuery
+    && ledgerRecordCache.isFresh(currentQueryKey)
     ? ledgerRecordCache.get(currentQueryKey)
     : null;
+  loadedRecordCount.value = cacheHit?.snapshot.records.length ?? 0;
   if (showLoading && !cacheHit) loading.value = true;
   try {
     let loaded: ProjectRecord[] = [];
@@ -4144,11 +4351,12 @@ async function loadRecords(
           status: appliedSearch.status || undefined,
           search: appliedSearch.text || undefined,
           experiment_date: appliedSearch.date || undefined,
-          limit: 1000,
+          limit: loadBatchSize.value,
           offset,
         }, controller.signal);
         total = page.total;
         loaded.push(...page.items);
+        loadedRecordCount.value = loaded.length;
         offset += page.items.length;
         if (!page.items.length || offset >= page.total) break;
       }
@@ -4156,11 +4364,23 @@ async function loadRecords(
       total = cacheHit.snapshot.total;
       loaded = cacheHit.snapshot.records;
     } else {
-      const page = await queryRecords(currentQuery!, controller.signal);
+      const page = await queryAllRecordBatches(
+        currentQuery!,
+        controller.signal,
+        (loadedCount, nextTotal) => {
+          if (requestSequence !== loadSequence || projectId !== activeProjectId.value) return;
+          loadedRecordCount.value = loadedCount;
+          recordTotal.value = nextTotal;
+        },
+      );
       if (projectRecordCacheGeneration(projectId) !== queryCacheGeneration) return false;
       total = page.total;
       loaded = page.items;
-      ledgerRecordCache.set(currentQueryKey, projectId, { records: loaded, total });
+      if (loaded.length <= LEDGER_RECORD_CACHE_MAX_RECORDS) {
+        ledgerRecordCache.set(currentQueryKey, projectId, { records: loaded, total });
+      } else {
+        ledgerRecordCache.invalidateProject(projectId);
+      }
     }
     if (requestSequence !== loadSequence || projectId !== activeProjectId.value) return false;
     if (isGlobalScope) {
@@ -4173,6 +4393,7 @@ async function loadRecords(
     } else {
       records.value = loaded;
       recordTotal.value = total;
+      loadedRecordCount.value = loaded.length;
       globalSearchResults.value = [];
       globalSearchTotal.value = 0;
       tableProjectId.value = projectId;
@@ -4189,21 +4410,16 @@ async function loadRecords(
       && projectId === activeProjectId.value
       && !controller.signal.aborted
     );
-    if (options.stabilizeTable && !isGlobalScope) {
-      await refreshTableLayout(requestIsCurrent);
-    } else {
-      await nextTick();
-      if (!requestIsCurrent()) return false;
-      tableRef.value?.doLayout();
-    }
+    if (options.stabilizeTable && !isGlobalScope) await refreshTableLayout(requestIsCurrent);
+    else await nextTick();
     if (!requestIsCurrent()) return false;
     if (!isGlobalScope && options.preserveSelection && selectedRecordIds.value.size) {
       records.value.forEach((record) => {
         if (selectedRecordIds.value.has(record.id)) {
           selectedRecordCache.set(record.id, record);
-          tableRef.value?.toggleRowSelection(record, true);
         }
       });
+      selectedRecords.value = records.value.filter((record) => selectedRecordIds.value.has(record.id));
     }
     if (!isGlobalScope) {
       const scrolledToFocus = await scrollToFocusedRecord(requestIsCurrent);
@@ -4211,10 +4427,6 @@ async function loadRecords(
         await scrollTableToBottomOnce(requestIsCurrent);
       }
     }
-    if (cacheHit?.stale && currentQuery) {
-      void revalidateCachedRecordQuery(projectId, currentQuery, currentQueryKey);
-    }
-    if (options.preferCache) scheduleAdjacentProjectPrefetch(projectId);
     return true;
   } catch (error) {
     if (requestSequence !== loadSequence || controller.signal.aborted) return false;
@@ -4233,12 +4445,10 @@ function buildRecordQuery(
   view: {
     filters?: LedgerFilterMap;
     sort?: LedgerSortState;
-    page?: number;
   } = {},
 ): RecordComplexQuery {
   const filters = view.filters ?? ledgerFilters.value;
   const sort = view.sort === undefined ? ledgerSort.value : view.sort;
-  const page = view.page ?? currentPage.value;
   const fieldFilters: RecordFieldFilter[] = [];
   Object.entries(filters).forEach(([fieldId, filter]) => {
     if (!filter) return;
@@ -4275,137 +4485,9 @@ function buildRecordQuery(
           direction: sort.order === "descending" ? "desc" : "asc",
         }
       : null,
-    limit: pageSize.value,
-    offset: (page - 1) * pageSize.value,
+    limit: loadBatchSize.value,
+    offset: 0,
   };
-}
-
-function projectRecordQuery(projectId: string, page = 1): RecordComplexQuery | null {
-  const project = appStore.projectById(projectId);
-  if (!project) return null;
-  const layout = resolveLedgerProjectLayout(
-    ledgerLayoutSettings.value,
-    projectId,
-    project.fields,
-  );
-  return buildRecordQuery(projectId, {
-    filters: layout.filters,
-    sort: layout.sort,
-    page,
-  });
-}
-
-function fetchAndCacheRecordQuery(
-  projectId: string,
-  query: RecordComplexQuery,
-  key = ledgerRecordQueryKey(query),
-): Promise<PrefetchedRecordPage> {
-  const pending = recordPrefetchInFlight.get(key);
-  if (pending) return pending;
-  const generation = projectRecordCacheGeneration(projectId);
-  const request = queryRecords(query)
-    .then((result) => {
-      if (!ledgerDisposed && projectRecordCacheGeneration(projectId) === generation) {
-        ledgerRecordCache.set(key, projectId, {
-          records: result.items,
-          total: result.total,
-        });
-      }
-      return { result, generation };
-    })
-    .finally(() => {
-      if (recordPrefetchInFlight.get(key) === request) recordPrefetchInFlight.delete(key);
-    });
-  recordPrefetchInFlight.set(key, request);
-  return request;
-}
-
-function recordPageVersion(items: ProjectRecord[], total: number): string {
-  return `${total}:${items.map((record) => `${record.id}:${record.updated_at}`).join("|")}`;
-}
-
-function hasPendingLedgerWork(): boolean {
-  if (editingGridCell.value || draftRows.value.length || selectedRecordIds.value.size) return true;
-  return [...cellSaveStates.value.values()].some((state) => (
-    state.status === "dirty" || state.status === "saving" || state.status === "error"
-  ));
-}
-
-async function revalidateCachedRecordQuery(
-  projectId: string,
-  query: RecordComplexQuery,
-  key: string,
-): Promise<void> {
-  try {
-    const prefetched = await fetchAndCacheRecordQuery(projectId, query, key);
-    if (projectRecordCacheGeneration(projectId) !== prefetched.generation) return;
-    const { result } = prefetched;
-    const stillCurrent = () => (
-      !ledgerDisposed
-      && activeProjectId.value === projectId
-      && appliedSearch.scope === "current"
-      && ledgerRecordQueryKey(buildRecordQuery(projectId)) === key
-    );
-    if (!stillCurrent() || hasPendingLedgerWork()) return;
-    if (recordPageVersion(records.value, recordTotal.value)
-      === recordPageVersion(result.items, result.total)) return;
-    const scrollPosition = captureLedgerTableScroll();
-    records.value = result.items;
-    recordTotal.value = result.total;
-    tableProjectId.value = projectId;
-    rememberAll();
-    await refreshTableLayout(stillCurrent);
-    if (stillCurrent()) restoreLedgerTableScroll(scrollPosition);
-  } catch {
-    // Prefetch and stale-data revalidation are best-effort and never block the table.
-  }
-}
-
-function prefetchProjectRecords(projectId: string): void {
-  if (!projectId || projectId === activeProjectId.value || appliedSearch.scope !== "current") return;
-  const query = projectRecordQuery(projectId);
-  if (!query) return;
-  const key = ledgerRecordQueryKey(query);
-  if (ledgerRecordCache.isFresh(key)) return;
-  void fetchAndCacheRecordQuery(projectId, query, key).catch(() => undefined);
-}
-
-function cancelProjectPrefetch(): void {
-  if (projectPrefetchTimer === null) return;
-  window.clearTimeout(projectPrefetchTimer);
-  projectPrefetchTimer = null;
-}
-
-function scheduleProjectPrefetch(projectId: string): void {
-  cancelProjectPrefetch();
-  projectPrefetchTimer = window.setTimeout(() => {
-    projectPrefetchTimer = null;
-    prefetchProjectRecords(projectId);
-  }, 100);
-}
-
-function scheduleAdjacentProjectPrefetch(projectId: string): void {
-  if (adjacentProjectPrefetchTimer !== null) {
-    window.clearTimeout(adjacentProjectPrefetchTimer);
-  }
-  adjacentProjectPrefetchTimer = window.setTimeout(() => {
-    adjacentProjectPrefetchTimer = null;
-    const index = appStore.projects.findIndex((project) => project.id === projectId);
-    if (index < 0) return;
-    [appStore.projects[index - 1]?.id, appStore.projects[index + 1]?.id]
-      .forEach((id) => {
-        if (id) prefetchProjectRecords(id);
-      });
-  }, 0);
-}
-
-function changeLedgerPage(page: number): void {
-  currentPage.value = page;
-  activeGridCell.value = null;
-  clearGridCellSelection();
-  editingGridCell.value = null;
-  editingGridSnapshot.value = null;
-  void loadRecords(activeProjectId.value, { preserveHistory: true, preserveSelection: true });
 }
 
 async function ensureProjectLoaded(projectId: string): Promise<void> {
@@ -4438,7 +4520,6 @@ function applySearch(): void {
     appliedSearch.date = nextDate;
     appliedSearch.scope = searchScope.value;
     appliedSearch.projectIds = [...searchProjectIds.value];
-    currentPage.value = 1;
     void loadRecords();
   } catch (error) {
     ElMessage.warning(error instanceof Error ? error.message : "筛选日期无效");
@@ -4456,7 +4537,6 @@ function resetSearch(): void {
     scope: "current",
     projectIds: [],
   });
-  currentPage.value = 1;
   void loadRecords(activeProjectId.value);
 }
 
@@ -4465,16 +4545,7 @@ function refreshRecords(): void {
 }
 
 async function handleLockedVisibilityChange(): Promise<void> {
-  const requestedPage = currentPage.value;
   clearSelectionsAfterLedgerViewChange();
-  const loaded = await loadRecords(activeProjectId.value, { preserveHistory: true });
-  if (!loaded) return;
-  const availablePage = clampLedgerPage(requestedPage, recordTotal.value, pageSize.value);
-  if (availablePage === requestedPage) {
-    currentPage.value = requestedPage;
-    return;
-  }
-  currentPage.value = availablePage;
   await loadRecords(activeProjectId.value, { preserveHistory: true });
 }
 
@@ -4533,7 +4604,6 @@ function selectProject(projectId: string): void {
     if (wasGlobalSearch) void loadRecords(projectId, { preserveHistory: true });
     return;
   }
-  currentPage.value = 1;
   activeProjectId.value = projectId;
 }
 
@@ -4558,6 +4628,56 @@ function recordRowSelectable(row: LedgerRow): boolean {
   return !isDraft(row) && recordMatchesSelectionScope(row, recordSelectionScope.value);
 }
 
+const selectableVisibleRecords = computed(() =>
+  tableRows.value.filter((row) => recordRowSelectable(row)),
+);
+const allVisibleRecordsSelected = computed(() => (
+  selectableVisibleRecords.value.length > 0
+  && selectableVisibleRecords.value.every((record) => selectedRecordIds.value.has(record.id))
+));
+const someVisibleRecordsSelected = computed(() => (
+  !allVisibleRecordsSelected.value
+  && selectableVisibleRecords.value.some((record) => selectedRecordIds.value.has(record.id))
+));
+
+function recordSelectedForRender(row: LedgerRow, renderedRowIndex: number): boolean {
+  const preview = recordSelectionDragPreview.value;
+  if (!preview) return selectedRecordIds.value.has(row.id);
+  const rowIndex = tableRowIndexById.value.get(row.id) ?? renderedRowIndex;
+  if (
+    recordRowSelectable(row)
+    && recordSelectionRangeContains(preview.range, rowIndex)
+  ) return preview.selected;
+  return preview.initialSelectedIds.has(row.id);
+}
+
+function commitRecordSelectionIds(nextIds: ReadonlySet<string>): void {
+  handleTableSelectionChange(
+    records.value.filter((record) => nextIds.has(record.id)),
+  );
+}
+
+function setRecordSelected(record: LedgerRow, selected: boolean): void {
+  if (!recordRowSelectable(record)) return;
+  recordSelectionAnchorId = record.id;
+  const nextIds = new Set(selectedRecordIds.value);
+  if (selected) nextIds.add(record.id);
+  else nextIds.delete(record.id);
+  commitRecordSelectionIds(nextIds);
+}
+
+function setAllVisibleRecordsSelected(selected: boolean): void {
+  recordSelectionAnchorId = null;
+  if (selected) {
+    void applyVisibleSelectionAction("select-all");
+    return;
+  }
+  const visibleIds = new Set(selectableVisibleRecords.value.map((record) => record.id));
+  const nextIds = new Set(selectedRecordIds.value);
+  visibleIds.forEach((recordId) => nextIds.delete(recordId));
+  handleTableSelectionChange(records.value.filter((record) => nextIds.has(record.id)));
+}
+
 async function selectionScopeAllows(action: RecordSelectionAction): Promise<boolean> {
   if (recordSelectionScope.value === "all" || !selectedRecordIds.value.size) return true;
   try {
@@ -4575,6 +4695,7 @@ async function selectionScopeAllows(action: RecordSelectionAction): Promise<bool
 
 async function applyVisibleSelectionAction(action: RecordSelectionAction): Promise<void> {
   if (!(await selectionScopeAllows(action))) return;
+  recordSelectionAnchorId = null;
   const visibleRecords = tableRows.value.filter((row) => !isDraft(row));
   const next = applyVisibleRecordSelection({
     visibleRecords,
@@ -4583,11 +4704,9 @@ async function applyVisibleSelectionAction(action: RecordSelectionAction): Promi
     action,
   });
   const nextVisible = visibleRecords.filter((record) => next.has(record.id));
-  tableRef.value?.clearSelection();
   visibleRecords.forEach((record) => {
     const selected = next.has(record.id);
     if (selected) {
-      tableRef.value?.toggleRowSelection(record, true);
       selectedRecordCache.set(record.id, record);
     } else {
       selectedRecordCache.delete(record.id);
@@ -4605,17 +4724,7 @@ function invertVisibleSelection(): void {
   void applyVisibleSelectionAction("invert");
 }
 
-function rowCellStyle({
-  row,
-  column,
-  columnIndex,
-}: {
-  row: LedgerRow;
-  column?: { columnKey?: string };
-  columnIndex?: number;
-}): CSSProperties {
-  const fieldIndex = typeof columnIndex === "number" ? columnIndex - 2 : -1;
-  const fieldId = column?.columnKey ?? fields.value[fieldIndex]?.id;
+function rowCellStyle(row: LedgerRow, fieldId?: string): CSSProperties {
   const cellColor = fieldId ? row.cell_highlight_colors?.[fieldId] : undefined;
   if (cellColor) {
     return { "--cell-highlight-color": cellColor } as CSSProperties;
@@ -4864,6 +4973,56 @@ function applyLedgerProjectLayout(projectId: string): void {
   ledgerFilters.value = layout.filters;
 }
 
+function virtualRowClass({ rowData }: { rowData: LedgerRow }): string {
+  return rowClassName({ row: rowData });
+}
+
+function virtualRowProps({ rowData }: { rowData: LedgerRow }): Record<string, unknown> {
+  return { "data-row-id": rowData.id };
+}
+
+function virtualCellProps({
+  rowData,
+  rowIndex,
+  column,
+}: {
+  rowData: LedgerRow;
+  rowIndex: number;
+  column: LedgerVirtualColumn;
+}): Record<string, unknown> {
+  const baseStyle = rowStyle({ row: rowData });
+  if (column.kind === "selection") {
+    return { class: "ledger-selection-column", style: baseStyle };
+  }
+  if (column.kind === "lock") {
+    return { class: "ledger-lock-column", style: baseStyle };
+  }
+  const fieldIndex = column.fieldIndex ?? -1;
+  const fieldId = column.fieldId;
+  return {
+    class: ["ledger-editor-column", gridCellClassName(rowData, rowIndex, fieldIndex)],
+    style: { ...baseStyle, ...rowCellStyle(rowData, fieldId) },
+    "data-row-id": rowData.id,
+    "data-field-index": fieldIndex,
+  };
+}
+
+function virtualHeaderCellProps({
+  column,
+}: {
+  column: LedgerVirtualColumn;
+}): Record<string, unknown> {
+  if (column.kind !== "field" || !column.fieldId) return {};
+  const state = gridHeaderSelectionState.value.get(column.fieldId);
+  return {
+    class: state === "selected"
+      ? "grid-header-selected"
+      : state === "partial"
+        ? "grid-header-partial"
+        : "",
+  };
+}
+
 function persistLedgerProjectLayout(projectId = activeProjectId.value): Promise<void> {
   if (!projectId) return Promise.resolve();
   ledgerLayoutSettings.value = withLedgerProjectLayout(
@@ -5078,7 +5237,7 @@ function handleReadOnlyCellWheel(event: WheelEvent, cell: GridCellPosition): voi
 function bestFitAllColumns(event?: MouseEvent): void {
   fields.value.forEach(bestFitColumn);
   (event?.currentTarget as HTMLElement | null)?.blur();
-  ElMessage.success("已按当前页内容调整所有可见列宽");
+  ElMessage.success("已按当前加载结果调整所有可见列宽");
 }
 
 function handleHeaderResize(
@@ -5642,11 +5801,6 @@ watch(activeProjectId, async (projectId, previousProjectId) => {
   rememberLastLedgerProjectId(projectId);
   const load = (async () => {
     clearBottomScrollTimers();
-    cancelProjectPrefetch();
-    if (adjacentProjectPrefetchTimer !== null) {
-      window.clearTimeout(adjacentProjectPrefetchTimer);
-      adjacentProjectPrefetchTimer = null;
-    }
     stopGridCellDrag(false);
     closeLedgerOverlays();
     applyLedgerProjectLayout(projectId);
@@ -5703,7 +5857,6 @@ async function initializeLedger(): Promise<void> {
   await router.replace({ query: { ...route.query, project: initialProjectId } });
   applyLedgerProjectLayout(initialProjectId);
   await loadRecords(initialProjectId, { stabilizeTable: true });
-  scheduleAdjacentProjectPrefetch(initialProjectId);
 }
 
 function handleLedgerDocumentPointerDown(event: PointerEvent): void {
@@ -5726,7 +5879,7 @@ function handleLedgerDocumentScroll(): void {
 }
 
 onMounted(() => {
-  document.addEventListener("click", handleSelectionClickCapture, true);
+  document.addEventListener("click", handleRecordSelectionClickCapture, true);
   document.addEventListener("pointerdown", handleLedgerDocumentPointerDown);
   document.addEventListener("keydown", handleLedgerDocumentKeydown);
   document.addEventListener("scroll", handleLedgerDocumentScroll, true);
@@ -5745,7 +5898,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   ledgerDisposed = true;
   ledgerHistory.clear();
-  document.removeEventListener("click", handleSelectionClickCapture, true);
+  document.removeEventListener("click", handleRecordSelectionClickCapture, true);
   document.removeEventListener("pointerdown", handleLedgerDocumentPointerDown);
   document.removeEventListener("keydown", handleLedgerDocumentKeydown);
   document.removeEventListener("scroll", handleLedgerDocumentScroll, true);
@@ -5755,16 +5908,10 @@ onBeforeUnmount(() => {
   removeQuickEntryChangedListener = undefined;
   stopGridCellDrag(false);
   stopGridFillDrag();
-  stopSelectionDrag();
+  stopRecordSelectionDrag(false);
   recordsAbortController?.abort();
   recordsAbortController = null;
-  cancelProjectPrefetch();
-  if (adjacentProjectPrefetchTimer !== null) {
-    window.clearTimeout(adjacentProjectPrefetchTimer);
-    adjacentProjectPrefetchTimer = null;
-  }
   ledgerRecordCache.clear();
-  recordPrefetchInFlight.clear();
   projectRecordCacheGenerations.clear();
   editingGridCell.value = null;
   editingGridSnapshot.value = null;
@@ -5797,6 +5944,34 @@ onBeforeUnmount(() => {
               placeholder="按实验日期筛选"
               @change="searchDate = $event"
             />
+            <div
+              v-if="!globalSearchActive"
+              class="ledger-cell-editor-bar"
+              :class="{ 'is-readonly': ledgerCellEditorReadonly }"
+              role="group"
+              :aria-label="ledgerCellEditorTitle"
+              :title="ledgerCellEditorTitle"
+            >
+              <span class="ledger-cell-editor-address">{{ ledgerCellEditorAddress }}</span>
+              <el-input
+                class="ledger-cell-editor-input"
+                :model-value="ledgerCellEditorValue"
+                :disabled="ledgerCellEditorDisabled"
+                :readonly="ledgerCellEditorReadonly"
+                :placeholder="ledgerCellEditorCell
+                  ? `编辑 ${ledgerCellEditorCell.field.label}`
+                  : '选择单元格后可编辑完整内容'"
+                :aria-label="ledgerCellEditorCell
+                  ? `编辑单元格 ${ledgerCellEditorAddress}，${ledgerCellEditorCell.field.label}`
+                  : '单元格编辑栏'"
+                autocomplete="off"
+                spellcheck="false"
+                @focus="beginLedgerCellEditorEdit"
+                @update:model-value="updateLedgerCellEditorValue"
+                @blur="handleLedgerCellEditorBlur"
+                @keydown="handleLedgerCellEditorKeydown"
+              />
+            </div>
             <el-input
               v-model="searchText"
               clearable
@@ -6068,191 +6243,236 @@ onBeforeUnmount(() => {
       >
         <span>{{ gridFillPreviewSummary }}</span>
       </div>
-      <div class="ledger-table-surface" :style="ledgerTableStyle">
-      <el-table
-        ref="tableRef"
-        :class="{
-          'selection-dragging': selectionDragging,
-          'grid-selection-dragging': gridSelectionDragging,
-        }"
+      <div
         v-loading="loading"
-        element-loading-text="正在切换或读取项目数据…"
+        class="ledger-table-surface"
+        :style="ledgerTableStyle"
+        :element-loading-text="recordTotal > 0
+          ? `正在读取全部记录… ${loadedRecordCount}/${recordTotal}`
+          : '正在切换或读取项目数据…'"
         element-loading-background="var(--app-loading-mask)"
         element-loading-custom-class="ledger-loading-mask"
-        :data="tableRows"
-        row-key="id"
-        border
-        :fit="false"
-        table-layout="fixed"
-        scrollbar-always-on
-        :select-on-indeterminate="false"
-        empty-text="当前项目暂无记录"
-        height="100%"
-        :row-class-name="rowClassName"
-        :row-style="rowStyle"
-        :cell-style="rowCellStyle"
-        :cell-class-name="gridCellClassName"
-        :header-cell-class-name="gridHeaderCellClassName"
-        @selection-change="handleTableSelectionChange"
-        @pointerdown="handleSelectionPointerDown"
-        @header-click="handleLedgerHeaderClick"
-        @header-dragend="handleHeaderResize"
       >
-        <el-table-column
-          type="selection"
-          width="55"
-          fixed="left"
-          align="center"
-          reserve-selection
-          :selectable="recordRowSelectable"
-        />
-        <el-table-column
-          width="42"
-          fixed="left"
-          align="center"
-          class-name="ledger-lock-column"
-        >
-          <template #default="{ row }: { row: LedgerRow }">
-            <el-icon v-if="row.locked" class="row-lock" title="整条记录已锁定">
-              <Lock />
-            </el-icon>
-          </template>
-        </el-table-column>
-
-        <el-table-column
-          v-for="(field, columnIndex) in fields"
-          :key="field.id"
-          :column-key="field.id"
-          class-name="ledger-editor-column"
-          :label="field.label"
-          :width="field.width"
-          align="center"
-          header-align="center"
-          resizable
-        >
-          <template #header>
-            <div class="ledger-header-label">
-              <span>{{ field.label }}</span>
-              <button
-                v-if="columnToolsVisible"
-                type="button"
-                class="ledger-column-tools-trigger"
-                :class="{
-                  active: columnToolsOpenFieldId === field.id,
-                  sorted: ledgerSort?.fieldId === field.id,
-                  filtered: Boolean(ledgerFilters[field.id]),
-                }"
-                :aria-label="`打开${field.label}排序和筛选`"
-                @pointerdown.stop
-                @click.stop="openColumnTools(field, $event)"
-                @dblclick.stop
-                @contextmenu.stop.prevent
-              >
-                <Setting :size="14" :stroke-width="1.7" aria-hidden="true" />
-              </button>
-              <span v-if="ledgerSort?.fieldId === field.id" class="ledger-sort-indicator">
-                <ArrowUp v-if="ledgerSort.order === 'ascending'" :size="13" aria-label="升序" />
-                <ArrowDown v-else :size="13" aria-label="降序" />
-              </span>
-              <span v-if="ledgerFilters[field.id]" class="ledger-filter-indicator" />
-            </div>
-          </template>
-          <template #default="{ row, $index }: { row: LedgerRow; $index: number }">
-            <div
-              class="cell-field"
+        <el-auto-resizer>
+          <template #default="{ height, width }">
+            <el-table-v2
+              v-if="height > 0 && width > 0"
+              ref="tableRef"
               :class="{
-                'cell-field-invalid': fieldErrorFor(row, field),
-                'cell-field-editing': isGridCellEditing({ rowIndex: $index, columnIndex }),
+                'grid-selection-dragging': gridSelectionDragging,
+                'record-selection-dragging': recordSelectionDragging,
               }"
-              :data-row-id="row.id"
-              :data-field-index="columnIndex"
-              :tabindex="isGridCellEditing({ rowIndex: $index, columnIndex }) ? -1 : 0"
-              @wheel="handleReadOnlyCellWheel($event, { rowIndex: $index, columnIndex })"
+              :columns="ledgerVirtualColumns"
+              :data="tableRows"
+              :width="width"
+              :height="height"
+              :row-height="ledgerVirtualRowHeight"
+              :header-height="ledgerVirtualHeaderHeight"
+              :cache="8"
+              row-key="id"
+              :row-class="virtualRowClass"
+              :row-props="virtualRowProps"
+              :cell-props="virtualCellProps"
+              :header-cell-props="virtualHeaderCellProps"
+              scrollbar-always-on
             >
-              <template v-if="isGridCellEditing({ rowIndex: $index, columnIndex })">
-                <EditableDateInput
-                  v-if="field.data_type === 'date' || field.system_key === 'experiment_date'"
-                  :model-value="valueFor(row, field)"
-                  :readonly="row.locked"
-                  @update:model-value="setValue(row, field, $event)"
-                  @change="saveField(row, field)"
-                />
-                <EditableChoiceInput
-                  v-else-if="field.options.length || field.data_type === 'select'"
-                  :model-value="valueFor(row, field)"
-                  :options="fieldOptions(field)"
-                  :readonly="row.locked"
-                  @update:model-value="setValue(row, field, $event)"
-                  @change="saveField(row, field)"
-                />
-                <el-input
-                  v-else-if="!field.is_core"
-                  :ref="(instance: unknown) => setAutosizeTextareaRef(instance, row.id, field.id)"
-                  type="textarea"
-                  :autosize="{ minRows: 1, maxRows: 5 }"
-                  resize="none"
-                  :model-value="valueFor(row, field)"
-                  :readonly="row.locked"
-                  :inputmode="field.data_type === 'number' ? 'decimal' : undefined"
-                  @update:model-value="setValue(row, field, String($event))"
-                  @change="saveField(row, field)"
-                />
-                <el-input
-                  v-else
-                  :model-value="valueFor(row, field)"
-                  :readonly="row.locked"
-                  :inputmode="field.data_type === 'number' ? 'decimal' : undefined"
-                  @update:model-value="setValue(row, field, String($event))"
-                  @change="saveField(row, field)"
-                />
+              <template #header-cell="{ column }">
+                <div v-if="column.kind === 'selection'" class="ledger-v2-selection-control">
+                  <el-checkbox
+                    :model-value="allVisibleRecordsSelected"
+                    :indeterminate="someVisibleRecordsSelected"
+                    :disabled="!selectableVisibleRecords.length"
+                    aria-label="选择全部可见记录"
+                    @pointerdown.stop
+                    @click.stop
+                    @change="setAllVisibleRecordsSelected(Boolean($event))"
+                  />
+                </div>
+                <div v-else-if="column.kind === 'lock'" aria-hidden="true" />
+                <div
+                  v-else-if="virtualColumnField(column)"
+                  class="ledger-header-label"
+                  @click="handleLedgerHeaderClick(column.fieldIndex ?? -1, $event)"
+                >
+                  <span>{{ virtualColumnField(column)?.label }}</span>
+                  <button
+                    v-if="columnToolsVisible"
+                    type="button"
+                    class="ledger-column-tools-trigger"
+                    :class="{
+                      active: columnToolsOpenFieldId === column.fieldId,
+                      sorted: ledgerSort?.fieldId === column.fieldId,
+                      filtered: Boolean(ledgerFilters[column.fieldId]),
+                    }"
+                    :aria-label="`打开${virtualColumnField(column)?.label ?? ''}排序和筛选`"
+                    @pointerdown.stop
+                    @click.stop="openColumnTools(virtualColumnField(column)!, $event)"
+                    @dblclick.stop
+                    @contextmenu.stop.prevent
+                  >
+                    <Setting :size="14" :stroke-width="1.7" aria-hidden="true" />
+                  </button>
+                  <span v-if="ledgerSort?.fieldId === column.fieldId" class="ledger-sort-indicator">
+                    <ArrowUp v-if="ledgerSort?.order === 'ascending'" :size="13" aria-label="升序" />
+                    <ArrowDown v-else :size="13" aria-label="降序" />
+                  </span>
+                  <span v-if="ledgerFilters[column.fieldId]" class="ledger-filter-indicator" />
+                </div>
               </template>
-              <span v-else class="cell-field-value">{{ valueFor(row, field) }}</span>
-              <span
-                v-if="gridFillPreviewValue($index, columnIndex) !== null"
-                class="grid-fill-preview-value"
-              >
-                {{ gridFillPreviewValue($index, columnIndex) || "（空）" }}
-              </span>
-              <span
-                v-if="isGridFillHandleCell($index, columnIndex)"
-                class="grid-fill-handle"
-                role="button"
-                tabindex="-1"
-                aria-label="拖动或双击自动填充"
-                title="拖动序列填充；按住 Ctrl 拖动复制；双击向下自动填充"
-                @pointerdown.stop.prevent="handleGridFillPointerDown"
-              />
-              <span v-if="fieldErrorFor(row, field)" class="cell-field-error">
-                {{ fieldErrorFor(row, field) }}
-              </span>
-              <span
-                v-if="isDraft(row) && field.system_key === 'pathology_number' && valueFor(row, field).trim()"
-                class="cell-save-state is-dirty"
-                title="这条记录尚未写入台账"
-              >
-                未保存
-              </span>
-              <span
-                v-else-if="cellSaveStateFor(row, field)"
-                class="cell-save-state"
-                :class="`is-${cellSaveStateFor(row, field)?.status}`"
-                :title="cellSaveStateFor(row, field)?.message ?? ''"
-              >
-                {{
-                  cellSaveStateFor(row, field)?.status === 'saving'
-                    ? '保存中'
-                    : cellSaveStateFor(row, field)?.status === 'saved'
-                      ? '已保存'
-                      : cellSaveStateFor(row, field)?.status === 'error'
-                        ? '失败'
-                        : '未保存'
-                }}
-              </span>
-            </div>
-          </template>
-        </el-table-column>
 
-      </el-table>
+              <template #cell="{ rowData: row, rowIndex, column }">
+                <div
+                  v-if="column.kind === 'selection'"
+                  class="ledger-v2-selection-control"
+                  :data-row-id="row.id"
+                  :data-row-index="rowIndex"
+                  :title="recordRowSelectable(row)
+                    ? '上下拖动可连续选择；Shift+点击选择范围'
+                    : undefined"
+                  @pointerdown.stop="handleRecordSelectionPointerDown($event, row, rowIndex)"
+                  @click.stop
+                >
+                  <el-checkbox
+                    :model-value="recordSelectedForRender(row, rowIndex)"
+                    :disabled="!recordRowSelectable(row)"
+                    :aria-label="`选择记录 ${row.pathology_number || row.id}`"
+                    @change="setRecordSelected(row, Boolean($event))"
+                  />
+                </div>
+                <div v-else-if="column.kind === 'lock'" class="ledger-v2-lock-state">
+                  <el-icon
+                    v-if="row.locked"
+                    class="row-lock"
+                    title="整条记录已锁定"
+                  >
+                    <Lock />
+                  </el-icon>
+                </div>
+                <div
+                  v-else-if="virtualColumnField(column)"
+                  class="cell-field"
+                  :class="{
+                    'cell-field-invalid': fieldErrorFor(row, virtualColumnField(column)!),
+                    'cell-field-editing': isGridCellEditing({
+                      rowIndex,
+                      columnIndex: column.fieldIndex ?? -1,
+                    }),
+                  }"
+                  :data-row-id="row.id"
+                  :data-field-index="column.fieldIndex"
+                  :tabindex="isGridCellEditing({
+                    rowIndex,
+                    columnIndex: column.fieldIndex ?? -1,
+                  }) ? -1 : 0"
+                  @wheel="handleReadOnlyCellWheel($event, {
+                    rowIndex,
+                    columnIndex: column.fieldIndex ?? -1,
+                  })"
+                >
+                  <template v-if="isGridCellEditing({
+                    rowIndex,
+                    columnIndex: column.fieldIndex ?? -1,
+                  })">
+                    <EditableDateInput
+                      v-if="virtualColumnField(column)?.data_type === 'date'
+                        || virtualColumnField(column)?.system_key === 'experiment_date'"
+                      :model-value="valueFor(row, virtualColumnField(column)!)"
+                      :readonly="row.locked"
+                      @update:model-value="setValue(row, virtualColumnField(column)!, $event)"
+                      @change="saveField(row, virtualColumnField(column)!)"
+                    />
+                    <EditableChoiceInput
+                      v-else-if="virtualColumnField(column)!.options.length
+                        || virtualColumnField(column)?.data_type === 'select'"
+                      :model-value="valueFor(row, virtualColumnField(column)!)"
+                      :options="fieldOptions(virtualColumnField(column)!)"
+                      :readonly="row.locked"
+                      @update:model-value="setValue(row, virtualColumnField(column)!, $event)"
+                      @change="saveField(row, virtualColumnField(column)!)"
+                    />
+                    <el-input
+                      v-else-if="!virtualColumnField(column)?.is_core"
+                      :ref="(instance: unknown) => setAutosizeTextareaRef(
+                        instance,
+                        row.id,
+                        virtualColumnField(column)!.id,
+                      )"
+                      type="textarea"
+                      :autosize="{ minRows: 1, maxRows: 1 }"
+                      resize="none"
+                      :model-value="valueFor(row, virtualColumnField(column)!)"
+                      :readonly="row.locked"
+                      :inputmode="virtualColumnField(column)?.data_type === 'number' ? 'decimal' : undefined"
+                      @update:model-value="setValue(row, virtualColumnField(column)!, String($event))"
+                      @change="saveField(row, virtualColumnField(column)!)"
+                    />
+                    <el-input
+                      v-else
+                      :model-value="valueFor(row, virtualColumnField(column)!)"
+                      :readonly="row.locked"
+                      :inputmode="virtualColumnField(column)?.data_type === 'number' ? 'decimal' : undefined"
+                      @update:model-value="setValue(row, virtualColumnField(column)!, String($event))"
+                      @change="saveField(row, virtualColumnField(column)!)"
+                    />
+                  </template>
+                  <span v-else class="cell-field-value">
+                    {{ valueFor(row, virtualColumnField(column)!) }}
+                  </span>
+                  <span
+                    v-if="gridFillPreviewValue(rowIndex, column.fieldIndex ?? -1) !== null"
+                    class="grid-fill-preview-value"
+                  >
+                    {{ gridFillPreviewValue(rowIndex, column.fieldIndex ?? -1) || "（空）" }}
+                  </span>
+                  <span
+                    v-if="isGridFillHandleCell(rowIndex, column.fieldIndex ?? -1)"
+                    class="grid-fill-handle"
+                    role="button"
+                    tabindex="-1"
+                    aria-label="拖动或双击自动填充"
+                    title="拖动序列填充；按住 Ctrl 拖动复制；双击向下自动填充"
+                    @pointerdown.stop.prevent="handleGridFillPointerDown"
+                  />
+                  <span
+                    v-if="fieldErrorFor(row, virtualColumnField(column)!)"
+                    class="cell-field-error"
+                  >
+                    {{ fieldErrorFor(row, virtualColumnField(column)!) }}
+                  </span>
+                  <span
+                    v-if="isDraft(row)
+                      && virtualColumnField(column)?.system_key === 'pathology_number'
+                      && valueFor(row, virtualColumnField(column)!).trim()"
+                    class="cell-save-state is-dirty"
+                    title="这条记录尚未写入台账"
+                  >
+                    未保存
+                  </span>
+                  <span
+                    v-else-if="cellSaveStateFor(row, virtualColumnField(column)!)"
+                    class="cell-save-state"
+                    :class="`is-${cellSaveStateFor(row, virtualColumnField(column)!)?.status}`"
+                    :title="cellSaveStateFor(row, virtualColumnField(column)!)?.message ?? ''"
+                  >
+                    {{
+                      cellSaveStateFor(row, virtualColumnField(column)!)?.status === 'saving'
+                        ? '保存中'
+                        : cellSaveStateFor(row, virtualColumnField(column)!)?.status === 'saved'
+                          ? '已保存'
+                          : cellSaveStateFor(row, virtualColumnField(column)!)?.status === 'error'
+                            ? '失败'
+                            : '未保存'
+                    }}
+                  </span>
+                </div>
+              </template>
+
+              <template #empty>
+                <el-empty description="当前项目暂无记录" :image-size="64" />
+              </template>
+            </el-table-v2>
+          </template>
+        </el-auto-resizer>
       </div>
       <div
         v-if="columnToolsField"
@@ -6416,9 +6636,6 @@ onBeforeUnmount(() => {
             role="tab"
             :aria-selected="project.id === activeProjectId"
             :title="project.name"
-            @pointerenter="scheduleProjectPrefetch(project.id)"
-            @pointerleave="cancelProjectPrefetch"
-            @focus="scheduleProjectPrefetch(project.id)"
             @click="selectProject(project.id)"
           >
             <span>{{ project.name }}</span>
@@ -6439,15 +6656,6 @@ onBeforeUnmount(() => {
             </template>
           </div>
           <span class="ledger-record-total">共 {{ recordTotal }} 条</span>
-          <el-pagination
-            v-if="recordTotal > pageSize"
-            v-model:current-page="currentPage"
-            :page-size="pageSize"
-            :total="recordTotal"
-            layout="prev, pager, next"
-            size="small"
-            @current-change="changeLedgerPage"
-          />
           <div class="ledger-zoom-control" aria-label="台账缩放">
             <el-button text :icon="Minus" aria-label="缩小台账" :disabled="historyReplayLoading" @click="zoomOut" />
             <el-slider
@@ -7071,7 +7279,72 @@ onBeforeUnmount(() => {
 }
 
 .ledger-filter-group {
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
+}
+
+.ledger-cell-editor-bar {
+  box-sizing: border-box;
+  display: flex;
+  min-width: 320px;
+  height: 32px;
+  flex: 1 1 420px;
+  align-items: stretch;
+  overflow: hidden;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 8px;
+  background: var(--app-bg);
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.ledger-cell-editor-bar:focus-within {
+  border-color: var(--app-primary);
+  box-shadow: 0 0 0 2px var(--app-primary-soft);
+}
+
+.ledger-cell-editor-bar.is-readonly {
+  background: var(--app-surface-soft);
+}
+
+.ledger-cell-editor-address {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-right: 1px solid var(--app-border);
+  color: var(--app-muted);
+  background: var(--app-surface-soft);
+  user-select: none;
+}
+
+.ledger-cell-editor-address {
+  width: 52px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+}
+
+.ledger-cell-editor-bar :deep(.el-input) {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.ledger-cell-editor-bar :deep(.el-input__wrapper),
+.ledger-cell-editor-bar :deep(.el-input.is-disabled .el-input__wrapper) {
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.ledger-cell-editor-bar :deep(.el-input__inner) {
+  color: var(--app-text);
+  font-family: var(--ledger-font-family, inherit);
+  font-size: var(--ledger-font-size, 14px);
+}
+
+.ledger-cell-editor-bar :deep(.el-input.is-disabled .el-input__inner) {
+  color: var(--app-muted);
 }
 
 .ledger-search-advanced {
@@ -7091,10 +7364,8 @@ onBeforeUnmount(() => {
 }
 
 .ledger-operation-group {
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   justify-content: flex-start;
-  overflow-x: auto;
-  scrollbar-width: thin;
 }
 
 .ledger-operation-group > * {
@@ -7329,14 +7600,19 @@ onBeforeUnmount(() => {
   width: 100%;
 }
 
+.global-search-results :deep(.el-table .cell) {
+  text-align: center;
+}
+
 :deep(.search-focus-row > td) {
   background: var(--app-primary-soft) !important;
   transition: background-color 300ms ease;
 }
 
 @media (max-width: 900px) {
-  .ledger-filter-group {
-    overflow-x: auto;
+  .ledger-cell-editor-bar {
+    min-width: 300px;
+    flex-basis: 300px;
   }
 
   .ledger-filter-group > :deep(.el-input):not(.date-filter) {
@@ -7366,14 +7642,12 @@ onBeforeUnmount(() => {
   display: flex;
   min-height: 44px;
   align-items: center;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: 8px;
   border: 1px solid var(--app-primary-border);
   border-radius: 12px;
   background: var(--app-hover);
-  overflow-x: auto;
   padding: 6px 10px;
-  scrollbar-width: thin;
 }
 
 .record-selection-scope {
@@ -7391,12 +7665,6 @@ onBeforeUnmount(() => {
   margin-left: 0;
 }
 
-.selection-drag-hint {
-  color: var(--app-muted);
-  font-size: 12px;
-  white-space: nowrap;
-}
-
 .selection-bar > :deep(.el-button) {
   min-height: 32px;
 }
@@ -7410,11 +7678,6 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
-.ledger-table-card :deep(.el-table) {
-  min-height: 0;
-  flex: 1;
-}
-
 .ledger-table-surface {
   display: flex;
   min-width: 0;
@@ -7422,15 +7685,8 @@ onBeforeUnmount(() => {
   flex: 1;
   flex-direction: column;
   overflow: hidden;
-  zoom: var(--ledger-zoom, 1);
   font-family: var(--ledger-font-family, inherit);
   font-size: var(--ledger-font-size, 14px);
-}
-
-.ledger-table-surface :deep(.el-table) {
-  height: 100%;
-  font-family: inherit;
-  font-size: inherit;
 }
 
 .ledger-bottom-bar {
@@ -7533,10 +7789,10 @@ onBeforeUnmount(() => {
 
 .grid-fill-handle::after {
   position: absolute;
-  right: 5px;
-  bottom: 5px;
-  width: 6px;
-  height: 6px;
+  right: 1px;
+  bottom: 1px;
+  width: 4px;
+  height: 4px;
   border: 1px solid var(--app-bg);
   border-radius: 1px;
   background: var(--app-primary, var(--app-primary));
@@ -7594,11 +7850,6 @@ onBeforeUnmount(() => {
   white-space: pre-wrap;
 }
 
-:deep(.ledger-table-card .el-table__cell) {
-  height: auto;
-  vertical-align: top;
-}
-
 .cell-field:not(.cell-field-editing) :deep(*) {
   user-select: none;
   -webkit-user-select: none;
@@ -7643,261 +7894,6 @@ onBeforeUnmount(() => {
   color: var(--app-muted);
   font-size: 13px;
   line-height: 1.6;
-}
-
-:deep(.el-table .locked-row > td.el-table__cell) {
-  background: var(--app-bg);
-}
-
-:deep(.el-table .locked-row .el-input__wrapper) {
-  background: var(--app-bg);
-  box-shadow: 0 0 0 1px var(--app-border-strong) inset;
-}
-
-:deep(.el-table .locked-row .el-input__inner) {
-  color: var(--app-text);
-  -webkit-text-fill-color: var(--app-text);
-  cursor: text;
-}
-
-:deep(.el-table .draft-row > td.el-table__cell) {
-  background: var(--app-hover);
-}
-
-:deep(.el-table .draft-row:hover > td.el-table__cell) {
-  background: var(--app-hover) !important;
-}
-
-:deep(.el-table .highlighted-row > td.el-table__cell),
-:deep(.el-table .highlighted-row:hover > td.el-table__cell) {
-  background-color: var(--record-highlight-color) !important;
-}
-
-:deep(.el-table .highlighted-row .el-input__wrapper),
-:deep(.el-table .highlighted-row .el-select__wrapper),
-:deep(.el-table .highlighted-row .el-textarea__inner) {
-  background-color: var(--record-highlight-color);
-}
-
-:deep(.el-table td.cell-highlighted),
-:deep(.el-table td.cell-highlighted:hover) {
-  background-color: var(--cell-highlight-color) !important;
-}
-
-:deep(.el-table td.cell-highlighted .el-input__wrapper),
-:deep(.el-table td.cell-highlighted .el-select__wrapper),
-:deep(.el-table td.cell-highlighted .el-textarea__inner) {
-  background-color: var(--cell-highlight-color) !important;
-}
-
-:deep(.el-table td.grid-cell-selected) {
-  background: var(--app-primary-soft) !important;
-  box-shadow: inset 0 0 0 1px var(--app-primary-mid);
-}
-
-:deep(.el-table td.grid-cell-selected .el-input__wrapper),
-:deep(.el-table td.grid-cell-selected .el-select__wrapper),
-:deep(.el-table td.grid-cell-selected .el-textarea__inner) {
-  background-color: var(--app-primary-soft) !important;
-}
-
-:deep(.el-table td.grid-cell-active) {
-  box-shadow: inset 0 0 0 2px var(--app-primary);
-}
-
-:deep(.el-table td.grid-cell-editing),
-:deep(.el-table td.grid-cell-editing:hover) {
-  background: var(--app-cell-editing-bg) !important;
-  box-shadow: inset 0 0 0 2px var(--app-primary);
-}
-
-:deep(.el-table td.grid-cell-editing .el-input__wrapper),
-:deep(.el-table td.grid-cell-editing .el-select__wrapper),
-:deep(.el-table td.grid-cell-editing .el-textarea__inner) {
-  background-color: var(--app-cell-editing-bg) !important;
-}
-
-:deep(.el-table td.grid-cell-fill-preview) {
-  background: var(--app-primary-border) !important;
-  box-shadow: inset 0 0 0 1px var(--app-primary-mid);
-}
-
-:deep(.el-table .el-textarea__inner) {
-  box-sizing: border-box;
-  display: block;
-  min-height: var(--ledger-editor-height, 32px) !important;
-  overflow-y: auto !important;
-  overflow-wrap: anywhere;
-  word-break: break-all;
-  line-height: 20px;
-  padding: max(1px, calc((var(--ledger-editor-height, 32px) - 20px) / 2)) var(--ledger-cell-padding-x, 5px);
-}
-
-:deep(.ledger-table-surface .el-table th),
-:deep(.ledger-table-surface .el-table td),
-:deep(.ledger-table-surface .el-table .cell),
-:deep(.ledger-table-surface .el-input__inner),
-:deep(.ledger-table-surface .el-select__selected-item),
-:deep(.ledger-table-surface .editable-date-input) {
-  font-family: var(--ledger-font-family, inherit);
-  font-size: var(--ledger-font-size, 14px);
-}
-
-:deep(.el-table .cell) {
-  padding: 5px 7px;
-  text-align: center;
-}
-
-:deep(.el-table .el-table__body .cell) {
-  padding: 0 7px;
-}
-
-:deep(.el-table .el-table__body td.el-table__cell) {
-  padding-top: 0;
-  padding-bottom: 0;
-}
-
-:deep(.ledger-table-card .el-table__body) {
-  border-spacing: 0 var(--ledger-row-gap, 0px);
-}
-
-:deep(.el-table td.ledger-editor-column) {
-  padding-right: 0;
-  padding-left: 0;
-  vertical-align: middle;
-}
-
-:deep(.el-table td.ledger-editor-column > .cell) {
-  display: flex;
-  min-height: 32px;
-  align-items: center;
-  justify-content: center;
-  padding-right: 0;
-  padding-left: 0;
-}
-
-:deep(.el-table td.ledger-editor-column > .cell > .cell-field) {
-  width: var(--ledger-editor-width, 100%);
-  max-width: 100%;
-  min-height: var(--ledger-editor-height, 32px);
-  justify-content: center;
-}
-
-:deep(.el-table td.ledger-editor-column > .cell > .cell-field > .el-input),
-:deep(.el-table td.ledger-editor-column > .cell > .cell-field > .el-textarea),
-:deep(.el-table td.ledger-editor-column > .cell > .cell-field > .el-select),
-:deep(.el-table td.ledger-editor-column > .cell > .cell-field > .editable-date-input) {
-  width: var(--ledger-editor-width, 100%);
-  max-width: 100%;
-  min-height: var(--ledger-editor-height, 32px);
-  align-self: center;
-  min-width: 0;
-}
-
-:deep(.el-table td.ledger-editor-column .el-input__wrapper),
-:deep(.el-table td.ledger-editor-column .el-select__wrapper) {
-  height: var(--ledger-editor-height, 32px);
-  min-height: var(--ledger-editor-height, 32px);
-  align-items: center;
-  padding-right: var(--ledger-cell-padding-x, 5px);
-  padding-left: var(--ledger-cell-padding-x, 5px);
-}
-
-:deep(.el-table td.ledger-editor-column .el-input__inner) {
-  line-height: 20px;
-}
-
-:deep(.el-table td.el-table-column--selection) {
-  cursor: default;
-  user-select: none;
-  vertical-align: middle !important;
-}
-
-:deep(.el-table td.el-table-column--selection .cell) {
-  display: flex;
-  padding: 0;
-  min-height: 100%;
-  align-items: center;
-  justify-content: center;
-}
-
-:deep(.el-table td.el-table-column--selection .el-checkbox) {
-  display: inline-flex;
-  width: 100%;
-  height: 100%;
-  min-height: var(--ledger-selection-min-height, 42px);
-  align-items: center;
-  justify-content: center;
-  margin: 0;
-  cursor: pointer;
-}
-
-:deep(.el-table td.el-table-column--selection .el-checkbox__inner) {
-  width: 20px;
-  height: 20px;
-}
-
-:deep(.el-table td.ledger-lock-column) {
-  padding: 0;
-  vertical-align: middle !important;
-}
-
-:deep(.el-table td.ledger-lock-column > .cell) {
-  display: flex;
-  min-height: var(--ledger-editor-height, 32px);
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-}
-
-:deep(.el-table.selection-dragging td.el-table-column--selection .el-checkbox__inner) {
-  cursor: grabbing;
-}
-
-:deep(.el-table.grid-selection-dragging) {
-  user-select: none;
-}
-
-:deep(.el-table th.el-table__cell) {
-  color: var(--app-muted);
-  background: var(--app-surface-soft);
-  text-align: center;
-  user-select: none;
-  -webkit-user-select: none;
-}
-
-:deep(.el-table th.grid-header-selected) {
-  background: var(--app-primary-soft) !important;
-  box-shadow: inset 0 -2px 0 var(--app-primary);
-}
-
-:deep(.el-table th.grid-header-partial) {
-  background: var(--app-hover) !important;
-  box-shadow: inset 0 -2px 0 var(--app-primary-mid);
-}
-
-:deep(.el-table .el-input__inner),
-:deep(.el-table .el-textarea__inner) {
-  text-align: center;
-}
-
-:deep(.ledger-table-card .el-table__body-wrapper .el-scrollbar__bar.is-horizontal) {
-  height: 10px;
-  bottom: 2px;
-}
-
-:deep(.ledger-table-card .el-table__body-wrapper > .el-scrollbar) {
-  box-sizing: border-box;
-  padding-bottom: 14px;
-}
-
-:deep(.ledger-table-card .el-table__body-wrapper .el-scrollbar__bar.is-vertical) {
-  bottom: 14px;
-}
-
-:deep(.ledger-table-card .el-table__body-wrapper .el-scrollbar__thumb) {
-  border-radius: 999px;
-  background: var(--app-subtle);
 }
 
 .cell-save-state {
@@ -8032,6 +8028,188 @@ onBeforeUnmount(() => {
   background: var(--app-warning-soft);
   color: var(--app-text);
   line-height: 1.6;
+}
+
+/* Table V2 renders div-based virtual rows instead of native table elements. */
+.ledger-table-surface :deep(.el-auto-resizer),
+.ledger-table-surface :deep(.el-table-v2),
+.ledger-table-surface :deep(.el-table-v2__root) {
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.ledger-table-surface :deep(.el-table-v2) {
+  border: 1px solid var(--app-border);
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.ledger-table-surface :deep(.el-table-v2__header-cell),
+.ledger-table-surface :deep(.el-table-v2__row-cell) {
+  box-sizing: border-box;
+  border-right: 1px solid var(--app-border);
+  border-bottom: 1px solid var(--app-border);
+  padding: 0;
+}
+
+.ledger-table-surface :deep(.el-table-v2__header-row),
+.ledger-table-surface :deep(.el-table-v2__row) {
+  border-bottom: 0;
+}
+
+.ledger-table-surface :deep(.el-table-v2__header-cell) {
+  justify-content: center;
+  overflow: hidden;
+  background: var(--app-surface-soft);
+  color: var(--app-muted);
+  text-align: center;
+  user-select: none;
+}
+
+.ledger-table-surface :deep(.el-table-v2__row-cell) {
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: var(--app-surface);
+}
+
+.ledger-table-surface :deep(.el-table-v2__left) {
+  box-shadow: none;
+}
+
+.ledger-table-surface :deep(.el-table-v2__row.locked-row .el-table-v2__row-cell) {
+  background: var(--app-bg);
+}
+
+.ledger-table-surface :deep(.el-table-v2__row.draft-row .el-table-v2__row-cell) {
+  background: var(--app-hover);
+}
+
+.ledger-table-surface :deep(.el-table-v2__row.highlighted-row .el-table-v2__row-cell) {
+  background-color: var(--record-highlight-color) !important;
+}
+
+.ledger-table-surface :deep(.el-table-v2__row.search-focus-row .el-table-v2__row-cell) {
+  background: var(--app-primary-soft) !important;
+  transition: background-color 300ms ease;
+}
+
+.ledger-table-surface :deep(.el-table-v2__row-cell.cell-highlighted) {
+  background-color: var(--cell-highlight-color) !important;
+}
+
+.ledger-table-surface :deep(.el-table-v2__row-cell.grid-cell-selected) {
+  background: var(--app-primary-soft) !important;
+  box-shadow: inset 0 0 0 1px var(--app-primary-mid);
+}
+
+.ledger-table-surface :deep(.el-table-v2__row-cell.grid-cell-active),
+.ledger-table-surface :deep(.el-table-v2__row-cell.grid-cell-editing) {
+  box-shadow: inset 0 0 0 2px var(--app-primary);
+}
+
+.ledger-table-surface :deep(.el-table-v2__row-cell.grid-cell-editing) {
+  background: var(--app-cell-editing-bg) !important;
+}
+
+.ledger-table-surface :deep(.el-table-v2__row-cell.grid-cell-fill-preview) {
+  background: var(--app-primary-border) !important;
+  box-shadow: inset 0 0 0 1px var(--app-primary-mid);
+}
+
+.ledger-table-surface :deep(.el-table-v2__header-cell.grid-header-selected) {
+  background: var(--app-primary-soft) !important;
+  box-shadow: inset 0 -2px 0 var(--app-primary);
+}
+
+.ledger-table-surface :deep(.el-table-v2__header-cell.grid-header-partial) {
+  background: var(--app-hover) !important;
+  box-shadow: inset 0 -2px 0 var(--app-primary-mid);
+}
+
+.ledger-table-surface :deep(.ledger-editor-column > .cell-field) {
+  width: var(--ledger-editor-width, 100%);
+  max-width: 100%;
+  height: var(--ledger-editor-height, 32px);
+  min-height: 0;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.ledger-table-surface :deep(.ledger-editor-column .el-input),
+.ledger-table-surface :deep(.ledger-editor-column .el-textarea),
+.ledger-table-surface :deep(.ledger-editor-column .el-select),
+.ledger-table-surface :deep(.ledger-editor-column .editable-date-input) {
+  width: var(--ledger-editor-width, 100%);
+  max-width: 100%;
+  height: var(--ledger-editor-height, 32px);
+  min-height: 0;
+}
+
+.ledger-table-surface :deep(.ledger-editor-column .el-input__wrapper),
+.ledger-table-surface :deep(.ledger-editor-column .el-select__wrapper),
+.ledger-table-surface :deep(.ledger-editor-column .el-textarea__inner) {
+  height: var(--ledger-editor-height, 32px);
+  min-height: var(--ledger-editor-height, 32px) !important;
+  padding-right: var(--ledger-cell-padding-x, 5px);
+  padding-left: var(--ledger-cell-padding-x, 5px);
+  font-family: var(--ledger-font-family, inherit);
+  font-size: var(--ledger-font-size, 14px);
+  text-align: center;
+}
+
+.ledger-table-surface :deep(.cell-field-value) {
+  height: var(--ledger-editor-height, 32px);
+  min-height: 0;
+  max-height: var(--ledger-editor-height, 32px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ledger-v2-selection-control {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+}
+
+.ledger-table-surface :deep(.record-selection-dragging) {
+  user-select: none;
+}
+
+.ledger-table-surface :deep(.record-selection-dragging .ledger-v2-selection-control),
+.ledger-table-surface :deep(.record-selection-dragging .ledger-v2-selection-control .el-checkbox) {
+  cursor: grabbing;
+}
+
+.ledger-table-surface :deep(.ledger-v2-selection-control .el-checkbox) {
+  display: inline-flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+}
+
+.ledger-v2-lock-state {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+}
+
+.ledger-table-surface :deep(.ledger-v2-selection-control .el-checkbox__inner) {
+  width: 20px;
+  height: 20px;
+}
+
+.ledger-table-surface :deep(.grid-fill-handle) {
+  right: 0;
+  bottom: 0;
 }
 
 @media (max-width: 1200px) {
