@@ -99,7 +99,6 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 - 实验编号允许重复；批量编排允许记录来自多个项目，只校验记录存在、未锁定且仍为“待实验”，再按请求顺序在一个事务中写回编号。
 - 病理号仍允许重复；项目开关开启时，新增和单元格批量预检只在当前项目内检查精确重复并产生可确认的 warning，不执行跨项目检查。
 - 实验编排中的组合病理号由前端按 `pathology_number[-block_number]` 临时派生，用于编排显示、排序和 Excel 导出；报告映射选择 `pathology_with_block` 时由后端按同一规则临时生成。两者都不改台账中的病理号或蜡块号。
-- 批量删除执行时比较预览得到的完整 UUID 集合；集合变化或包含锁定记录即拒绝执行。
 - 单元格粘贴、填充和查找替换先预检查字段类型、选项、预期旧值和锁定状态，再在一个事务中提交。
 
 所有创建/更新时间和审计时间由应用以 UTC 生成；`experiment_date` 是不带时区的业务日期，展示和调度时转换为 `Asia/Shanghai`。
@@ -115,9 +114,9 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 | 表头 | `GET/POST /api/projects/{project_id}/fields`；`POST /api/projects/{project_id}/fields/batch`；`PATCH/DELETE /api/projects/fields/{field_id}`；`PUT /api/projects/fields/{field_id}/options`；`PUT /api/projects/{project_id}/fields/reorder` | 动态字段、批量表头及选项管理 |
 | 台账 | `GET/POST /api/records`；`GET/PATCH/DELETE /api/records/{record_id}`；`PUT /api/records/{record_id}/lock`；`PUT /api/records/report-status` | 记录查询、CRUD、相对目标行插入、锁定、报告标记 |
 | 动态查询与批量单元格 | `POST /api/records/query`；`POST /api/records/query/ids`；`POST /api/records/cell-batches/preview`；`POST /api/records/cell-batches/commit`；`POST /api/records/replace/preview`；`POST /api/records/replace/commit` | 动态字段分批筛选排序、完整结果 ID、粘贴/填充与查找替换的预检查和原子提交 |
-| 编号与批删 | `POST /api/records/experiment-numbers`；`POST /api/records/bulk-delete/preview`；`POST /api/records/bulk-delete/execute` | 实验编号原子回写、预览/执行批量删除 |
-| 报告 | `GET/POST /api/report-templates`；`POST /api/report-templates/{template_id}/versions`；`PUT /api/report-template-versions/{version_id}/mappings`；`DELETE /api/report-templates/{template_id}`；`GET /api/printers`；`GET /api/print-engines`；`POST /api/reports/print` | 模板版本、映射、打印机和直接打印；前端默认按台账列表倒序提交所选记录，后端保持请求顺序逐份打印 |
-| Excel | `POST /api/exports/workbook` | XLSX 生成（导入已移除） |
+| 编号 | `POST /api/records/experiment-numbers` | 实验编号原子回写 |
+| 报告 | `GET/POST /api/report-templates`；`POST /api/report-templates/{template_id}/versions`；`PUT /api/report-template-versions/{version_id}/mappings`；`DELETE /api/report-templates/{template_id}`；`GET /api/printers`；`GET /api/print-engines`；`POST /api/reports/print`；`POST /api/report-template-versions/{version_id}/native-preview` | 模板版本、映射、打印机、直接打印和 Word/WPS 原生预览；前端默认按台账列表倒序提交所选记录，后端保持请求顺序逐份打印 |
+| Excel | `POST /api/exports/workbook`；`POST /api/ledgers/{ledger_id}/native-preview`；`GET /api/native-preview/{job_id}` | XLSX 生成及 Word/WPS 原生预览（导入已移除） |
 | 自动导出 | `GET /api/auto-export/config`；`GET/POST /api/auto-export/tasks`；`PUT/DELETE /api/auto-export/tasks/{task_id}`；`POST /api/auto-export/tasks/{task_id}/run`；`GET /api/auto-export/tasks/{task_id}/runs`；`POST /api/auto-export/validate-cron` | 任务配置、立即执行、历史查询、Cron 校验 |
 | 数据库备份 | `GET/PUT /api/database-backups/settings`；`GET /api/database-backups/status`；`GET /api/database-backups`；`POST /api/database-backups/run`；`POST /api/database-backups/restore` | 自动备份设置、状态与历史、立即备份、重启恢复 |
 
@@ -154,11 +153,11 @@ Excel 导入入口、API 和解析服务已移除；粘贴使用单元格批量�
 - 主窗口和快速录入 BrowserWindow 均使用 `contextIsolation=true`、`nodeIntegration=false`、`sandbox=true`；渲染进程只能使用 `preload.cjs` 暴露的白名单能力。
 - 渲染器自行调用 `window.open` 仍会被拒绝，生产导航只允许打包入口及其 hash 路由。普通桌面 IPC 只接受主窗口发送者；打开快速录入只允许主窗口调用，返回主程序及变更通知只允许当前快速录入窗口调用。
 - 后端仅绑定 `127.0.0.1`，CORS 只允许 `null` 和本地 Vite origin。当前没有用户认证，文件系统和数据目录权限由 Windows 环境负责。
-- 自动导出同一任务使用运行中集合避免重复执行；数据库备份使用异步锁避免定时、手动、恢复前和退出备份并发；批量单元格预览 token 在提交前原子认领，事务失败时释放、成功时消费；打印、批删和编号回写均在服务层完成关键状态复核。
+- 自动导出同一任务使用运行中集合避免重复执行；数据库备份使用异步锁避免定时、手动、恢复前和退出备份并发；批量单元格预览 token 在提交前原子认领，事务失败时释放、成功时消费；打印和编号回写均在服务层完成关键状态复核。
 
 ## 8. 配置、迁移与数据恢复
 
-主要环境变量使用 `GENE_LEDGER_` 前缀：`DATA_DIR`、`DATABASE_URL`、`HOST`、`PORT`、`AUTO_CREATE_SCHEMA`、`MAX_TEMPLATE_SIZE_MB`、`PREVIEW_TTL_SECONDS`、`AUDIT_LOG_RETENTION_DAYS`、`AUDIT_LOG_MAX_ROWS`。PDF 打印预览默认保留 24 小时，启动及生成新预览时会清理过期文件。桌面启动通过命令行参数覆盖数据目录、主机和端口。
+主要环境变量使用 `GENE_LEDGER_` 前缀：`DATA_DIR`、`DATABASE_URL`、`HOST`、`PORT`、`AUTO_CREATE_SCHEMA`、`MAX_TEMPLATE_SIZE_MB`、`AUDIT_LOG_RETENTION_DAYS`、`AUDIT_LOG_MAX_ROWS`。桌面启动通过命令行参数覆盖数据目录、主机和端口。
 
 迁移脚本位于 `backend/migrations/versions/`。台账排序和筛选由通用 `AppSetting` 中的 `ledger_layout_settings` 按项目保存，表头顺序、宽度、隐藏和默认值由 `FieldDefinition` 管理。启动检测到旧 SQLite 结构时，仍会先生成迁移前数据库副本；日常完整业务备份则同时包含数据库和报告模板，并支持从设置页恢复。重要数据仍建议再复制到另一块磁盘或受控网络位置。
 
@@ -190,7 +189,7 @@ backend/app/database.py                SQLAlchemy 引擎与 SQLite 外键
 backend/app/models.py                  ORM 模型与约束
 backend/app/api/system.py              健康、审计、设置
 backend/app/api/projects.py            项目、动态字段、批量表头与选项
-backend/app/api/records.py             台账、复杂查询、单元格批处理、编号与批量删除
+backend/app/api/records.py             台账、复杂查询、单元格批处理与编号回写
 backend/app/api/exports.py              Excel 字节流导出
 backend/app/api/reports.py              模板、映射、打印
 backend/app/api/auto_exports.py         自动导出任务与运行历史

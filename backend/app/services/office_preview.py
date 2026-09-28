@@ -85,68 +85,6 @@ def _application_process_id(application: object) -> int | None:
     return process_id.value or None
 
 
-def _preview_worker(
-    engine: str,
-    input_path: str,
-    output_path: str,
-    document_type: str,
-    connection: Connection,
-) -> None:
-    pythoncom = None
-    application = None
-    document = None
-    try:
-        import pythoncom as pythoncom_module
-        import win32com.client
-
-        progid = _resolve_progid(engine, document_type)
-        if not progid:
-            raise PreviewEngineUnavailable(f"No {engine} {document_type} engine is registered.")
-        pythoncom = pythoncom_module
-        pythoncom.CoInitialize()
-        application = win32com.client.DispatchEx(progid)
-        application.Visible = False
-        try:
-            application.DisplayAlerts = False
-        except Exception:
-            pass
-        connection.send(("started", _application_process_id(application)))
-        if document_type == "docx":
-            document = application.Documents.Open(input_path, False, True, False)
-            # 17 is wdExportFormatPDF for Word and WPS Writer.
-            document.ExportAsFixedFormat(output_path, 17)
-        else:
-            document = application.Workbooks.Open(input_path, False, True)
-            # 0 is xlTypePDF for Excel and is also accepted by WPS Spreadsheet.
-            document.ExportAsFixedFormat(0, output_path)
-        document.Close(False)
-        document = None
-        connection.send(("success", None))
-    except Exception as error:
-        try:
-            connection.send(("error", f"{type(error).__name__}: {error}"))
-        except (BrokenPipeError, EOFError, OSError):
-            pass
-    finally:
-        if document is not None:
-            try:
-                document.Close(False)
-            except Exception:
-                pass
-        if application is not None:
-            try:
-                application.Quit()
-            except Exception:
-                pass
-        gc.collect()
-        if pythoncom is not None:
-            try:
-                pythoncom.CoUninitialize()
-            except Exception:
-                pass
-        connection.close()
-
-
 def _native_preview_worker(
     engine: str,
     input_path: str,
@@ -300,9 +238,7 @@ def _terminate_process(process_id: int | None) -> None:
 
 
 class OfficePreviewService:
-    def __init__(self, timeout_seconds: int = 120) -> None:
-        self.timeout_seconds = timeout_seconds
-        self._lock = threading.Lock()
+    def __init__(self) -> None:
         self._native_lock = threading.RLock()
         self._native_jobs: dict[str, NativePreviewJob] = {}
         self.native_start_timeout_seconds = 15
@@ -337,86 +273,6 @@ class OfficePreviewService:
             label = "Microsoft Office" if requested == "word" else "WPS"
             raise PreviewEngineUnavailable(f"{label} {document_type} application was not detected.")
         return requested
-
-    def _convert(
-        self,
-        input_path: Path,
-        output_path: Path,
-        engine: PreviewEngine,
-        document_type: str,
-    ) -> str:
-        if os.name != "nt":
-            raise OfficePreviewError("Microsoft Office/WPS preview is supported on Windows only.")
-        if not input_path.is_file():
-            raise OfficePreviewError("The temporary preview document does not exist.")
-        resolved = self.resolve_engine(engine, document_type)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._lock:
-            context = multiprocessing.get_context("spawn")
-            parent, child = context.Pipe(duplex=False)
-            process = context.Process(
-                target=_preview_worker,
-                args=(
-                    resolved,
-                    str(input_path.resolve()),
-                    str(output_path.resolve()),
-                    document_type,
-                    child,
-                ),
-                name=f"ledger-preview-{resolved}",
-                daemon=True,
-            )
-            process.start()
-            child.close()
-            process_id: int | None = None
-            deadline = time.monotonic() + self.timeout_seconds
-            final: tuple[str, object] | None = None
-            try:
-                while time.monotonic() < deadline:
-                    if parent.poll(0.2):
-                        message = parent.recv()
-                        if message[0] == "started":
-                            process_id = int(message[1]) if message[1] is not None else None
-                            continue
-                        final = message
-                        break
-                    if not process.is_alive():
-                        break
-                if final is None:
-                    if process.is_alive():
-                        process.terminate()
-                        process.join(timeout=2)
-                        _terminate_process(process_id)
-                        raise OfficePreviewError(f"{resolved} preview timed out.")
-                    raise OfficePreviewError(f"{resolved} preview exited unexpectedly ({process.exitcode}).")
-                if final[0] == "error":
-                    raise OfficePreviewError(f"{resolved} preview failed: {final[1]}")
-                process.join(timeout=5)
-                if not output_path.is_file():
-                    raise OfficePreviewError(f"{resolved} did not produce a PDF preview.")
-                return resolved
-            finally:
-                parent.close()
-                if process.is_alive():
-                    process.terminate()
-                    process.join(timeout=2)
-                    _terminate_process(process_id)
-
-    def convert_xlsx_to_pdf(
-        self,
-        input_path: Path,
-        output_path: Path,
-        engine: PreviewEngine = "auto",
-    ) -> str:
-        return self._convert(input_path, output_path, engine, "xlsx")
-
-    def convert_docx_to_pdf(
-        self,
-        input_path: Path,
-        output_path: Path,
-        engine: PreviewEngine = "auto",
-    ) -> str:
-        return self._convert(input_path, output_path, engine, "docx")
 
     def start_native_preview(
         self,

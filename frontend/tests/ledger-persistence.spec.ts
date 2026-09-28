@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   LatestValuePersistence,
+  resolveCreatedRecordRefreshPlan,
   resolveLedgerCellCompletionAction,
   resolveLedgerCellEditState,
+  shouldApplyLedgerEditCompletion,
 } from "@/utils/ledgerPersistence";
 
 function deferred<T>(): {
@@ -21,6 +23,18 @@ function deferred<T>(): {
 }
 
 describe("ledger cell save state", () => {
+  it("does not let an older save completion close a newer cell editor", () => {
+    const completed = { rowId: "draft-1", fieldId: "pathology" };
+    expect(shouldApplyLedgerEditCompletion(completed, null, 4, 4)).toBe(true);
+    expect(shouldApplyLedgerEditCompletion(completed, completed, 4, 4)).toBe(true);
+    expect(shouldApplyLedgerEditCompletion(completed, {
+      rowId: "record-2",
+      fieldId: "block-number",
+    }, 4, 4)).toBe(false);
+    expect(shouldApplyLedgerEditCompletion(completed, null, 4, 5)).toBe(false);
+    expect(shouldApplyLedgerEditCompletion(completed, completed, 4, 5)).toBe(false);
+  });
+
   it("clears unsaved state immediately when a normal edit returns to the persisted value", () => {
     expect(resolveLedgerCellEditState("原值", "原值", 0)).toBe("clear");
     expect(resolveLedgerCellEditState("新值", "原值", 0)).toBe("dirty");
@@ -62,6 +76,37 @@ describe("ledger cell save state", () => {
       persistedValue: "原值",
       inFlightCount: 1,
     })).toBe("pending");
+  });
+});
+
+describe("created record refresh planning", () => {
+  it("keeps a matching created record locally without a full reload", () => {
+    expect(resolveCreatedRecordRefreshPlan({
+      localRecordIds: ["record-1", "created"],
+      queriedRecordIds: ["record-1", "created"],
+      createdRecordId: "created",
+    })).toBe("local-visible");
+  });
+
+  it("removes only the created record when it does not match the active filters", () => {
+    expect(resolveCreatedRecordRefreshPlan({
+      localRecordIds: ["record-1", "created"],
+      queriedRecordIds: ["record-1"],
+      createdRecordId: "created",
+    })).toBe("local-filtered-out");
+  });
+
+  it("falls back to a reload when another record changed concurrently", () => {
+    expect(resolveCreatedRecordRefreshPlan({
+      localRecordIds: ["record-1", "created"],
+      queriedRecordIds: ["record-1", "record-2", "created"],
+      createdRecordId: "created",
+    })).toBe("reload");
+    expect(resolveCreatedRecordRefreshPlan({
+      localRecordIds: ["record-1", "record-2", "created"],
+      queriedRecordIds: ["record-1", "created"],
+      createdRecordId: "created",
+    })).toBe("reload");
   });
 });
 

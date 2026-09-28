@@ -327,22 +327,6 @@ export interface RecordOperationApplyResult {
   deleted_ids: string[];
 }
 
-export type BulkDeleteDateField = "experiment_date" | "created_at" | "updated_at";
-
-export interface BulkDeleteFilter {
-  project_id: string;
-  date_field: BulkDeleteDateField;
-  start_date: string;
-  end_date: string;
-}
-
-export interface BulkDeletePreview {
-  total: number;
-  locked_count: number;
-  record_ids: string[];
-  items: Array<Pick<ProjectRecord, "id" | "pathology_number" | "status" | "experiment_date" | "created_at" | "updated_at" | "locked">>;
-}
-
 export interface ReportMapping {
   id: string;
   placeholder: string;
@@ -403,11 +387,6 @@ export interface AuditLog {
   entity_id: string | null;
   details: Record<string, unknown>;
   created_at: string;
-}
-
-export interface BulkDeleteResult {
-  deleted: number;
-  deleted_records: ProjectRecord[];
 }
 
 export interface AuditLogPage {

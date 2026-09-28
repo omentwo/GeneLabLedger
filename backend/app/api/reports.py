@@ -39,8 +39,6 @@ from app.schemas import (
     ReportMappingsReplace,
     ReportNativePreviewCreate,
     ReportPrintCreate,
-    ReportPrintPreviewCreate,
-    ReportPrintPreviewRead,
     ReportPrintRead,
     ReportTemplateDeleteResponse,
     ReportTemplateRead,
@@ -51,12 +49,11 @@ from app.services.docx_template import (
     extract_placeholders,
     render_docx,
 )
-from app.services.office_preview import OfficePreviewError, PreviewEngineUnavailable
+from app.services.office_preview import OfficePreviewError
 from app.services.office_printing import (
     OfficePrintError,
     OfficePrintService,
 )
-from app.services.preview_files import cleanup_print_previews
 from app.services.serializers import template_dict, template_version_dict
 from app.timezones import ASIA_SHANGHAI
 
@@ -526,61 +523,6 @@ def print_reports(
         "printer_name": payload.printer_name,
         "printed_count": len(documents),
         "print_engine": resolved_engine,
-    }
-
-
-@router.post(
-    "/report-template-versions/{version_id}/print-preview",
-    response_model=ReportPrintPreviewRead,
-)
-def preview_report(
-    version_id: str,
-    payload: ReportPrintPreviewCreate,
-    request: Request,
-    session: Session = Depends(get_session),
-) -> dict[str, object]:
-    if payload.template_version_id != version_id:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Template version does not match the preview path.",
-        )
-    if len(payload.record_ids) != 1:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Preview one report at a time.",
-        )
-    version = load_version(session, version_id)
-    settings = settings_from(request)
-    preview_service = request.app.state.preview_service
-    cleanup_print_previews(
-        settings.report_work_dir,
-        max_age_seconds=settings.preview_ttl_seconds,
-    )
-    preview_id = uuid.uuid4().hex
-    work_root = settings.report_work_dir / f"report-preview-{preview_id}"
-    preview_dir = settings.report_work_dir / "report-previews"
-    preview_dir.mkdir(parents=True, exist_ok=True)
-    output_path = preview_dir / f"{preview_id}.pdf"
-    work_root.mkdir(parents=True, exist_ok=False)
-    try:
-        documents, record_ids = render_report_documents(
-            session,
-            version,
-            [ReportBatchItem(project_record_id=payload.record_ids[0])],
-            work_root,
-        )
-        resolved_engine = preview_service.convert_docx_to_pdf(documents[0], output_path, payload.print_engine)
-    except (InvalidDocxTemplate, OfficePreviewError, PreviewEngineUnavailable) as error:
-        output_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
-    finally:
-        shutil.rmtree(work_root, ignore_errors=True)
-    return {
-        "preview_id": preview_id,
-        "url": f"/api/print-preview/{preview_id}",
-        "filename": f"report-{record_ids[0]}.pdf",
-        "print_engine": resolved_engine,
-        "record_count": 1,
     }
 
 

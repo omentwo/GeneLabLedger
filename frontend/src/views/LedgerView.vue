@@ -151,8 +151,10 @@ import {
 } from "@/utils/ledgerLayoutSettings";
 import {
   LatestValuePersistence,
+  resolveCreatedRecordRefreshPlan,
   resolveLedgerCellCompletionAction,
   resolveLedgerCellEditState,
+  shouldApplyLedgerEditCompletion,
 } from "@/utils/ledgerPersistence";
 import {
   buildValidationPromptCopy,
@@ -208,6 +210,8 @@ const ledgerDisplaySettings = ref<LedgerDisplaySettings>({
 const ledgerTableCardRef = ref<HTMLElement | null>(null);
 const projectStripRef = ref<HTMLElement | null>(null);
 const tableRef = ref<TableV2Instance | null>(null);
+const ledgerHorizontalScrollbarRef = ref<HTMLElement | null>(null);
+const LEDGER_HORIZONTAL_SCROLLBAR_HEIGHT = 10;
 type AutosizeTextareaInstance = { resizeTextarea: () => void };
 const autosizeTextareaRefs = new Map<string, AutosizeTextareaInstance>();
 type GridCellPosition = { rowIndex: number; columnIndex: number };
@@ -284,6 +288,7 @@ let gridCellAutoScrollFrame: number | null = null;
 let gridCellAutoScrollTimestamp: number | null = null;
 let gridCellWheelUpdateTimer: number | null = null;
 let gridCellEditFinishPromise: Promise<boolean> | null = null;
+let gridCellEditSession = 0;
 let lastGridClipboard: { plainText: string; payload: GridClipboardPayload } | null = null;
 let suppressGridClick = false;
 let gridFillDragState: GridFillDragState | null = null;
@@ -400,6 +405,7 @@ type LedgerContextMenuTarget = {
 const ledgerContextMenu = ref<{
   x: number;
   y: number;
+  submenuLeft: boolean;
   target: LedgerContextMenuTarget;
 } | null>(null);
 const exportVisible = ref(false);
@@ -717,6 +723,9 @@ const ledgerVirtualColumns = computed<LedgerVirtualColumn[]>(() => {
     })),
   ];
 });
+const ledgerVirtualContentWidth = computed(() =>
+  ledgerVirtualColumns.value.reduce((total, column) => total + column.width, 0),
+);
 const selectedCount = computed(() => selectedRecordIds.value.size);
 const baseTableRows = computed<LedgerRow[]>(() => [...records.value, ...draftRows.value]);
 const tableRows = computed<LedgerRow[]>(() =>
@@ -763,10 +772,31 @@ const contextMenuCell = computed<GridCellPosition | null>(() => {
   const columnIndex = fields.value.findIndex((field) => field.id === target.fieldId);
   return rowIndex >= 0 && columnIndex >= 0 ? { rowIndex, columnIndex } : null;
 });
+const contextDeleteRecordCount = computed(() => {
+  const row = contextMenuRow.value;
+  if (!row) return 0;
+  return selectedRecordIds.value.has(row.id) ? Math.max(1, selectedRecordIds.value.size) : 1;
+});
 const contextMenuStyle = computed<CSSProperties>(() => ({
   left: `${ledgerContextMenu.value?.x ?? 0}px`,
   top: `${ledgerContextMenu.value?.y ?? 0}px`,
 }));
+const contextSuggestedInsertRowCount = computed(() => {
+  const target = ledgerContextMenu.value?.target;
+  if (!target) return 1;
+  if (target.kind === "row") {
+    return selectedRecordIds.value.has(target.rowId)
+      ? Math.max(1, selectedRecordIds.value.size)
+      : 1;
+  }
+  const cell = contextMenuCell.value;
+  if (!cell || !selectedGridCellKeys.value.has(gridCellKey(cell))) return 1;
+  return Math.max(
+    1,
+    new Set(selectedGridCellPositions().map((position) => position.rowIndex)).size,
+  );
+});
+const contextInsertRowCount = ref<number | "">(1);
 const ledgerFontOption = computed(
   () =>
     LEDGER_FONT_FAMILY_OPTIONS.find(
@@ -921,11 +951,30 @@ type LedgerTableScrollPosition = {
   left: number;
 };
 
+function handleLedgerTableScroll(position: { scrollLeft?: number }): void {
+  const scrollbar = ledgerHorizontalScrollbarRef.value;
+  if (!scrollbar || typeof position.scrollLeft !== "number") return;
+  if (Math.abs(scrollbar.scrollLeft - position.scrollLeft) > 0.5) {
+    scrollbar.scrollLeft = position.scrollLeft;
+  }
+}
+
+function handleLedgerHorizontalScrollbarScroll(event: Event): void {
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLElement)) return;
+  tableRef.value?.scrollToLeft(target.scrollLeft);
+}
+
 function captureLedgerTableScroll(): LedgerTableScrollPosition | null {
   const tableRoot = ledgerTableCardRef.value;
   if (!tableRoot) return null;
   const body = gridTableBodyScrollElement(tableRoot);
-  return body ? { top: body.scrollTop, left: body.scrollLeft } : null;
+  return body
+    ? {
+        top: body.scrollTop,
+        left: ledgerHorizontalScrollbarRef.value?.scrollLeft ?? body.scrollLeft,
+      }
+    : null;
 }
 
 function restoreLedgerTableScroll(position: LedgerTableScrollPosition | null): void {
@@ -935,7 +984,10 @@ function restoreLedgerTableScroll(position: LedgerTableScrollPosition | null): v
   const body = gridTableBodyScrollElement(tableRoot);
   if (!body) return;
   body.scrollTop = position.top;
-  body.scrollLeft = position.left;
+  tableRef.value?.scrollToLeft(position.left);
+  if (ledgerHorizontalScrollbarRef.value) {
+    ledgerHorizontalScrollbarRef.value.scrollLeft = position.left;
+  }
 }
 
 function setLedgerSort(field: FieldDefinition, order: "ascending" | "descending" | null): void {
@@ -1140,6 +1192,12 @@ function clearGridCellSelection(): void {
   selectedGridCellKeys.value = new Set();
   gridCellRange.value = null;
   gridSelectionAnchor.value = null;
+}
+
+function clearGridCellEdit(invalidateSession = true): void {
+  editingGridCell.value = null;
+  editingGridSnapshot.value = null;
+  if (invalidateSession) gridCellEditSession += 1;
 }
 
 function sameGridCell(left: GridCellPosition | null, right: GridCellPosition | null): boolean {
@@ -1424,6 +1482,7 @@ const ledgerCellEditorDisabled = computed(
 const ledgerCellEditorReadonly = computed(
   () => Boolean(ledgerCellEditorCell.value?.record.locked),
 );
+const ledgerCellEditorExpanded = ref(false);
 const ledgerCellEditorTitle = computed(() => {
   const data = ledgerCellEditorCell.value;
   if (!data) return "尚未选择台账单元格";
@@ -1432,18 +1491,29 @@ const ledgerCellEditorTitle = computed(() => {
   }`;
 });
 
+function toggleLedgerCellEditorExpanded(): void {
+  ledgerCellEditorExpanded.value = !ledgerCellEditorExpanded.value;
+}
+
 async function finishGridCellEdit(commit = true, focusAfter = true): Promise<boolean> {
-  if (gridCellEditFinishPromise) return gridCellEditFinishPromise;
+  const pendingFinish = gridCellEditFinishPromise;
+  if (pendingFinish) {
+    const saved = await pendingFinish;
+    if (!saved) return false;
+    if (gridCellEditFinishPromise && gridCellEditFinishPromise !== pendingFinish) {
+      return finishGridCellEdit(commit, focusAfter);
+    }
+  }
   const editing = editingGridCell.value;
   const snapshot = editingGridSnapshot.value;
+  const editSession = gridCellEditSession;
   if (!editing || !snapshot) return true;
   const finish = (async (): Promise<boolean> => {
     const record = tableRows.value.find((row) => row.id === snapshot.rowId);
     const field = fields.value.find((item) => item.id === snapshot.fieldId);
     const data = record && field ? { record, field } : null;
     if (!data) {
-      editingGridCell.value = null;
-      editingGridSnapshot.value = null;
+      clearGridCellEdit();
       return true;
     }
 
@@ -1467,8 +1537,13 @@ async function finishGridCellEdit(commit = true, focusAfter = true): Promise<boo
       ) return false;
     }
 
-    editingGridCell.value = null;
-    editingGridSnapshot.value = null;
+    if (!shouldApplyLedgerEditCompletion(
+      snapshot,
+      editingGridSnapshot.value,
+      editSession,
+      gridCellEditSession,
+    )) return true;
+    clearGridCellEdit();
     clearGridEditorTextSelection(gridEditorRoot(editing));
     if (focusAfter || sameGridCell(activeGridCell.value, editing)) {
       selectGridCell(editing);
@@ -1508,6 +1583,7 @@ function enterGridCellEdit(
   // Keep the single-cell selection visible so its fill handle remains available
   // while the input is being edited, matching spreadsheet-style workflows.
   selectGridCell(nextPosition);
+  gridCellEditSession += 1;
   editingGridCell.value = nextPosition;
   editingGridSnapshot.value = {
     rowId: data.record.id,
@@ -1539,11 +1615,25 @@ function handleLedgerCellEditorBlur(): void {
 }
 
 function handleLedgerCellEditorKeydown(event: KeyboardEvent): void {
+  if (
+    (event.ctrlKey || event.metaKey) &&
+    event.shiftKey &&
+    event.key.toLowerCase() === "u"
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleLedgerCellEditorExpanded();
+    return;
+  }
   if (event.isComposing || !editingGridCell.value) return;
   if (event.key === "Escape") {
     event.preventDefault();
     event.stopPropagation();
     void finishGridCellEdit(false);
+    return;
+  }
+  if (event.key === "Enter" && event.altKey) {
+    event.stopPropagation();
     return;
   }
   if (event.key === "Enter") {
@@ -2660,11 +2750,12 @@ function handleGridCopy(event: ClipboardEvent): void {
 
 async function copyGridSelectionToClipboard(
   selectionOverride?: { positions: GridCellPosition[]; active: GridCellPosition },
-): Promise<void> {
+  showSuccess = true,
+): Promise<boolean> {
   const selection = selectionOverride ?? gridClipboardSelection(null);
   if (!selection) {
     ElMessage.warning("请先选择要复制的单元格");
-    return;
+    return false;
   }
   const { plainText, payload } = buildGridClipboardData(selection);
   lastGridClipboard = { plainText, payload };
@@ -2689,9 +2780,11 @@ async function copyGridSelectionToClipboard(
     if (!written) {
       await clipboard.writeText(plainText);
     }
-    ElMessage.success("已复制选中单元格");
+    if (showSuccess) ElMessage.success("已复制选中单元格");
+    return true;
   } catch {
     ElMessage.warning("浏览器未授予剪贴板权限，请使用 Ctrl/Cmd+C 复制");
+    return false;
   }
 }
 
@@ -2765,11 +2858,14 @@ function contextRowCopySelection(row: LedgerRow): {
 }
 
 function positionLedgerContextMenu(event: MouseEvent): void {
-  const width = 230;
-  const height = 440;
+  const width = 160;
+  const submenuWidth = 200;
+  const height = 210;
+  const x = Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8));
   ledgerContextMenu.value = {
-    x: Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8)),
+    x,
     y: Math.max(8, Math.min(event.clientY, window.innerHeight - height - 8)),
+    submenuLeft: x + width + submenuWidth > window.innerWidth - 8,
     target: ledgerContextMenu.value!.target,
   };
 }
@@ -2792,6 +2888,7 @@ function handleLedgerContextMenu(event: MouseEvent): void {
   ledgerContextMenu.value = {
     x: event.clientX,
     y: event.clientY,
+    submenuLeft: false,
     target: {
       kind: cell ? "cell" : "row",
       rowId: row.id,
@@ -2799,6 +2896,7 @@ function handleLedgerContextMenu(event: MouseEvent): void {
     },
   };
   positionLedgerContextMenu(event);
+  contextInsertRowCount.value = Math.min(100, contextSuggestedInsertRowCount.value);
 }
 
 function finishContextMenuAction(): void {
@@ -2810,7 +2908,7 @@ async function contextCopy(): Promise<void> {
   const cell = contextMenuCell.value;
   const selection =
     ledgerContextMenu.value?.target.kind === "row" && row
-      ? (hasGridCellSelection ? gridClipboardSelection(null) : contextRowCopySelection(row))
+      ? (hasGridCellSelection.value ? gridClipboardSelection(null) : contextRowCopySelection(row))
       : cell
         ? gridClipboardSelection(cell)
         : null;
@@ -2818,77 +2916,42 @@ async function contextCopy(): Promise<void> {
   finishContextMenuAction();
 }
 
-async function contextPaste(): Promise<void> {
+async function contextCut(): Promise<void> {
   const cell = contextMenuCell.value;
   if (!cell) {
-    ElMessage.warning("请右键一个单元格作为粘贴起点");
+    ElMessage.warning("请先选择要剪切的单元格");
     finishContextMenuAction();
     return;
   }
-  try {
-    const text = await navigator.clipboard.readText();
-    const customPayload = lastGridClipboard?.plainText === text ? lastGridClipboard.payload : null;
-    if (!customPayload && !text) return;
-    const start = clampGridCell(cell);
-    const positions = await pasteGrid(
-      null,
-      start.rowIndex,
-      start.columnIndex,
-      customPayload?.cells,
-      customPayload ? undefined : text,
-    );
-    replaceGridCellSelection(positions.length ? positions : [start], start, start, null);
-    void focusGridCell(start);
-  } catch {
-    ElMessage.warning("浏览器未授予剪贴板权限，请使用 Ctrl/Cmd+V 粘贴");
-  } finally {
-    finishContextMenuAction();
-  }
+  const selection = gridClipboardSelection(cell);
+  const copied = await copyGridSelectionToClipboard(selection ?? undefined, false);
+  if (copied) await clearGridCellRange("剪切");
+  finishContextMenuAction();
 }
 
-async function contextClear(): Promise<void> {
+async function contextDelete(): Promise<void> {
   if (!contextMenuCell.value) {
     ElMessage.warning("请先选择单元格");
     finishContextMenuAction();
     return;
   }
-  await clearGridCellRange();
+  await clearGridCellRange("删除");
   finishContextMenuAction();
 }
 
-function contextSetHighlight(): void {
-  const target = ledgerContextMenu.value?.target;
+async function contextDeleteRecord(): Promise<void> {
   const row = contextMenuRow.value;
-  if (!target || !row) return finishContextMenuAction();
-  if (target.kind === "row") openHighlightDialog([row]);
-  else openCurrentHighlightDialog();
+  const deleteSelection = Boolean(row && selectedRecordIds.value.has(row.id));
   finishContextMenuAction();
-}
-
-async function contextClearHighlight(): Promise<void> {
-  const target = ledgerContextMenu.value?.target;
-  const row = contextMenuRow.value;
-  if (!target || !row) return finishContextMenuAction();
-  if (target.kind === "row") {
-    highlightMode.value = "record";
-    highlightTargetIds.value = [row.id];
-    await submitHighlight(null);
-  } else {
-    await clearSelectedHighlight();
+  if (!row || isDraft(row)) return;
+  let targets: ProjectRecord[];
+  try {
+    targets = deleteSelection ? await selectedTargetRecords() : [row];
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "读取待删除记录失败");
+    return;
   }
-  finishContextMenuAction();
-}
-
-function contextEdit(): void {
-  const cell = contextMenuCell.value;
-  if (cell && selectedGridCellKeys.value.size === 1) enterGridCellEdit(cell);
-  finishContextMenuAction();
-}
-
-async function contextToggleLock(): Promise<void> {
-  const row = contextMenuRow.value;
-  if (row && !isDraft(row)) await toggleRecordLock(row);
-  finishContextMenuAction();
+  await deleteLedgerRecords(targets);
 }
 
 function insertDraftRowsAt(
@@ -2924,45 +2987,20 @@ function notifyInsertedRows(count: number): void {
   }
 }
 
-function contextInsertSingleRow(placement: LedgerDraftPlacement): void {
+function contextInsertRows(placement: LedgerDraftPlacement): void {
   const row = contextMenuRow.value;
   if (!row || isDraft(row)) return finishContextMenuAction();
-  const anchorId = row.id;
-  finishContextMenuAction();
-  if (insertDraftRowsAt(anchorId, placement, 1)) notifyInsertedRows(1);
-}
-
-async function contextInsertMultipleRows(placement: LedgerDraftPlacement): Promise<void> {
-  const row = contextMenuRow.value;
-  if (!row || isDraft(row)) return finishContextMenuAction();
-  const anchorId = row.id;
-  finishContextMenuAction();
-  try {
-    const { value } = await ElMessageBox.prompt(
-      "请输入要插入的行数（1–100）。可先填写任意字段，每行填写病理号后自动保存。",
-      placement === "before" ? "在当前记录上方插入" : "在当前记录下方插入",
-      {
-        inputValue: "1",
-        inputPlaceholder: "行数",
-        confirmButtonText: "插入",
-        cancelButtonText: "取消",
-        inputValidator: (input) => {
-          const count = Number(input.trim());
-          return Number.isInteger(count) && count >= 1 && count <= 100
-            ? true
-            : "请输入 1 到 100 之间的整数";
-        },
-      },
-    );
-    const count = Number(value.trim());
-    if (insertDraftRowsAt(anchorId, placement, count)) notifyInsertedRows(count);
-  } catch (error) {
-    if (error === "cancel" || error === "close") return;
-    ElMessage.error(error instanceof Error ? error.message : "插入行失败");
+  const count = Number(contextInsertRowCount.value);
+  if (!Number.isInteger(count) || count < 1 || count > 100) {
+    ElMessage.warning("请输入 1 到 100 之间的整数行数");
+    return;
   }
+  const anchorId = row.id;
+  finishContextMenuAction();
+  if (insertDraftRowsAt(anchorId, placement, count)) notifyInsertedRows(count);
 }
 
-async function clearGridCellRange(): Promise<void> {
+async function clearGridCellRange(operationLabel = "清空"): Promise<void> {
   const positions = selectedGridCellPositions();
   if (!positions.length) return;
   let skippedLocked = 0;
@@ -2996,7 +3034,7 @@ async function clearGridCellRange(): Promise<void> {
         value: "",
       })),
       undefined,
-      "清空",
+      operationLabel,
     );
   }
   const currentActive = activeGridCell.value;
@@ -3061,12 +3099,19 @@ function clearBottomScrollTimers(): void {
   bottomScrollTimers = [];
 }
 
+function scrollTableToBottomLeft(): void {
+  const lastRowIndex = tableRows.value.length - 1;
+  if (lastRowIndex < 0) return;
+  tableRef.value?.scrollToRow(lastRowIndex, "end");
+  tableRef.value?.scrollToLeft(0);
+  if (ledgerHorizontalScrollbarRef.value) {
+    ledgerHorizontalScrollbarRef.value.scrollLeft = 0;
+  }
+}
+
 function scrollTableToBottom(): void {
   clearBottomScrollTimers();
-  const applyScroll = () => {
-    const lastRowIndex = tableRows.value.length - 1;
-    if (lastRowIndex >= 0) tableRef.value?.scrollToRow(lastRowIndex, "end");
-  };
+  const applyScroll = () => scrollTableToBottomLeft();
   void nextTick(() => {
     applyScroll();
     bottomScrollTimers.push(window.setTimeout(applyScroll, 40));
@@ -3088,10 +3133,10 @@ async function scrollTableToBottomOnce(
   await nextAnimationFrame();
   if (!shouldApply()) return false;
   const lastRowIndex = tableRows.value.length - 1;
-  if (lastRowIndex >= 0) tableRef.value?.scrollToRow(lastRowIndex, "end");
+  if (lastRowIndex >= 0) scrollTableToBottomLeft();
   await nextAnimationFrame();
   if (!shouldApply()) return false;
-  if (lastRowIndex >= 0) tableRef.value?.scrollToRow(lastRowIndex, "end");
+  if (lastRowIndex >= 0) scrollTableToBottomLeft();
   return true;
 }
 
@@ -3333,8 +3378,7 @@ function removeDraftRows(recordIds: Set<string>): void {
   draftRows.value = draftRows.value.filter((record) => !recordIds.has(record.id));
   cleanupInsertedGroupRegistry();
   if (editingGridSnapshot.value && recordIds.has(editingGridSnapshot.value.rowId)) {
-    editingGridCell.value = null;
-    editingGridSnapshot.value = null;
+    clearGridCellEdit();
   }
   activeGridCell.value = null;
   clearGridCellSelection();
@@ -3769,6 +3813,15 @@ async function persistDraft(record: LedgerRow, notify = true): Promise<boolean> 
 
 type PersistedRecordLocation = "focused" | "filtered-out" | "skipped" | "failed";
 
+function currentRecordViewHasMembershipFilters(): boolean {
+  return Boolean(
+    appliedSearch.text.trim()
+    || appliedSearch.status
+    || appliedSearch.date
+    || Object.values(ledgerFilters.value).some(Boolean),
+  );
+}
+
 async function locatePersistedRecord(
   recordId: string,
   projectId: string,
@@ -3776,22 +3829,47 @@ async function locatePersistedRecord(
   if (activeProjectId.value !== projectId || appliedSearch.scope !== "current") {
     return "skipped";
   }
+  if (!currentRecordViewHasMembershipFilters()) {
+    loadedRecordCount.value = records.value.length;
+    focusRecordId.value = recordId;
+    await scrollToFocusedRecord(
+      () => activeProjectId.value === projectId && appliedSearch.scope === "current",
+    );
+    return "focused";
+  }
   try {
     const result = await queryRecordIds(buildRecordQuery(projectId));
     if (activeProjectId.value !== projectId || appliedSearch.scope !== "current") {
       return "skipped";
     }
     recordTotal.value = result.total;
-    if (!result.record_ids.includes(recordId)) {
+    const refreshPlan = resolveCreatedRecordRefreshPlan({
+      localRecordIds: records.value.map((record) => record.id),
+      queriedRecordIds: result.record_ids,
+      createdRecordId: recordId,
+    });
+    if (refreshPlan === "local-filtered-out") {
+      records.value = records.value.filter((record) => record.id !== recordId);
+      loadedRecordCount.value = records.value.length;
       focusRecordId.value = "";
-      await loadRecords(projectId, { preserveHistory: true, preserveSelection: true });
       return "filtered-out";
     }
-    focusRecordId.value = recordId;
+    if (refreshPlan === "local-visible") {
+      loadedRecordCount.value = records.value.length;
+      focusRecordId.value = recordId;
+      await scrollToFocusedRecord(
+        () => activeProjectId.value === projectId && appliedSearch.scope === "current",
+      );
+      return "focused";
+    }
+    const recordIsVisible = result.record_ids.includes(recordId);
+    if (!recordIsVisible) focusRecordId.value = "";
+    else focusRecordId.value = recordId;
     const loaded = await loadRecords(projectId, {
       preserveHistory: true,
       preserveSelection: true,
     });
+    if (!recordIsVisible) return "filtered-out";
     if (!loaded) {
       focusRecordId.value = "";
       return "failed";
@@ -3811,8 +3889,9 @@ async function finishPersistedDraft(
 ): Promise<void> {
   invalidateProjectRecordCache(projectId);
   if (editingGridSnapshot.value?.rowId === record.id) {
-    editingGridCell.value = null;
-    editingGridSnapshot.value = null;
+    // The enclosing finish operation still owns this session. It will decide
+    // whether focus/selection may be applied after the async save completes.
+    clearGridCellEdit(false);
   }
   const draftIndex = draftRows.value.findIndex((item) => item.id === record.id);
   reanchorPendingInsertedDrafts(record, created);
@@ -5603,8 +5682,7 @@ async function updateSelectedReportStatus(reportGenerated: boolean): Promise<voi
   }
 }
 
-async function deleteSelectedRecords(): Promise<void> {
-  const selectedTargets = await selectedTargetRecords();
+async function deleteLedgerRecords(selectedTargets: ProjectRecord[]): Promise<void> {
   if (!selectedTargets.length) {
     ElMessage.warning("请先勾选需要删除的记录");
     return;
@@ -5619,10 +5697,13 @@ async function deleteSelectedRecords(): Promise<void> {
   const lockedNote = lockedCount
     ? `；另有 ${lockedCount} 条锁定记录将保留`
     : "";
+  const batchDelete = selectedTargets.length > 1;
   try {
     await ElMessageBox.confirm(
-      `确认永久删除所选的 ${targets.length} 条台账记录${lockedNote}？删除后无法恢复。`,
-      "批量删除二次确认",
+      batchDelete
+        ? `确认永久删除所选的 ${targets.length} 条台账记录${lockedNote}？删除后无法恢复。`
+        : `确认永久删除病理号“${targets[0]!.pathology_number}”的台账记录？删除后无法恢复。`,
+      batchDelete ? "批量删除二次确认" : "删除记录二次确认",
       {
         confirmButtonText: "确认删除",
         cancelButtonText: "取消",
@@ -5632,7 +5713,8 @@ async function deleteSelectedRecords(): Promise<void> {
     );
   } catch (error) {
     if (error === "cancel" || error === "close") return;
-    throw error;
+    ElMessage.error(error instanceof Error ? error.message : "无法打开删除确认");
+    return;
   }
 
   loading.value = true;
@@ -5661,7 +5743,7 @@ async function deleteSelectedRecords(): Promise<void> {
     clearGridCellSelection();
     rememberAll();
     pushHistory(
-      "批量删除台账记录",
+      batchDelete ? "批量删除台账记录" : "删除台账记录",
       deletedRecords,
       [],
       targets[0]?.project_id ?? activeProjectId.value,
@@ -5674,17 +5756,11 @@ async function deleteSelectedRecords(): Promise<void> {
   }
 }
 
-async function toggleRecordLock(record: ProjectRecord): Promise<void> {
-  const nextLocked = !record.locked;
+async function deleteSelectedRecords(): Promise<void> {
   try {
-    replaceRecord(await setRecordLock(record.id, nextLocked));
-    if (nextLocked && !showLockedRecords.value) {
-      clearRecordSelection();
-      await loadRecords(activeProjectId.value, { preserveHistory: true });
-    }
-    ElMessage.success(nextLocked ? "记录已锁定" : "记录已解锁");
+    await deleteLedgerRecords(await selectedTargetRecords());
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "锁定状态修改失败");
+    ElMessage.error(error instanceof Error ? error.message : "读取所选记录失败");
   }
 }
 
@@ -5804,8 +5880,7 @@ watch(activeProjectId, async (projectId, previousProjectId) => {
     stopGridCellDrag(false);
     closeLedgerOverlays();
     applyLedgerProjectLayout(projectId);
-    editingGridCell.value = null;
-    editingGridSnapshot.value = null;
+    clearGridCellEdit();
     clearSelectionsAfterLedgerViewChange();
     draftRows.value = [];
     insertedGroupRegistry.clear();
@@ -5913,8 +5988,7 @@ onBeforeUnmount(() => {
   recordsAbortController = null;
   ledgerRecordCache.clear();
   projectRecordCacheGenerations.clear();
-  editingGridCell.value = null;
-  editingGridSnapshot.value = null;
+  clearGridCellEdit();
   activeGridCell.value = null;
   clearGridCellSelection();
   lastGridClipboard = null;
@@ -5947,14 +6021,21 @@ onBeforeUnmount(() => {
             <div
               v-if="!globalSearchActive"
               class="ledger-cell-editor-bar"
-              :class="{ 'is-readonly': ledgerCellEditorReadonly }"
+              :class="{
+                'is-expanded': ledgerCellEditorExpanded,
+                'is-readonly': ledgerCellEditorReadonly,
+              }"
               role="group"
               :aria-label="ledgerCellEditorTitle"
               :title="ledgerCellEditorTitle"
             >
               <span class="ledger-cell-editor-address">{{ ledgerCellEditorAddress }}</span>
               <el-input
+                id="ledger-cell-editor-input"
                 class="ledger-cell-editor-input"
+                type="textarea"
+                resize="none"
+                :rows="ledgerCellEditorExpanded ? 4 : 1"
                 :model-value="ledgerCellEditorValue"
                 :disabled="ledgerCellEditorDisabled"
                 :readonly="ledgerCellEditorReadonly"
@@ -5971,6 +6052,22 @@ onBeforeUnmount(() => {
                 @blur="handleLedgerCellEditorBlur"
                 @keydown="handleLedgerCellEditorKeydown"
               />
+              <button
+                type="button"
+                class="ledger-cell-editor-toggle"
+                :aria-expanded="ledgerCellEditorExpanded"
+                aria-controls="ledger-cell-editor-input"
+                aria-keyshortcuts="Control+Shift+U"
+                :aria-label="ledgerCellEditorExpanded ? '收起单元格编辑栏' : '展开单元格编辑栏'"
+                :title="ledgerCellEditorExpanded
+                  ? '收起编辑栏（Ctrl+Shift+U）'
+                  : '展开编辑栏（Ctrl+Shift+U）'"
+                @pointerdown.stop.prevent
+                @click.stop="toggleLedgerCellEditorExpanded"
+              >
+                <ArrowUp v-if="ledgerCellEditorExpanded" :size="15" aria-hidden="true" />
+                <ArrowDown v-else :size="15" aria-hidden="true" />
+              </button>
             </div>
             <el-input
               v-model="searchText"
@@ -6266,6 +6363,9 @@ onBeforeUnmount(() => {
               :data="tableRows"
               :width="width"
               :height="height"
+              :footer-height="ledgerVirtualContentWidth > width
+                ? LEDGER_HORIZONTAL_SCROLLBAR_HEIGHT
+                : 0"
               :row-height="ledgerVirtualRowHeight"
               :header-height="ledgerVirtualHeaderHeight"
               :cache="8"
@@ -6274,8 +6374,24 @@ onBeforeUnmount(() => {
               :row-props="virtualRowProps"
               :cell-props="virtualCellProps"
               :header-cell-props="virtualHeaderCellProps"
-              scrollbar-always-on
+              fixed
+              @scroll="handleLedgerTableScroll"
             >
+              <template #footer>
+                <div
+                  v-if="ledgerVirtualContentWidth > width"
+                  ref="ledgerHorizontalScrollbarRef"
+                  class="ledger-table-horizontal-scrollbar"
+                  aria-label="台账横向滚动条"
+                  @scroll.passive="handleLedgerHorizontalScrollbarScroll"
+                >
+                  <div
+                    class="ledger-table-horizontal-scrollbar-content"
+                    :style="{ width: `${Math.max(ledgerVirtualContentWidth, width)}px` }"
+                  />
+                </div>
+              </template>
+
               <template #header-cell="{ column }">
                 <div v-if="column.kind === 'selection'" class="ledger-v2-selection-control">
                   <el-checkbox
@@ -6558,57 +6674,77 @@ onBeforeUnmount(() => {
         @click.stop
         @contextmenu.prevent
       >
-        <button type="button" role="menuitem" @click="contextInsertSingleRow('before')">
-          在当前记录上方插入一行
-        </button>
-        <button type="button" role="menuitem" @click="contextInsertMultipleRows('before')">
-          在当前记录上方插入多行…
-        </button>
-        <button type="button" role="menuitem" @click="contextInsertSingleRow('after')">
-          在当前记录下方插入一行
-        </button>
-        <button type="button" role="menuitem" @click="contextInsertMultipleRows('after')">
-          在当前记录下方插入多行…
-        </button>
-        <div class="ledger-context-menu-separator" role="separator" />
-        <button type="button" role="menuitem" @click="contextCopy">复制当前选区</button>
-        <button
-          type="button"
-          role="menuitem"
-          :disabled="ledgerContextMenu.target.kind !== 'cell'"
-          @click="contextPaste"
-        >
-          粘贴到活动单元格
-        </button>
         <button
           type="button"
           role="menuitem"
           :disabled="ledgerContextMenu.target.kind !== 'cell' || !hasGridCellSelection"
-          @click="contextClear"
+          @click="contextCut"
         >
-          清空当前选区
+          剪切
         </button>
-        <button type="button" role="menuitem" @click="contextSetHighlight">
-          {{ ledgerContextMenu.target.kind === 'row' ? '设置记录底色' : '设置单元格底色' }}
-        </button>
-        <button type="button" role="menuitem" @click="contextClearHighlight">
-          {{ ledgerContextMenu.target.kind === 'row' ? '清除记录底色' : '清除单元格底色' }}
-        </button>
+        <button type="button" role="menuitem" @click="contextCopy">复制</button>
         <button
           type="button"
           role="menuitem"
-          :disabled="ledgerContextMenu.target.kind !== 'cell' || selectedGridCellKeys.size !== 1 || Boolean(contextMenuRow?.locked)"
-          @click="contextEdit"
+          :disabled="ledgerContextMenu.target.kind !== 'cell' || !hasGridCellSelection"
+          @click="contextDelete"
         >
-          进入编辑
+          删除
         </button>
+        <div class="ledger-context-menu-submenu">
+          <button
+            type="button"
+            class="ledger-context-menu-submenu-trigger"
+            role="menuitem"
+            aria-haspopup="menu"
+          >
+            <span>插入行</span>
+            <ArrowRight :size="14" aria-hidden="true" />
+          </button>
+          <div
+            class="ledger-context-menu-submenu-panel"
+            :class="{ 'opens-left': ledgerContextMenu.submenuLeft }"
+            role="group"
+            aria-label="插入行设置"
+          >
+            <label class="ledger-context-menu-insert-count">
+              <span>插入行数</span>
+              <input
+                v-model.number="contextInsertRowCount"
+                type="number"
+                min="1"
+                max="100"
+                step="1"
+                inputmode="numeric"
+                aria-label="插入行数，范围 1 到 100"
+                @click.stop
+                @keydown.enter.stop.prevent="contextInsertRows('before')"
+              />
+            </label>
+            <button type="button" role="menuitem" @click="contextInsertRows('before')">
+              在上方插入
+            </button>
+            <button type="button" role="menuitem" @click="contextInsertRows('after')">
+              在下方插入
+            </button>
+          </div>
+        </div>
+        <div class="ledger-context-menu-separator" role="separator"></div>
         <button
           type="button"
+          class="ledger-context-menu-danger"
           role="menuitem"
-          :disabled="!contextMenuRow"
-          @click="contextToggleLock"
+          :disabled="loading"
+          :title="contextDeleteRecordCount > 1
+            ? `永久删除选中的 ${contextDeleteRecordCount} 条记录`
+            : contextMenuRow?.locked
+              ? '当前记录已锁定，请先解锁后再删除'
+              : '永久删除当前记录'"
+          @click="contextDeleteRecord"
         >
-          {{ contextMenuRow?.locked ? '解锁当前记录' : '锁定当前记录' }}
+          {{ contextDeleteRecordCount > 1
+            ? '删除所选记录'
+            : '删除记录' }}
         </button>
       </div>
       <div class="ledger-bottom-bar">
@@ -7293,7 +7429,11 @@ onBeforeUnmount(() => {
   border: 1px solid var(--app-border-strong);
   border-radius: 8px;
   background: var(--app-bg);
-  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+  transition: height 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.ledger-cell-editor-bar.is-expanded {
+  height: 104px;
 }
 
 .ledger-cell-editor-bar:focus-within {
@@ -7306,6 +7446,7 @@ onBeforeUnmount(() => {
 }
 
 .ledger-cell-editor-address {
+  box-sizing: border-box;
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
@@ -7316,6 +7457,11 @@ onBeforeUnmount(() => {
   user-select: none;
 }
 
+.ledger-cell-editor-bar.is-expanded .ledger-cell-editor-address {
+  align-items: flex-start;
+  padding-top: 8px;
+}
+
 .ledger-cell-editor-address {
   width: 52px;
   font-size: 12px;
@@ -7323,28 +7469,69 @@ onBeforeUnmount(() => {
   font-weight: 650;
 }
 
-.ledger-cell-editor-bar :deep(.el-input) {
+.ledger-cell-editor-input {
   min-width: 0;
+  height: 100%;
   flex: 1 1 auto;
 }
 
-.ledger-cell-editor-bar :deep(.el-input__wrapper),
-.ledger-cell-editor-bar :deep(.el-input.is-disabled .el-input__wrapper) {
+.ledger-cell-editor-bar :deep(.el-textarea__inner),
+.ledger-cell-editor-bar :deep(.el-textarea.is-disabled .el-textarea__inner) {
+  box-sizing: border-box;
+  height: 100% !important;
   min-height: 30px;
-  padding: 0 10px;
+  padding: 5px 10px;
+  border: 0;
   border-radius: 0;
   background: transparent;
   box-shadow: none;
+  resize: none;
+  overflow-x: hidden;
+  overflow-y: hidden;
+  white-space: pre;
 }
 
-.ledger-cell-editor-bar :deep(.el-input__inner) {
+.ledger-cell-editor-bar.is-expanded :deep(.el-textarea__inner) {
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ledger-cell-editor-bar :deep(.el-textarea__inner) {
   color: var(--app-text);
   font-family: var(--ledger-font-family, inherit);
   font-size: var(--ledger-font-size, 14px);
+  line-height: 20px;
 }
 
-.ledger-cell-editor-bar :deep(.el-input.is-disabled .el-input__inner) {
+.ledger-cell-editor-bar :deep(.el-textarea.is-disabled .el-textarea__inner) {
   color: var(--app-muted);
+}
+
+.ledger-cell-editor-toggle {
+  display: inline-flex;
+  width: 30px;
+  height: 100%;
+  flex: 0 0 30px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-left: 1px solid var(--app-border);
+  color: var(--app-muted);
+  background: var(--app-surface-soft);
+  cursor: pointer;
+}
+
+.ledger-cell-editor-toggle:hover {
+  color: var(--app-text);
+  background: var(--app-hover);
+}
+
+.ledger-cell-editor-toggle:focus-visible {
+  position: relative;
+  outline: 2px solid var(--app-primary);
+  outline-offset: -2px;
 }
 
 .ledger-search-advanced {
@@ -7511,8 +7698,8 @@ onBeforeUnmount(() => {
 }
 
 .ledger-context-menu {
-  width: 230px;
-  overflow: hidden;
+  width: 160px;
+  overflow: visible;
   border: 1px solid var(--app-border-strong);
   border-radius: 12px;
   background: var(--app-bg);
@@ -7547,6 +7734,81 @@ onBeforeUnmount(() => {
   height: 1px;
   margin: 5px 4px;
   background: var(--app-border);
+}
+
+.ledger-context-menu button.ledger-context-menu-danger:not(:disabled) {
+  color: var(--el-color-danger);
+}
+
+.ledger-context-menu button.ledger-context-menu-danger:hover:not(:disabled) {
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger);
+}
+
+.ledger-context-menu-submenu {
+  position: relative;
+}
+
+.ledger-context-menu .ledger-context-menu-submenu-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ledger-context-menu-submenu-panel {
+  position: absolute;
+  z-index: 1;
+  bottom: -5px;
+  left: calc(100% - 4px);
+  display: none;
+  width: 200px;
+  box-sizing: border-box;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 12px;
+  background: var(--app-bg);
+  box-shadow: 0 8px 26px rgb(45 42 38 / 10%);
+  padding: 5px;
+}
+
+.ledger-context-menu-submenu-panel.opens-left {
+  right: calc(100% - 4px);
+  left: auto;
+}
+
+.ledger-context-menu-insert-count {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--app-muted);
+  font-size: 13px;
+  padding: 5px 8px 7px;
+  white-space: nowrap;
+}
+
+.ledger-context-menu-insert-count input {
+  box-sizing: border-box;
+  width: 72px;
+  height: 28px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 6px;
+  outline: 0;
+  background: var(--app-bg);
+  color: var(--app-text);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  padding: 0 5px;
+  text-align: center;
+}
+
+.ledger-context-menu-insert-count input:focus {
+  border-color: var(--app-primary);
+  box-shadow: 0 0 0 2px var(--app-primary-soft);
+}
+
+.ledger-context-menu-submenu:hover > .ledger-context-menu-submenu-panel,
+.ledger-context-menu-submenu:focus-within > .ledger-context-menu-submenu-panel {
+  display: block;
 }
 
 .date-filter,
@@ -7773,10 +8035,10 @@ onBeforeUnmount(() => {
 .grid-fill-handle {
   position: absolute;
   z-index: 4;
-  right: -8px;
-  bottom: -8px;
-  width: 16px;
-  height: 16px;
+  right: 0;
+  bottom: 0;
+  width: 8px;
+  height: 8px;
   box-sizing: border-box;
   border: 0;
   border-radius: 3px;
@@ -7789,8 +8051,8 @@ onBeforeUnmount(() => {
 
 .grid-fill-handle::after {
   position: absolute;
-  right: 1px;
-  bottom: 1px;
+  right: 0;
+  bottom: 0;
   width: 4px;
   height: 4px;
   border: 1px solid var(--app-bg);
@@ -8044,6 +8306,55 @@ onBeforeUnmount(() => {
   border: 1px solid var(--app-border);
   font-family: inherit;
   font-size: inherit;
+}
+
+.ledger-table-surface :deep(.el-table-v2__main .el-vl__horizontal) {
+  display: none;
+}
+
+.ledger-table-surface :deep(.el-table-v2__footer) {
+  background: var(--app-bg);
+}
+
+.ledger-table-horizontal-scrollbar {
+  width: 100%;
+  height: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: var(--app-bg);
+  opacity: 0;
+  transition: opacity 0.34s ease-out;
+  scrollbar-color: var(--app-muted) var(--app-surface-soft);
+  scrollbar-width: thin;
+}
+
+.ledger-table-surface:hover .ledger-table-horizontal-scrollbar,
+.ledger-table-surface:focus-within .ledger-table-horizontal-scrollbar {
+  opacity: 1;
+}
+
+.ledger-table-horizontal-scrollbar::-webkit-scrollbar {
+  height: 10px;
+}
+
+.ledger-table-horizontal-scrollbar::-webkit-scrollbar-track {
+  border-radius: 999px;
+  background: var(--app-surface-soft);
+}
+
+.ledger-table-horizontal-scrollbar::-webkit-scrollbar-thumb {
+  border: 2px solid var(--app-surface-soft);
+  border-radius: 999px;
+  background: var(--app-muted);
+}
+
+.ledger-table-horizontal-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: var(--app-primary);
+}
+
+.ledger-table-horizontal-scrollbar-content {
+  height: 1px;
+  pointer-events: none;
 }
 
 .ledger-table-surface :deep(.el-table-v2__header-cell),

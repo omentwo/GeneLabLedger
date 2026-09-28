@@ -6,7 +6,6 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import FileResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
@@ -14,13 +13,10 @@ from app.database import get_session
 from app.models import FieldDefinition, Project, ProjectRecord, RecordValue
 from app.schemas import (
     LedgerNativePreviewCreate,
-    LedgerPrintPreviewCreate,
-    LedgerPrintPreviewRead,
     NativePreviewRead,
     PreviewCapabilitiesRead,
 )
-from app.services.office_preview import OfficePreviewError, OfficePreviewService, PreviewEngineUnavailable
-from app.services.preview_files import cleanup_print_previews
+from app.services.office_preview import OfficePreviewError, OfficePreviewService
 from app.services.workbooks import build_xlsx
 
 router = APIRouter(tags=["ledger-preview"])
@@ -44,7 +40,7 @@ def _display_value(record: ProjectRecord, field: FieldDefinition, values: dict[s
     return values.get(field.id, "")
 
 
-def _search_filters(project_id: str, payload: LedgerPrintPreviewCreate) -> list[Any]:
+def _search_filters(project_id: str, payload: LedgerNativePreviewCreate) -> list[Any]:
     filters: list[Any] = [ProjectRecord.project_id == project_id]
     if not payload.include_locked:
         filters.append(ProjectRecord.locked.is_(False))
@@ -72,7 +68,7 @@ def _search_filters(project_id: str, payload: LedgerPrintPreviewCreate) -> list[
     return filters
 
 
-def _preview_filters(project_id: str, payload: LedgerPrintPreviewCreate) -> list[Any]:
+def _preview_filters(project_id: str, payload: LedgerNativePreviewCreate) -> list[Any]:
     if payload.scope == "project":
         filters: list[Any] = [ProjectRecord.project_id == project_id]
         if not payload.include_locked:
@@ -89,7 +85,7 @@ def _safe_filename(value: str) -> str:
 def _build_ledger_sheet(
     session: Session,
     project: Project,
-    payload: LedgerPrintPreviewCreate,
+    payload: LedgerNativePreviewCreate,
 ) -> tuple[tuple[str, list[str], list[list[object]]], int]:
     fields = [
         field
@@ -181,7 +177,7 @@ def _build_ledger_sheet(
 def _build_ledger_source(
     session: Session,
     project: Project,
-    payload: LedgerPrintPreviewCreate,
+    payload: LedgerNativePreviewCreate,
 ) -> tuple[bytes, str, str, int]:
     if payload.scope != "all":
         sheet, count = _build_ledger_sheet(session, project, payload)
@@ -221,50 +217,6 @@ def preview_capabilities(
     service: OfficePreviewService = Depends(preview_service_from),
 ) -> dict[str, object]:
     return service.capabilities()
-
-
-@router.post("/ledgers/{ledger_id}/print-preview", response_model=LedgerPrintPreviewRead)
-def create_ledger_print_preview(
-    ledger_id: str,
-    payload: LedgerPrintPreviewCreate,
-    request: Request,
-    session: Session = Depends(get_session),
-    service: OfficePreviewService = Depends(preview_service_from),
-) -> dict[str, object]:
-    project = session.scalar(
-        select(Project).where(Project.id == ledger_id).options(selectinload(Project.fields))
-    )
-    if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ledger not found.")
-    document_bytes, _, scope, selected_count = _build_ledger_source(session, project, payload)
-
-    preview_id = uuid.uuid4().hex
-    settings = request.app.state.settings
-    cleanup_print_previews(
-        settings.report_work_dir,
-        max_age_seconds=settings.preview_ttl_seconds,
-    )
-    preview_dir = settings.report_work_dir / "ledger-previews"
-    preview_dir.mkdir(parents=True, exist_ok=True)
-    input_path = preview_dir / f"{preview_id}.xlsx"
-    output_path = preview_dir / f"{preview_id}.pdf"
-    input_path.write_bytes(document_bytes)
-    try:
-        resolved_engine = service.convert_xlsx_to_pdf(input_path, output_path, payload.print_engine)
-    except (PreviewEngineUnavailable, OfficePreviewError) as error:
-        input_path.unlink(missing_ok=True)
-        output_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
-    finally:
-        input_path.unlink(missing_ok=True)
-    return {
-        "preview_id": preview_id,
-        "url": f"/api/print-preview/{preview_id}",
-        "filename": f"{_safe_filename(project.name)}.pdf",
-        "print_engine": resolved_engine,
-        "scope": scope,
-        "selected_cell_count": selected_count,
-    }
 
 
 @router.post("/ledgers/{ledger_id}/native-preview", response_model=NativePreviewRead)
@@ -314,23 +266,3 @@ def get_native_preview_status(
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Native preview task not found.")
     return result
-
-
-@router.get("/print-preview/{preview_id}")
-def get_ledger_print_preview(preview_id: str, request: Request) -> FileResponse:
-    if not re.fullmatch(r"[0-9a-f]{32}", preview_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview not found.")
-    settings = request.app.state.settings
-    report_work_dir = settings.report_work_dir
-    cleanup_print_previews(
-        report_work_dir,
-        max_age_seconds=settings.preview_ttl_seconds,
-    )
-    paths = [
-        report_work_dir / "ledger-previews" / f"{preview_id}.pdf",
-        report_work_dir / "report-previews" / f"{preview_id}.pdf",
-    ]
-    path = next((candidate for candidate in paths if candidate.is_file()), None)
-    if path is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview not found or expired.")
-    return FileResponse(path, media_type="application/pdf", filename=f"{preview_id}.pdf")

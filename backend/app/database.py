@@ -8,7 +8,7 @@ from decimal import Decimal, DecimalException
 from pathlib import Path
 
 from fastapi import Request
-from sqlalchemy import DateTime, Engine, create_engine, event, text
+from sqlalchemy import DateTime, create_engine, event, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.types import TypeDecorator
@@ -465,8 +465,3 @@ def get_session(request: Request) -> Generator[Session]:
     database: Database = request.app.state.database
     with database.session_factory() as session:
         yield session
-
-
-def get_engine(request: Request) -> Engine:
-    database: Database = request.app.state.database
-    return database.engine

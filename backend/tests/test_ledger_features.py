@@ -16,6 +16,7 @@ from app.main import create_app
 class FakePreviewService:
     def __init__(self) -> None:
         self.native_jobs: dict[str, dict[str, object]] = {}
+        self.last_input_bytes = b""
 
     def capabilities(self) -> dict[str, object]:
         return {
@@ -28,11 +29,6 @@ class FakePreviewService:
             "preferred_engine": "microsoft",
         }
 
-    def convert_xlsx_to_pdf(self, input_path: Path, output_path: Path, engine: str = "auto") -> str:
-        assert input_path.is_file()
-        output_path.write_bytes(b"%PDF-1.7 fake preview")
-        return "word" if engine in {"auto", "word"} else "wps"
-
     def start_native_preview(
         self,
         input_path: Path,
@@ -42,6 +38,7 @@ class FakePreviewService:
         engine: str = "auto",
     ) -> dict[str, object]:
         assert input_path.is_file()
+        self.last_input_bytes = input_path.read_bytes()
         job_id = "a" * 32
         result = {
             "job_id": job_id,
@@ -312,29 +309,6 @@ def test_force_delete_of_copy_keeps_source_report_template(feature_client: TestC
     assert any(template["id"] == source_template["id"] for template in source_templates)
 
 
-def test_ledger_print_preview_uses_selected_scope(feature_client: TestClient) -> None:
-    project = feature_client.get("/api/projects").json()[0]
-    record = feature_client.post(
-        "/api/records",
-        json={"project_id": project["id"], "pathology_number": "preview-case"},
-    ).json()
-    field = project["fields"][1]
-    response = feature_client.post(
-        f"/api/ledgers/{project['id']}/print-preview",
-        json={
-            "scope": "selection",
-            "cells": [{"record_id": record["id"], "field_id": field["id"]}],
-        },
-    )
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["scope"] == "selection"
-    assert payload["selected_cell_count"] == 1
-    preview = feature_client.get(payload["url"])
-    assert preview.status_code == 200
-    assert preview.content.startswith(b"%PDF")
-
-
 def test_ledger_native_preview_task_uses_generated_snapshot(feature_client: TestClient) -> None:
     project = feature_client.get("/api/projects").json()[0]
     response = feature_client.post(
@@ -351,7 +325,7 @@ def test_ledger_native_preview_task_uses_generated_snapshot(feature_client: Test
     assert status_response.json()["job_id"] == payload["job_id"]
 
 
-def test_ledger_current_project_preview_excludes_other_projects(
+def test_ledger_current_project_native_preview_excludes_other_projects(
     feature_client: TestClient,
 ) -> None:
     projects = feature_client.get("/api/projects").json()
@@ -382,23 +356,6 @@ def test_ledger_current_project_preview_excludes_other_projects(
     )
     assert other.status_code == 201, other.text
 
-    print_preview = feature_client.post(
-        f"/api/ledgers/{current_project['id']}/print-preview",
-        json={"scope": "project", "search": "OTHER-PROJECT"},
-    )
-    assert print_preview.status_code == 200, print_preview.text
-    print_payload = print_preview.json()
-    assert print_payload["scope"] == "project"
-    visible_fields = [field for field in current_project["fields"] if not field["hidden"]]
-    assert print_payload["selected_cell_count"] == 2 * len(visible_fields)
-
-    unlocked_preview = feature_client.post(
-        f"/api/ledgers/{current_project['id']}/print-preview",
-        json={"scope": "project", "include_locked": False},
-    )
-    assert unlocked_preview.status_code == 200, unlocked_preview.text
-    assert unlocked_preview.json()["selected_cell_count"] == len(visible_fields)
-
     native_preview = feature_client.post(
         f"/api/ledgers/{current_project['id']}/native-preview",
         json={
@@ -413,6 +370,17 @@ def test_ledger_current_project_preview_excludes_other_projects(
     assert native_payload["scope"] == "project"
     assert native_payload["action"] == "open"
     assert native_payload["print_engine"] == "wps"
+    preview_service = feature_client.app.state.preview_service
+    assert isinstance(preview_service, FakePreviewService)
+    with zipfile.ZipFile(io.BytesIO(preview_service.last_input_bytes)) as archive:
+        worksheet_xml = "\n".join(
+            archive.read(name).decode()
+            for name in archive.namelist()
+            if name.startswith("xl/worksheets/sheet") and name.endswith(".xml")
+        )
+    assert "CURRENT-ONE" in worksheet_xml
+    assert "CURRENT-TWO" not in worksheet_xml
+    assert "OTHER-PROJECT" not in worksheet_xml
 
 
 def test_report_native_preview_task_uses_rendered_docx(feature_client: TestClient) -> None:

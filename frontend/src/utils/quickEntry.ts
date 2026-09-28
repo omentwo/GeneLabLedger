@@ -2,8 +2,6 @@ import type {
   FieldDefinition,
   ProjectRecord,
   RecordCellChange,
-  RecordCreateInput,
-  RecordStatus,
 } from "@/types/api";
 
 export const QUICK_ENTRY_SETTINGS_KEY = "quick_entry_settings";
@@ -251,55 +249,6 @@ export function normalizeQuickEntryFieldValue(
     throw new Error("状态只能是“待实验”或“已完成”");
   }
   return value;
-}
-
-export function buildQuickEntryCreatePayload(
-  projectId: string,
-  fields: FieldDefinition[],
-  selectedFieldIds: string[],
-  values: Record<string, string>,
-): RecordCreateInput {
-  const selected = new Set(selectedFieldIds);
-  const fieldBySystemKey = new Map(
-    fields.flatMap((field) => field.system_key ? [[field.system_key, field] as const] : []),
-  );
-  const pathologyField = fieldBySystemKey.get("pathology_number");
-  if (!pathologyField) throw new Error("当前项目缺少病理号表头");
-  const statusField = fieldBySystemKey.get("status");
-  const blockField = fieldBySystemKey.get("block_number");
-  const dateField = fieldBySystemKey.get("experiment_date");
-  const numberField = fieldBySystemKey.get("experiment_number");
-  const statusValue = statusField && selected.has(statusField.id)
-    ? normalizeQuickEntryFieldValue(statusField, values[statusField.id] ?? "待实验")
-    : "待实验";
-  const dateValue = dateField && selected.has(dateField.id)
-    ? normalizeQuickEntryFieldValue(dateField, values[dateField.id] ?? "")
-    : "";
-  const numberValue = numberField && selected.has(numberField.id)
-    ? normalizeQuickEntryFieldValue(numberField, values[numberField.id] ?? "")
-    : "";
-  const blockValue = blockField && selected.has(blockField.id)
-    ? normalizeQuickEntryFieldValue(blockField, values[blockField.id] ?? "")
-    : "";
-  return {
-    project_id: projectId,
-    pathology_number: normalizeQuickEntryFieldValue(
-      pathologyField,
-      values[pathologyField.id] ?? "",
-    ),
-    ...(blockField ? { block_number: blockValue || null } : {}),
-    status: statusValue as RecordStatus,
-    experiment_date: dateValue || null,
-    experiment_number: numberValue || null,
-    values: Object.fromEntries(
-      fields
-        .filter((field) => !field.is_core && selected.has(field.id))
-        .map((field) => [
-          field.id,
-          normalizeQuickEntryFieldValue(field, values[field.id] ?? ""),
-        ]),
-    ),
-  };
 }
 
 export function buildQuickEntryChanges(

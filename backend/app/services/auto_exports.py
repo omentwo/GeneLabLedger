@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.audit import audit
@@ -559,7 +559,3 @@ def disable_tasks_for_deleted_project(session: Session, project_id: str) -> int:
             task.last_message = "任务包含已删除的检测项目，已自动停用"
             updated += 1
     return updated
-
-
-def clear_next_runs(session: Session) -> None:
-    session.execute(update(AutoExportTask).values(next_run_at=None))

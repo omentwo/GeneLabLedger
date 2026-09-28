@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import date
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -18,10 +18,6 @@ from app.database import (
 )
 from app.models import FieldDefinition, Project, ProjectRecord, RecordValue
 from app.schemas import (
-    BulkDeleteExecute,
-    BulkDeleteFilter,
-    BulkDeletePreviewRead,
-    BulkDeleteResult,
     RecordCellBatchCommit,
     RecordCellBatchCommitRead,
     RecordCellBatchPreview,
@@ -57,7 +53,7 @@ from app.services.cell_batches import (
     preview_dict,
 )
 from app.services.field_validation import new_record_field_value, validate_field_value
-from app.services.record_operations import apply_record_operation, snapshot_record
+from app.services.record_operations import apply_record_operation
 from app.services.records import (
     allocate_record_position,
     count_project_pathology_number_duplicates,
@@ -72,7 +68,6 @@ from app.services.records import (
     validate_core_record_values,
 )
 from app.services.serializers import record_dict
-from app.timezones import ASIA_SHANGHAI
 
 router = APIRouter(prefix="/records", tags=["台账记录"])
 
@@ -1092,115 +1087,3 @@ def delete_record(record_id: str, session: Session = Depends(get_session)) -> Re
     session.delete(record)
     session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
-def bulk_delete_conditions(payload: BulkDeleteFilter) -> list:
-    conditions = [ProjectRecord.project_id == payload.project_id]
-    if payload.date_field == "experiment_date":
-        conditions.extend(
-            [
-                ProjectRecord.experiment_date >= payload.start_date,
-                ProjectRecord.experiment_date <= payload.end_date,
-            ]
-        )
-    else:
-        start_at = datetime.combine(payload.start_date, time.min, tzinfo=ASIA_SHANGHAI).astimezone(UTC)
-        end_at = (
-            datetime.combine(payload.end_date, time.min, tzinfo=ASIA_SHANGHAI) + timedelta(days=1)
-        ).astimezone(UTC)
-        column = ProjectRecord.created_at if payload.date_field == "created_at" else ProjectRecord.updated_at
-        conditions.extend([column >= start_at, column < end_at])
-    return conditions
-
-
-def bulk_delete_records(session: Session, payload: BulkDeleteFilter) -> list[ProjectRecord]:
-    return list(
-        session.scalars(
-            select(ProjectRecord)
-            .where(*bulk_delete_conditions(payload))
-            .options(selectinload(ProjectRecord.values))
-            .order_by(ProjectRecord.position, ProjectRecord.id)
-        )
-    )
-
-
-@router.post("/bulk-delete/preview", response_model=BulkDeletePreviewRead)
-def preview_bulk_delete(
-    payload: BulkDeleteFilter,
-    session: Session = Depends(get_session),
-) -> dict:
-    require_project(session, payload.project_id)
-    records = bulk_delete_records(session, payload)
-    if len(records) > 10000:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="一次最多批量删除 10000 条记录，请缩小日期范围",
-        )
-    return {
-        "total": len(records),
-        "locked_count": sum(record.locked for record in records),
-        "record_ids": [record.id for record in records],
-        "items": [
-            {
-                "id": record.id,
-                "pathology_number": record.pathology_number,
-                "status": record.status,
-                "experiment_date": record.experiment_date,
-                "created_at": record.created_at,
-                "updated_at": record.updated_at,
-                "locked": record.locked,
-            }
-            for record in records[:200]
-        ],
-    }
-
-
-@router.post("/bulk-delete/execute", response_model=BulkDeleteResult)
-def execute_bulk_delete(
-    payload: BulkDeleteExecute,
-    session: Session = Depends(get_session),
-) -> dict:
-    require_project(session, payload.filter.project_id)
-    records = bulk_delete_records(session, payload.filter)
-    actual_ids = [record.id for record in records]
-    if set(actual_ids) != set(payload.expected_record_ids) or len(actual_ids) != len(
-        payload.expected_record_ids
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="待删除记录已发生变化，请重新预览后再删除",
-        )
-    locked = [record.pathology_number for record in records if record.locked]
-    if locked:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"包含锁定记录，请先解锁：{', '.join(locked[:20])}",
-        )
-    deleted_snapshots = [snapshot_record(record) for record in records]
-    for record in records:
-        audit(
-            session,
-            "record.delete",
-            "project_record",
-            record.id,
-            {
-                "project_id": record.project_id,
-                "pathology_number": record.pathology_number,
-                "bulk": True,
-            },
-        )
-        session.delete(record)
-    audit(
-        session,
-        "record.bulk_delete",
-        "project",
-        payload.filter.project_id,
-        {
-            "date_field": payload.filter.date_field,
-            "start_date": payload.filter.start_date.isoformat(),
-            "end_date": payload.filter.end_date.isoformat(),
-            "record_ids": actual_ids,
-        },
-    )
-    session.commit()
-    return {"deleted": len(records), "deleted_records": deleted_snapshots}

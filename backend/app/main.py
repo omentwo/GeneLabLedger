@@ -32,7 +32,6 @@ from app.services.auto_exports import AutoExportScheduler
 from app.services.database_backups import DatabaseBackupScheduler, apply_pending_restore
 from app.services.office_preview import OfficePreviewService
 from app.services.office_printing import OfficePrintService
-from app.services.preview_files import cleanup_print_previews
 
 
 def create_app(
@@ -56,10 +55,6 @@ def create_app(
         cleanup_native_previews = getattr(office_preview, "cleanup_native_previews", None)
         if cleanup_native_previews is not None:
             cleanup_native_previews(app_settings.report_work_dir / "native-previews")
-        cleanup_print_previews(
-            app_settings.report_work_dir,
-            max_age_seconds=app_settings.preview_ttl_seconds,
-        )
         with database.session_factory() as session:
             seed_initial_data(session)
             prune_audit_logs(
@@ -85,7 +80,7 @@ def create_app(
 
     app = FastAPI(
         title=app_settings.app_name,
-        version="1.0.0",
+        version="1.1.0",
         lifespan=lifespan,
     )
     app.add_middleware(

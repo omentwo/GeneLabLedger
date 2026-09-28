@@ -2,8 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   applyRecordOperation,
-  executeBulkDelete,
-  previewBulkDelete,
   setRecordsHighlight,
 } from "@/api/records";
 
@@ -17,32 +15,6 @@ function jsonResponse(payload: unknown): Response {
 describe("ledger data operation APIs", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
-  });
-
-  it("executes bulk deletion only with the exact previewed UUID list", async () => {
-    const filter = {
-      project_id: "project-1",
-      date_field: "experiment_date" as const,
-      start_date: "2026-08-01",
-      end_date: "2026-08-31",
-    };
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        jsonResponse({ total: 1, locked_count: 0, record_ids: ["record-1"], items: [] }),
-      )
-      .mockResolvedValueOnce(jsonResponse({ deleted: 1 }));
-    vi.stubGlobal("fetch", fetchMock);
-
-    await previewBulkDelete(filter);
-    await executeBulkDelete(filter, ["record-1"]);
-
-    expect(fetchMock.mock.calls[0]![0]).toBe("/api/records/bulk-delete/preview");
-    expect(fetchMock.mock.calls[1]![0]).toBe("/api/records/bulk-delete/execute");
-    expect(JSON.parse(String((fetchMock.mock.calls[1]![1] as RequestInit).body))).toEqual({
-      filter,
-      expected_record_ids: ["record-1"],
-    });
   });
 
   it("sets or clears a selected records' highlight color", async () => {

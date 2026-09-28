@@ -1,5 +1,51 @@
 export type LedgerCellEditState = "clear" | "dirty";
 export type LedgerCellCompletionAction = "none" | "clear" | "pending" | "resave";
+export type CreatedRecordRefreshPlan = "local-visible" | "local-filtered-out" | "reload";
+
+export interface LedgerCellIdentity {
+  rowId: string;
+  fieldId: string;
+}
+
+/**
+ * A completed save may finish after the user has already started editing a
+ * different cell. In that case the old completion must not clear the newer
+ * editor.
+ */
+export function shouldApplyLedgerEditCompletion(
+  completed: LedgerCellIdentity,
+  current: LedgerCellIdentity | null,
+  completedSession: number,
+  currentSession: number,
+): boolean {
+  return completedSession === currentSession
+    && (!current || (current.rowId === completed.rowId && current.fieldId === completed.fieldId));
+}
+
+/**
+ * Decide whether a newly created record can be reconciled against the cheap
+ * ID-only query. A full reload is only needed when some other row changed
+ * concurrently and the local record set can no longer explain the response.
+ */
+export function resolveCreatedRecordRefreshPlan(input: {
+  localRecordIds: string[];
+  queriedRecordIds: string[];
+  createdRecordId: string;
+}): CreatedRecordRefreshPlan {
+  const localIds = new Set(input.localRecordIds);
+  const queriedIds = new Set(input.queriedRecordIds);
+  if (
+    localIds.size !== input.localRecordIds.length
+    || queriedIds.size !== input.queriedRecordIds.length
+  ) return "reload";
+  if (input.queriedRecordIds.some((recordId) => !localIds.has(recordId))) return "reload";
+  if (
+    input.localRecordIds.some(
+      (recordId) => recordId !== input.createdRecordId && !queriedIds.has(recordId),
+    )
+  ) return "reload";
+  return queriedIds.has(input.createdRecordId) ? "local-visible" : "local-filtered-out";
+}
 
 export function resolveLedgerCellEditState(
   currentValue: string,

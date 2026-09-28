@@ -1,8 +1,6 @@
 import { desktopBridge } from "@/utils/desktop";
 import { apiRequestBlob } from "@/api/client";
 
-export type WorkbookFormat = "xlsx";
-
 export interface WorkbookSheet {
   name: string;
   headers: string[];

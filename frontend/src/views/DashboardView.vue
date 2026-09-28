@@ -130,6 +130,7 @@ const lineChartOption = computed<EChartsCoreOption>(() => {
   };
 });
 
+const PROJECT_RANKING_LIMIT = 10;
 const allProjects = computed(() =>
   [...(summary.value?.projects ?? [])].sort(
     (left, right) =>
@@ -138,7 +139,7 @@ const allProjects = computed(() =>
       left.name.localeCompare(right.name),
   ),
 );
-const topProjects = computed(() => allProjects.value.slice(0, 7));
+const topProjects = computed(() => allProjects.value.slice(0, PROJECT_RANKING_LIMIT));
 const topProjectMax = computed(() => Math.max(1, ...topProjects.value.map((project) => project.current_month)));
 const compositionMonthly = computed(() => summary.value?.monthly.slice(-trendMonths.value) ?? []);
 const compositionMonthKeys = computed(() => new Set(compositionMonthly.value.map((item) => item.month)));
@@ -406,7 +407,7 @@ onBeforeUnmount(() => requestController?.abort());
         </article>
 
         <aside class="panel ranking-panel" aria-labelledby="ranking-title">
-          <header class="panel-header"><div><span class="panel-eyebrow">排名</span><h2 id="ranking-title">本月前 7 名</h2><p>按本月实验例数排序</p></div></header>
+          <header class="panel-header"><div><span class="panel-eyebrow">排名</span><h2 id="ranking-title">本月前 {{ PROJECT_RANKING_LIMIT }} 名</h2><p>按本月实验例数排序</p></div></header>
           <ol v-if="topProjects.length" class="ranking-list">
             <li v-for="(project, index) in topProjects" :key="project.id">
               <RouterLink :to="{ path: '/ledger', query: { project: project.id } }" class="ranking-link">

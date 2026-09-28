@@ -13,7 +13,6 @@ contextBridge.exposeInMainWorld("geneLedgerDesktop", {
   dataDirectory: argumentValue("gene-ledger-data-directory"),
   saveWorkbook: (filename, data) =>
     ipcRenderer.invoke("gene-ledger:save-workbook", { filename, data }),
-  printPreview: (url) => ipcRenderer.invoke("gene-ledger:print-preview", url),
   chooseDirectory: (initialDirectory) =>
     ipcRenderer.invoke("gene-ledger:choose-directory", initialDirectory),
   chooseBackupFile: (initialDirectory) =>

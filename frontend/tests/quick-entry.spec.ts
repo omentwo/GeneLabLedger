@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import type { FieldDefinition, ProjectRecord } from "@/types/api";
 import {
   buildQuickEntryChanges,
-  buildQuickEntryCreatePayload,
   normalizeQuickEntrySettings,
   parseCombinedPathologyNumber,
   resolveQuickEntryProjectSettings,
@@ -149,28 +148,6 @@ describe("quick entry field settings", () => {
 });
 
 describe("quick entry record operations", () => {
-  it("builds a create payload from only the selected quick-entry fields", () => {
-    expect(buildQuickEntryCreatePayload(
-      "project-1",
-      fields,
-      ["date", "pathology", "status", "custom"],
-      {
-        date: "2026/8/3",
-        pathology: " P-100 ",
-        status: "已完成",
-        custom: " 新值 ",
-        hidden: "不应提交",
-      },
-    )).toEqual({
-      project_id: "project-1",
-      pathology_number: "P-100",
-      status: "已完成",
-      experiment_date: "2026-08-03",
-      experiment_number: null,
-      values: { custom: "新值" },
-    });
-  });
-
   it("creates optimistic-concurrency cell changes only for edited selected headers", () => {
     expect(buildQuickEntryChanges(
       record("1"),

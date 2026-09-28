@@ -1,8 +1,5 @@
 import { apiRequest, jsonBody } from "@/api/client";
 import type {
-  BulkDeleteFilter,
-  BulkDeletePreview,
-  BulkDeleteResult,
   ProjectRecord,
   RecordBatchNewRecord,
   RecordCellBatchCommitResult,
@@ -132,10 +129,6 @@ export function commitReplace(
     method: "POST",
     body: jsonBody({ token, accept_warnings: acceptWarnings, include_snapshots: false }),
   });
-}
-
-export function getRecord(recordId: string): Promise<ProjectRecord> {
-  return apiRequest<ProjectRecord>(`/records/${recordId}`);
 }
 
 export function createRecord(payload: RecordCreateInput): Promise<ProjectRecord> {
@@ -275,28 +268,6 @@ export function setCellsHighlight(
     body: jsonBody({
       cells,
       highlight_color: highlightColor,
-    }),
-  });
-}
-
-export function previewBulkDelete(
-  filter: BulkDeleteFilter,
-): Promise<BulkDeletePreview> {
-  return apiRequest<BulkDeletePreview>("/records/bulk-delete/preview", {
-    method: "POST",
-    body: jsonBody(filter),
-  });
-}
-
-export function executeBulkDelete(
-  filter: BulkDeleteFilter,
-  expectedRecordIds: string[],
-): Promise<BulkDeleteResult> {
-  return apiRequest<BulkDeleteResult>("/records/bulk-delete/execute", {
-    method: "POST",
-    body: jsonBody({
-      filter,
-      expected_record_ids: expectedRecordIds,
     }),
   });
 }

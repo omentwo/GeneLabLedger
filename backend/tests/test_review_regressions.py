@@ -212,7 +212,7 @@ def test_preview_all_uses_each_projects_own_fields(client, seeded_projects):
 
     from app.api.preview import _build_ledger_source
     from app.models import Project
-    from app.schemas import LedgerPrintPreviewCreate
+    from app.schemas import LedgerNativePreviewCreate
 
     projects = list(seeded_projects.values())
     for index, project in enumerate(projects):
@@ -233,7 +233,7 @@ def test_preview_all_uses_each_projects_own_fields(client, seeded_projects):
         )
     with client.app.state.database.session_factory() as session:
         project = session.get(Project, projects[0]["id"])
-        content, _, scope, _ = _build_ledger_source(session, project, LedgerPrintPreviewCreate(scope="all"))
+        content, _, scope, _ = _build_ledger_source(session, project, LedgerNativePreviewCreate(scope="all"))
     assert scope == "all"
     with zipfile.ZipFile(io.BytesIO(content)) as archive:
         sheets = [
@@ -254,14 +254,14 @@ def test_preview_checks_limit_before_loading_records(client, seeded_projects, mo
 
     from app.api.preview import _build_ledger_source
     from app.models import Project
-    from app.schemas import LedgerPrintPreviewCreate
+    from app.schemas import LedgerNativePreviewCreate
 
     with client.app.state.database.session_factory() as session:
         project = session.get(Project, seeded_projects["TB"]["id"])
         _ = project.fields
         monkeypatch.setattr(session, "scalar", lambda *args, **kwargs: 10_001)
         with pytest.raises(HTTPException) as error:
-            _build_ledger_source(session, project, LedgerPrintPreviewCreate(scope="project"))
+            _build_ledger_source(session, project, LedgerNativePreviewCreate(scope="project"))
         assert error.value.status_code == 422
 
 

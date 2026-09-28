@@ -719,59 +719,6 @@ def test_record_operation_rejects_conflicts_without_partial_changes(
     )
 
 
-def test_bulk_delete_by_ledger_date_requires_fresh_preview_and_unlocked_records(
-    client: TestClient,
-    seeded_projects: dict[str, dict],
-) -> None:
-    tb_id = seeded_projects["TB"]["id"]
-    first = client.post(
-        "/api/records",
-        json={
-            "project_id": tb_id,
-            "pathology_number": "DELETE-001",
-            "experiment_date": "2026-08-01",
-        },
-    ).json()
-    second = client.post(
-        "/api/records",
-        json={
-            "project_id": tb_id,
-            "pathology_number": "DELETE-002",
-            "experiment_date": "2026-08-02",
-        },
-    ).json()
-    assert client.put(f"/api/records/{second['id']}/lock", json={"locked": True}).status_code == 200
-    delete_filter = {
-        "project_id": tb_id,
-        "date_field": "experiment_date",
-        "start_date": "2026-08-01",
-        "end_date": "2026-08-02",
-    }
-    preview = client.post("/api/records/bulk-delete/preview", json=delete_filter).json()
-    assert preview["total"] == 2
-    assert preview["locked_count"] == 1
-    blocked = client.post(
-        "/api/records/bulk-delete/execute",
-        json={"filter": delete_filter, "expected_record_ids": preview["record_ids"]},
-    )
-    assert blocked.status_code == 409
-
-    assert client.put(f"/api/records/{second['id']}/lock", json={"locked": False}).status_code == 200
-    deleted = client.post(
-        "/api/records/bulk-delete/execute",
-        json={"filter": delete_filter, "expected_record_ids": preview["record_ids"]},
-    )
-    assert deleted.status_code == 200
-    deleted_payload = deleted.json()
-    assert deleted_payload["deleted"] == 2
-    assert {record["id"] for record in deleted_payload["deleted_records"]} == {
-        first["id"],
-        second["id"],
-    }
-    assert client.get(f"/api/records/{first['id']}").status_code == 404
-    assert client.get(f"/api/records/{second['id']}").status_code == 404
-
-
 def test_direct_print_uses_temporary_docx_and_document_download_is_removed(
     client: TestClient,
     seeded_projects: dict[str, dict],

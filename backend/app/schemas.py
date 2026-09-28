@@ -50,10 +50,6 @@ MappingSourceType = Literal[
 ]
 
 
-class ApiMessage(BaseModel):
-    message: str
-
-
 class FieldOptionRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -833,7 +829,7 @@ class PreviewCellTarget(BaseModel):
     field_id: str = Field(min_length=1, max_length=36)
 
 
-class LedgerPrintPreviewCreate(BaseModel):
+class LedgerNativePreviewCreate(BaseModel):
     scope: PreviewScope = "filtered"
     include_locked: bool = True
     cells: list[PreviewCellTarget] = Field(default_factory=list, max_length=10000)
@@ -842,6 +838,7 @@ class LedgerPrintPreviewCreate(BaseModel):
     experiment_date: date | None = None
     report_generated: bool | None = None
     print_engine: Literal["auto", "wps", "word"] = "auto"
+    action: NativePreviewAction = "preview"
 
 
 class PreviewCapabilitiesRead(BaseModel):
@@ -852,33 +849,6 @@ class PreviewCapabilitiesRead(BaseModel):
     wps_spreadsheet: bool = False
     native_preview: bool = False
     preferred_engine: Literal["microsoft", "wps"] | None
-
-
-class LedgerPrintPreviewRead(BaseModel):
-    preview_id: str
-    url: str
-    filename: str
-    print_engine: Literal["wps", "word"]
-    scope: PreviewScope
-    selected_cell_count: int
-
-
-class LedgerNativePreviewCreate(LedgerPrintPreviewCreate):
-    action: NativePreviewAction = "preview"
-
-
-class ReportPrintPreviewCreate(BaseModel):
-    template_version_id: str = Field(min_length=1, max_length=36)
-    record_ids: list[str] = Field(min_length=1, max_length=100)
-    print_engine: Literal["auto", "wps", "word"] = "auto"
-
-
-class ReportPrintPreviewRead(BaseModel):
-    preview_id: str
-    url: str
-    filename: str
-    print_engine: Literal["wps", "word"]
-    record_count: int
 
 
 class ReportNativePreviewCreate(BaseModel):
@@ -1019,46 +989,6 @@ class WorkbookExportCreate(BaseModel):
         if cell_count > 2_000_000:
             raise ValueError("导出内容过大，请缩小项目或时间范围")
         return self
-
-
-class BulkDeleteFilter(BaseModel):
-    project_id: str
-    date_field: Literal["experiment_date", "created_at", "updated_at"] = "experiment_date"
-    start_date: date
-    end_date: date
-
-    @model_validator(mode="after")
-    def validate_range(self) -> BulkDeleteFilter:
-        if self.start_date > self.end_date:
-            raise ValueError("开始日期不能晚于结束日期")
-        return self
-
-
-class BulkDeletePreviewItem(BaseModel):
-    id: str
-    pathology_number: str
-    status: str
-    experiment_date: date | None
-    created_at: datetime
-    updated_at: datetime
-    locked: bool
-
-
-class BulkDeletePreviewRead(BaseModel):
-    total: int
-    locked_count: int
-    record_ids: list[str]
-    items: list[BulkDeletePreviewItem]
-
-
-class BulkDeleteExecute(BaseModel):
-    filter: BulkDeleteFilter
-    expected_record_ids: list[str] = Field(min_length=1, max_length=10000)
-
-
-class BulkDeleteResult(BaseModel):
-    deleted: int
-    deleted_records: list[RecordOperationSnapshot] = Field(default_factory=list)
 
 
 class AutoExportTaskInput(BaseModel):
