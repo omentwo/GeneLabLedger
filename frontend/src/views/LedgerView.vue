@@ -553,6 +553,7 @@ const selectedRecordIds = ref(new Set<string>());
 const selectedRecordCache = new Map<string, ProjectRecord>();
 const recordSelectionScope = ref<RecordSelectionScope>("all");
 let ledgerInitialized = false;
+let projectViewGeneration = 0;
 let projectLoadPromise: Promise<void> | null = null;
 let ledgerLayoutSaveQueue: Promise<void> = Promise.resolve();
 
@@ -3403,9 +3404,10 @@ function enqueueRecordSave<T>(recordId: string, task: () => Promise<T>): Promise
   const previous = recordSaveQueues.get(recordId) ?? Promise.resolve();
   const current = previous.catch(() => undefined).then(task);
   recordSaveQueues.set(recordId, current);
-  void current.finally(() => {
+  const clearQueue = () => {
     if (recordSaveQueues.get(recordId) === current) recordSaveQueues.delete(recordId);
-  });
+  };
+  void current.then(clearQueue, clearQueue);
   return current;
 }
 
@@ -3684,35 +3686,64 @@ async function replayHistoryEntry(
 }
 
 function reconcileCommittedPaste(
-  entries: Array<{ record: LedgerRow; rowNumber: number }>,
+  entries: Array<{ record: LedgerRow; rowNumber: number; snapshot: ProjectRecord }>,
   committedIds: string[],
   serverRecords: ProjectRecord[] = [],
 ): ProjectRecord[] | null {
   if (entries.length !== committedIds.length) return null;
-  const committedDraftIds = new Set<string>();
+  const activeIdentity = captureGridIdentity(activeGridCell.value);
+  const anchorIdentity = captureGridIdentity(gridSelectionAnchor.value);
+  const committedDraftIds = new Map<string, string>();
   const committedRecords: ProjectRecord[] = [];
-  entries.forEach(({ record }, index) => {
+  entries.forEach(({ record, snapshot }, index) => {
     const committedId = committedIds[index];
     if (!committedId) return;
     if (isDraft(record)) {
+      const draftId = record.id;
       const serverRecord = serverRecords.find((item) => item.id === committedId);
-      const persistedRecord = serverRecord ?? ({ ...record, id: committedId } as LedgerRow);
+      const persistedRecord = cloneLedgerRecord(serverRecord ?? { ...snapshot, id: committedId });
+      const pendingFields = fields.value.flatMap((field) => {
+        const value = valueFor(record, field);
+        return value !== valueFor(snapshot, field) ? [{ field, value }] : [];
+      });
+      // Keep the server values as the save baseline, then carry later edits to
+      // the new UUID. Reuse the row object so pending editor events use it too.
+      rememberRecord(persistedRecord);
       reanchorPendingInsertedDrafts(record, persistedRecord);
-      if ("_draft" in persistedRecord) delete persistedRecord._draft;
-      records.value.push(persistedRecord as ProjectRecord);
-      committedRecords.push(persistedRecord as ProjectRecord);
-      committedDraftIds.add(record.id);
+      Object.assign(record, persistedRecord);
+      delete record._draft;
+      pendingFields.forEach(({ field, value }) => setValue(record, field, value));
+      records.value.push(record);
+      committedRecords.push(record);
+      committedDraftIds.set(draftId, committedId);
       return;
     }
     rememberRecord(record);
     committedRecords.push(record);
   });
   if (committedDraftIds.size) {
-    draftRows.value = draftRows.value.filter((row) => !committedDraftIds.has(row.id));
+    const persistedIds = new Set(committedDraftIds.values());
+    draftRows.value = draftRows.value.filter((row) => !persistedIds.has(row.id));
     cleanupInsertedGroupRegistry();
     recordTotal.value += committedDraftIds.size;
+    const remapIdentity = (identity: { rowId: string; fieldId: string } | null) => identity && ({
+      ...identity, rowId: committedDraftIds.get(identity.rowId) ?? identity.rowId,
+    });
+    activeGridCell.value = restoreGridIdentity(remapIdentity(activeIdentity));
+    gridSelectionAnchor.value = restoreGridIdentity(remapIdentity(anchorIdentity));
+    selectedGridCellKeys.value = new Set([...selectedGridCellKeys.value].map((key) => {
+      const [rowId = "", fieldId = ""] = key.split(GRID_CELL_KEY_SEPARATOR);
+      return `${committedDraftIds.get(rowId) ?? rowId}${GRID_CELL_KEY_SEPARATOR}${fieldId}`;
+    }));
+    if (editingGridSnapshot.value && committedDraftIds.has(editingGridSnapshot.value.rowId)) {
+      editingGridSnapshot.value = {
+        ...editingGridSnapshot.value,
+        rowId: committedDraftIds.get(editingGridSnapshot.value.rowId)!,
+      };
+      editingGridCell.value = restoreGridIdentity(editingGridSnapshot.value);
+      if (!editingGridCell.value) clearGridCellEdit();
+    }
   }
-  rememberAll();
   return committedRecords;
 }
 
@@ -5366,6 +5397,10 @@ async function pasteGrid(
     : textOverride ?? event?.clipboardData?.getData("text/plain") ?? "";
   if (!exactCells && !text) return [];
   const projectId = activeProjectId.value;
+  const projectGeneration = projectViewGeneration;
+  const viewIsCurrent = () => !ledgerDisposed
+    && projectId === activeProjectId.value
+    && projectGeneration === projectViewGeneration;
   event?.preventDefault();
   // Pasting should preserve the current viewport and the starting cell.  A
   // pending "add record" scroll or a newly-created draft row must not move
@@ -5444,8 +5479,8 @@ async function pasteGrid(
     });
 
     const committableDrafts = [...changedDraftRows.values()].filter(
-      ({ record }) => record.pathology_number.trim(),
-    );
+      ({ record }) => record.pathology_number.trim() && !savingIds.value.has(record.id),
+    ).map((entry) => ({ ...entry, snapshot: snapshotRecord(entry.record) }));
     const batchNewRecords: RecordBatchNewRecord[] = committableDrafts.map(({ record }) => ({
       client_id: record.id,
       pathology_number: record.pathology_number.trim(),
@@ -5465,28 +5500,49 @@ async function pasteGrid(
         ? { insert_after_record_id: record._insertAnchorId }
         : {}),
     }));
-    const batchPreview = existingChanges.length || batchNewRecords.length
-      ? await previewCellBatch(projectId, existingChanges, batchNewRecords)
-      : null;
-    const allIssues = batchPreview?.issues ?? [];
-    const errors = allIssues.filter((issue) => issue.severity === "error");
-    const warnings = allIssues.filter((issue) => issue.severity === "warning");
-    const cellKeys = changedPositions.flatMap((position) => {
-      const data = gridCellData(position);
-      return data ? [persistedKey(data.record.id, data.field.id)] : [];
-    });
+    const cellKeys = [...rollbackSnapshots.keys()];
     const cellVersions = Object.fromEntries(
       cellKeys.map((key) => [key, cellSaveVersions.get(key) ?? 0]),
     );
+    let batchPreview: Awaited<ReturnType<typeof previewCellBatch>> | null = null;
+    committableDrafts.forEach(({ snapshot }) => setSaving(snapshot.id, true));
+    try {
+      if (existingChanges.length || batchNewRecords.length) {
+        batchPreview = await previewCellBatch(projectId, existingChanges, batchNewRecords);
+      }
+    } finally {
+      committableDrafts.forEach(({ snapshot }) => setSaving(snapshot.id, false));
+    }
+    const allIssues = batchPreview?.issues ?? [];
+    const errors = allIssues.filter((issue) => issue.severity === "error");
+    const warnings = allIssues.filter((issue) => issue.severity === "warning");
 
     const commitPasteChanges = async (acceptWarnings: boolean): Promise<void> => {
-      const batchResult = batchPreview
-        ? await commitCellBatch(
+      if (acceptWarnings && !viewIsCurrent()) throw new Error("项目已切换，请重新执行该操作");
+      let batchResult: RecordCellBatchCommitResult | null = null;
+      committableDrafts.forEach(({ snapshot }) => setSaving(snapshot.id, true));
+      try {
+        if (batchPreview) {
+          batchResult = await commitCellBatch(
             batchPreview.token,
             acceptWarnings,
             committableDrafts.length > 0,
-          )
-        : null;
+          );
+        }
+      } finally {
+        committableDrafts.forEach(({ snapshot }) => setSaving(snapshot.id, false));
+      }
+      if (batchResult) {
+        invalidateProjectRecordCache(projectId);
+        if (!ledgerDisposed) {
+          if (committableDrafts.length) {
+            pushHistory(`${operationLabel}台账数据`, batchResult.before, batchResult.after, projectId);
+          } else {
+            pushCellHistory(`${operationLabel}台账数据`, batchResult.changes, projectId);
+          }
+        }
+      }
+      if (!viewIsCurrent()) return;
       const completedKeys = new Set(
         existingChanges
           .map((change) => persistedKey(change.record_id, change.field_id))
@@ -5510,23 +5566,27 @@ async function pasteGrid(
           batchResult?.created_record_ids ?? [],
           batchResult?.records ?? [],
         ) ?? [];
+        const pendingSaves = committedDraftRecords.flatMap((record) => fields.value.flatMap((field) => {
+          const editing = editingGridSnapshot.value;
+          if (editing?.rowId === record.id && editing.fieldId === field.id) return [];
+          return cellSaveStates.value.get(persistedKey(record.id, field.id))?.status === "dirty"
+            ? [saveField(record, field)]
+            : [];
+        }));
+        await Promise.all(pendingSaves);
+        if (!viewIsCurrent()) return;
         if (!committedDraftRecords.length && batchResult?.created_record_ids.length) {
           await loadRecords(projectId, { showLoading: false, preserveHistory: true });
         }
-        if (committedDraftRecords.length && committedAnchoredDraft) {
+        const hasPendingEdits = committedDraftRecords.some((record) => fields.value.some((field) => {
+          const status = cellSaveStates.value.get(persistedKey(record.id, field.id))?.status;
+          return status === "dirty" || status === "saving" || status === "error";
+        }));
+        if (committedDraftRecords.length && committedAnchoredDraft && !hasPendingEdits) {
           await loadRecords(projectId, { showLoading: false, preserveHistory: true });
         }
       }
-      if (committableDrafts.length && batchResult) {
-        pushHistory(
-          `${operationLabel}台账数据`,
-          batchResult.before,
-          batchResult.after,
-          projectId,
-        );
-      } else if (batchResult) {
-        pushCellHistory(`${operationLabel}台账数据`, batchResult.changes, projectId);
-      }
+      if (!viewIsCurrent()) return;
       if (batchResult || committedDraftRecords.length) {
         ElMessage.success(`已${operationLabel} ${changedCells} 个单元格`);
       } else if (changedCells) {
@@ -5536,6 +5596,7 @@ async function pasteGrid(
     };
 
     if (errors.length || warnings.length) {
+      if (!viewIsCurrent()) return [];
       const prompt = errors.length
         ? {
             title: "无法保存",
@@ -5552,6 +5613,7 @@ async function pasteGrid(
       pendingValidationCancel = errors.length
         ? null
         : () => {
+            if (!viewIsCurrent()) return;
             rollbackValidationCells([...rollbackSnapshots.values()], cellVersions);
             removeDraftRows(appendedDraftIds);
             ElMessage.info(`已取消${operationLabel}，并恢复操作前的内容`);
@@ -5578,6 +5640,7 @@ async function pasteGrid(
     }
 
     await commitPasteChanges(false);
+    if (!viewIsCurrent()) return [];
     if (allIssues.length) {
       pendingValidationAction = null;
       pendingValidationCancel = null;
@@ -5599,8 +5662,9 @@ async function pasteGrid(
     }
     return changedPositions;
   } catch (error) {
+    if (!viewIsCurrent()) return [];
     await loadRecords(projectId, { showLoading: false, preserveHistory: true, preserveSelection: true });
-    ElMessage.error(error instanceof Error ? error.message : "粘贴保存失败");
+    if (viewIsCurrent()) ElMessage.error(error instanceof Error ? error.message : "粘贴保存失败");
     return [];
   }
 }
@@ -5873,12 +5937,14 @@ watch(
 );
 
 watch(activeProjectId, async (projectId, previousProjectId) => {
+  projectViewGeneration += 1;
   if (!ledgerInitialized || !projectId || projectId === previousProjectId) return;
   rememberLastLedgerProjectId(projectId);
   const load = (async () => {
     clearBottomScrollTimers();
     stopGridCellDrag(false);
     closeLedgerOverlays();
+    dismissValidationPanel();
     applyLedgerProjectLayout(projectId);
     clearGridCellEdit();
     clearSelectionsAfterLedgerViewChange();
