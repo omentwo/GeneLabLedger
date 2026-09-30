@@ -3,6 +3,12 @@ export interface GeneLedgerDesktopBridge {
   windowKind: "main" | "quick-entry";
   backendUrl: string;
   dataDirectory: string;
+  clipboardFollowAvailable: boolean;
+  startClipboardFollow: (context: ClipboardFollowContext) => Promise<{ sequence: number }>;
+  stopClipboardFollow: (sessionId: string) => Promise<void>;
+  acceptCurrentClipboard: (sessionId: string) => Promise<void>;
+  writeInternalClipboard: (text: string) => Promise<void>;
+  onClipboardFollowEvent: (listener: (event: ClipboardFollowEvent) => void) => () => void;
   saveWorkbook: (
     filename: string,
     data: ArrayBuffer,
@@ -47,6 +53,17 @@ export interface QuickEntryOpenContext {
   selectedFieldIds: string[];
   pinnedFieldIds: string[];
 }
+
+export interface ClipboardFollowContext {
+  sessionId: string;
+  projectId: string;
+  recordId: string;
+}
+
+export type ClipboardFollowEvent = ClipboardFollowContext & (
+  { type: "clipboard"; sequence: number; eventId: number; text: string; manual: boolean }
+  | { type: "stopped"; reason: string }
+);
 
 export interface QuickEntryChangedPayload {
   projectId: string;

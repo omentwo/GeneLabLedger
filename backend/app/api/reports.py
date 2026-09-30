@@ -54,6 +54,7 @@ from app.services.office_printing import (
     OfficePrintError,
     OfficePrintService,
 )
+from app.services.report_template_storage import resolve_template_path
 from app.services.serializers import template_dict, template_version_dict
 from app.timezones import ASIA_SHANGHAI
 
@@ -225,7 +226,7 @@ async def create_report_template(
             template_id=template.id,
             version_number=1,
             original_filename=file.filename or "template.docx",
-            storage_path=str(target_path.resolve()),
+            storage_path=target_path.relative_to(settings.template_dir).as_posix(),
             placeholders=placeholders,
         )
         session.add(version)
@@ -297,7 +298,7 @@ async def add_report_template_version(
             template_id=template.id,
             version_number=version_number,
             original_filename=file.filename or "template.docx",
-            storage_path=str(target_path.resolve()),
+            storage_path=target_path.relative_to(settings.template_dir).as_posix(),
             placeholders=placeholders,
         )
         session.add(version)
@@ -446,7 +447,10 @@ def render_report_documents(
     version: ReportTemplateVersion,
     items: list,
     output_directory: Path,
+    *,
+    template_root: Path,
 ) -> tuple[list[Path], list[str]]:
+    template_path = resolve_template_path(template_root, version.template_id, version.storage_path)
     documents: list[Path] = []
     record_ids: list[str] = []
     for index, item in enumerate(items, start=1):
@@ -462,7 +466,7 @@ def render_report_documents(
             fallback=f"report_{index:03d}",
         )
         output_path = output_directory / f"{base_name}.docx"
-        render_docx(Path(version.storage_path), output_path, replacements)
+        render_docx(template_path, output_path, replacements)
         documents.append(output_path)
         record_ids.append(record.id)
     return documents, record_ids
@@ -495,6 +499,7 @@ def print_reports(
             version,
             payload.items,
             print_root,
+            template_root=settings.template_dir,
         )
         resolved_engine = printer_service.print_documents(
             documents,
@@ -553,6 +558,7 @@ def native_preview_report(
             version,
             [ReportBatchItem(project_record_id=payload.record_ids[0])],
             render_root,
+            template_root=settings.template_dir,
         )
         if not documents:
             raise OfficePreviewError("No report document was generated for native preview.")

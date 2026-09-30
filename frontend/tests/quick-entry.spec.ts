@@ -69,7 +69,7 @@ describe("quick entry field settings", () => {
         broken: null,
       },
     })).toEqual({
-      version: 4,
+      version: 5,
       projects: {
         "project-1": {
           selectedFieldIds: ["pathology"],
@@ -79,6 +79,10 @@ describe("quick entry field settings", () => {
           fontSize: 14,
           inputHeight: 32,
           autoAdvanceAfterUpdate: true,
+          clipboardFieldIds: ["pathology"],
+          clipboardEnabled: false,
+          clipboardOverwriteExisting: false,
+          clipboardAutoContinue: false,
         },
       },
     });
@@ -104,6 +108,10 @@ describe("quick entry field settings", () => {
       fontSize: 20,
       inputHeight: 28,
       autoAdvanceAfterUpdate: false,
+      clipboardFieldIds: [],
+      clipboardEnabled: false,
+      clipboardOverwriteExisting: false,
+      clipboardAutoContinue: false,
     });
   });
 
@@ -119,6 +127,10 @@ describe("quick entry field settings", () => {
       fontSize: 14,
       inputHeight: 32,
       autoAdvanceAfterUpdate: true,
+      clipboardFieldIds: ["number"],
+      clipboardEnabled: false,
+      clipboardOverwriteExisting: false,
+      clipboardAutoContinue: false,
     });
   });
 
@@ -134,6 +146,10 @@ describe("quick entry field settings", () => {
       fontSize: 14,
       inputHeight: 32,
       autoAdvanceAfterUpdate: true,
+      clipboardFieldIds: [],
+      clipboardEnabled: false,
+      clipboardOverwriteExisting: false,
+      clipboardAutoContinue: false,
     });
   });
 
@@ -144,6 +160,28 @@ describe("quick entry field settings", () => {
       normalized: "A-20260907-3",
     });
     expect(() => parseCombinedPathologyNumber("A20260907")).toThrow("病理号-蜡块号");
+  });
+
+  it("migrates v4 settings without changing the existing field order or dimensions", () => {
+    const migrated = normalizeQuickEntrySettings({ version: 4, projects: {
+      p: { selectedFieldIds: ["custom", "pathology", "date"], pinnedFieldIds: ["date"], fieldWidth: 410 },
+    } });
+    expect(migrated.version).toBe(5);
+    expect(migrated.projects.p?.selectedFieldIds).toEqual(["custom", "pathology", "date"]);
+    expect(migrated.projects.p?.fieldWidth).toBe(410);
+    expect(migrated.projects.p?.clipboardEnabled).toBe(false);
+    expect(resolveQuickEntryProjectSettings(fields, migrated.projects.p).clipboardFieldIds).toEqual(["custom", "date"]);
+  });
+
+  it("keeps paste order independent and excludes record identifiers, hidden and removed fields", () => {
+    const resolved = resolveQuickEntryProjectSettings(fields, {
+      selectedFieldIds: ["pathology", "date", "custom", "hidden"],
+      clipboardFieldIds: ["custom", "hidden", "removed", "pathology", "date"], clipboardEnabled: true,
+    });
+    expect(resolved.selectedFieldIds).toEqual(["pathology", "date", "custom", "hidden"]);
+    expect(resolved.clipboardFieldIds).toEqual(["custom", "date"]);
+    expect(resolved.clipboardEnabled).toBe(true);
+    expect(resolveQuickEntryProjectSettings(fields, { clipboardFieldIds: [] }).clipboardFieldIds).toEqual([]);
   });
 });
 

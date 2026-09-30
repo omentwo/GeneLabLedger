@@ -11,6 +11,16 @@ contextBridge.exposeInMainWorld("geneLedgerDesktop", {
   windowKind: argumentValue("gene-ledger-window-kind") || "main",
   backendUrl: argumentValue("gene-ledger-backend-url"),
   dataDirectory: argumentValue("gene-ledger-data-directory"),
+  clipboardFollowAvailable: process.platform === "win32",
+  startClipboardFollow: (context) => ipcRenderer.invoke("gene-ledger:clipboard-follow-start", context),
+  stopClipboardFollow: (sessionId) => ipcRenderer.invoke("gene-ledger:clipboard-follow-stop", sessionId),
+  acceptCurrentClipboard: (sessionId) => ipcRenderer.invoke("gene-ledger:clipboard-follow-accept", sessionId),
+  writeInternalClipboard: (text) => ipcRenderer.invoke("gene-ledger:clipboard-write-internal", text),
+  onClipboardFollowEvent: (listener) => {
+    const handler = (_event, payload) => listener(payload);
+    ipcRenderer.on("gene-ledger:clipboard-follow-event", handler);
+    return () => ipcRenderer.removeListener("gene-ledger:clipboard-follow-event", handler);
+  },
   saveWorkbook: (filename, data) =>
     ipcRenderer.invoke("gene-ledger:save-workbook", { filename, data }),
   chooseDirectory: (initialDirectory) =>

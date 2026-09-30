@@ -19,6 +19,10 @@ hiddenimports = [
     "pydantic_settings",
     "sqlalchemy",
     "alembic",
+    "win32api",
+    "win32clipboard",
+    "win32con",
+    "win32gui",
 ]
 hiddenimports += collect_submodules("app")
 

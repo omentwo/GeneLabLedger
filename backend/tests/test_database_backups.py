@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+import shutil
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -10,10 +12,11 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
-from app.models import AppSetting
+from app.models import AppSetting, ReportTemplateVersion
 from app.services.database_backups import BackupError, prune_backups, validate_backup_archive
 from app.timezones import ASIA_SHANGHAI
 from tests.conftest import FakeOfficePrintService
+from tests.test_ledger_features import FakePreviewService, minimal_docx
 
 
 def test_complete_backup_defaults_and_archive_contents(client: TestClient) -> None:
@@ -132,3 +135,109 @@ def test_restore_replaces_database_and_templates_after_restart(tmp_path: Path) -
             "before-backup"
         )
         assert not (settings.data_dir / ".pending-database-restore.json").exists()
+
+
+@pytest.mark.parametrize("legacy_path", [False, True], ids=["relative", "legacy-absolute"])
+@pytest.mark.parametrize("source_available", [False, True], ids=["source-removed", "source-changed"])
+def test_cross_directory_restore_uses_restored_report_templates(
+    tmp_path: Path,
+    legacy_path: bool,
+    source_available: bool,
+) -> None:
+    source_dir = tmp_path / "source-data"
+    source_settings = Settings(
+        data_dir=source_dir,
+        database_url=f"sqlite:///{(source_dir / 'test.db').as_posix()}",
+        auto_create_schema=True,
+    )
+    source_app = create_app(settings=source_settings, printer_service=FakeOfficePrintService())
+    with TestClient(source_app) as source_client:
+        project = source_client.get("/api/projects").json()[0]
+        record_response = source_client.post(
+            "/api/records",
+            json={"project_id": project["id"], "pathology_number": "RESTORE-001"},
+        )
+        assert record_response.status_code == 201, record_response.text
+        record = record_response.json()
+        uploaded = source_client.post(
+            "/api/report-templates",
+            data={"project_id": project["id"], "name": "跨目录恢复模板"},
+            files={"file": ("report.docx", minimal_docx(), "application/octet-stream")},
+        )
+        assert uploaded.status_code == 201, uploaded.text
+        template = uploaded.json()
+        version = template["versions"][0]
+        mapped = source_client.put(
+            f"/api/report-template-versions/{version['id']}/mappings",
+            json={"mappings": [{"placeholder": "case_no", "source_type": "pathology_with_block"}]},
+        )
+        assert mapped.status_code == 200, mapped.text
+        template_path = next((source_settings.template_dir / template["id"]).glob("*.docx"))
+        with source_app.state.database.session_factory() as session:
+            stored_version = session.get(ReportTemplateVersion, version["id"])
+            stored_version.storage_path = (
+                str(template_path.resolve())
+                if legacy_path
+                else template_path.relative_to(source_settings.template_dir).as_posix()
+            )
+            session.commit()
+        backup_response = source_client.post("/api/database-backups/run")
+        assert backup_response.status_code == 200, backup_response.text
+        backup_path = tmp_path / "restore.glbkp"
+        shutil.copy2(backup_response.json()["path"], backup_path)
+
+    if source_available:
+        # The original file must not override the snapshot restored in the target.
+        template_path.write_bytes(b"modified-original-template")
+    else:
+        assert source_dir.resolve().parent == tmp_path.resolve()
+        shutil.rmtree(source_dir)
+
+    target_dir = tmp_path / "target-data"
+    target_settings = Settings(
+        data_dir=target_dir,
+        database_url=f"sqlite:///{(target_dir / 'test.db').as_posix()}",
+        auto_create_schema=True,
+    )
+    target_app = create_app(settings=target_settings, printer_service=FakeOfficePrintService())
+    with TestClient(target_app) as target_client:
+        restored = target_client.post("/api/database-backups/restore", json={"path": str(backup_path)})
+        assert restored.status_code == 200, restored.text
+        assert restored.json()["restart_required"] is True
+
+    printer = FakeOfficePrintService()
+    preview_service = FakePreviewService()
+    restarted_app = create_app(
+        settings=target_settings,
+        printer_service=printer,
+        preview_service=preview_service,
+    )
+    with TestClient(restarted_app, raise_server_exceptions=False) as restarted_client:
+        printed = restarted_client.post(
+            "/api/reports/print",
+            json={
+                "template_version_id": version["id"],
+                "printer_name": "测试打印机",
+                "items": [{"project_record_id": record["id"]}],
+                "print_engine": "auto",
+            },
+        )
+        assert printed.status_code == 200, printed.text
+        assert printed.json()["printed_count"] == 1
+        assert "RESTORE-001" in printer.printed_document_xml[0]
+        previewed = restarted_client.post(
+            f"/api/report-template-versions/{version['id']}/native-preview",
+            json={
+                "template_version_id": version["id"],
+                "record_ids": [record["id"]],
+                "action": "preview",
+                "print_engine": "auto",
+            },
+        )
+        assert previewed.status_code == 200, previewed.text
+        with zipfile.ZipFile(io.BytesIO(preview_service.last_input_bytes)) as archive:
+            assert b"RESTORE-001" in archive.read("word/document.xml")
+        copied = restarted_client.post(
+            f"/api/projects/{project['id']}/duplicate", json={"name": "恢复后的台账副本"}
+        )
+        assert copied.status_code == 201, copied.text

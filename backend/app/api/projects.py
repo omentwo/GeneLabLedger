@@ -43,6 +43,7 @@ from app.services.auto_exports import disable_tasks_for_deleted_project
 from app.services.field_names import RESERVED_WORKBOOK_HEADERS, field_import_identifiers
 from app.services.field_validation import validate_default_value
 from app.services.records import require_project
+from app.services.report_template_storage import resolve_template_path
 
 router = APIRouter(prefix="/projects", tags=["项目与表头"])
 
@@ -227,7 +228,9 @@ def duplicate_project(
             session.add(cloned_template)
             session.flush()
             for source_version in source_template.versions:
-                source_path = Path(source_version.storage_path)
+                source_path = resolve_template_path(
+                    settings.template_dir, source_template.id, source_version.storage_path
+                )
                 target_dir = settings.template_dir / cloned_template.id
                 target_dir.mkdir(parents=True, exist_ok=True)
                 target_path = target_dir / f"v{source_version.version_number}{source_path.suffix or '.docx'}"
@@ -242,7 +245,7 @@ def duplicate_project(
                     template_id=cloned_template.id,
                     version_number=source_version.version_number,
                     original_filename=source_version.original_filename,
-                    storage_path=str(target_path),
+                    storage_path=target_path.relative_to(settings.template_dir).as_posix(),
                     placeholders=list(source_version.placeholders or []),
                 )
                 session.add(cloned_version)

@@ -7,6 +7,7 @@ const http = require("node:http");
 const net = require("node:net");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { ClipboardFollower } = require("./clipboard-follow.cjs");
 
 const APP_TITLE = "基因检测台账";
 const CONFIG_FILENAME = "desktop-settings.json";
@@ -31,6 +32,23 @@ let alwaysOnTop = false;
 let quickEntryBounds = null;
 let quickEntryBoundsTimer = null;
 let quitting = false;
+const clipboardFollower = new ClipboardFollower({
+  command: () => app.isPackaged ? packagedBackendCommand() : developmentBackendCommand(),
+  onEvent: (payload) => {
+    if (
+      quickEntryWindow && !quickEntryWindow.isDestroyed() && quickEntryRendererReady &&
+      !quickEntryWindow.webContents.isDestroyed() &&
+      (payload.type !== "clipboard" || (quickEntryWindow.isVisible() && !quickEntryWindow.isMinimized()))
+    ) {
+      quickEntryWindow.webContents.send("gene-ledger:clipboard-follow-event", payload);
+    }
+  },
+});
+
+function pauseClipboardFollow(reason) {
+  const context = clipboardFollower.session;
+  if (context) void clipboardFollower.stop(context.sessionId, reason);
+}
 
 function normalizeStoredBounds(value) {
   if (!value || typeof value !== "object") return null;
@@ -376,8 +394,15 @@ function createQuickEntryWindow(context) {
   quickEntryWindow.setAlwaysOnTop(true, "floating");
   configureRendererNavigation(quickEntryWindow);
   quickEntryWindow.webContents.on("did-start-loading", () => {
+    pauseClipboardFollow("窗口正在重新加载，请重新确认病理号");
     quickEntryRendererReady = false;
   });
+  quickEntryWindow.webContents.on("render-process-gone", () => {
+    quickEntryRendererReady = false;
+    void clipboardFollower.close();
+  });
+  quickEntryWindow.on("hide", () => pauseClipboardFollow("窗口已隐藏，接收已暂停"));
+  quickEntryWindow.on("minimize", () => pauseClipboardFollow("窗口已最小化，接收已暂停"));
   quickEntryWindow.once("ready-to-show", () => {
     if (!quickEntryWindow || quickEntryWindow.isDestroyed()) return;
     quickEntryWindow.setAlwaysOnTop(true, "floating");
@@ -389,6 +414,7 @@ function createQuickEntryWindow(context) {
   quickEntryWindow.on("resize", scheduleQuickEntryBoundsPersistence);
   quickEntryWindow.on("close", persistQuickEntryBounds);
   quickEntryWindow.on("closed", () => {
+    void clipboardFollower.close();
     if (quickEntryBoundsTimer) clearTimeout(quickEntryBoundsTimer);
     quickEntryBoundsTimer = null;
     quickEntryRendererReady = false;
@@ -499,6 +525,27 @@ function normalizeExportData(data) {
 }
 
 function registerDesktopHandlers() {
+  ipcMain.handle("gene-ledger:clipboard-follow-start", (event, context) => {
+    assertQuickEntryIpcSender(event);
+    if (process.platform !== "win32") throw new Error("剪贴板跟随仅支持 Windows 桌面版");
+    if (!quickEntryRendererReady || !quickEntryWindow.isVisible() || quickEntryWindow.isMinimized()) {
+      throw new Error("请先显示快速录入窗口");
+    }
+    return clipboardFollower.start(context);
+  });
+  ipcMain.handle("gene-ledger:clipboard-follow-stop", (event, sessionId) => {
+    assertQuickEntryIpcSender(event);
+    return clipboardFollower.stop(sessionId);
+  });
+  ipcMain.handle("gene-ledger:clipboard-follow-accept", (event, sessionId) => {
+    assertQuickEntryIpcSender(event);
+    return clipboardFollower.accept(sessionId);
+  });
+  ipcMain.handle("gene-ledger:clipboard-write-internal", (event, text) => {
+    assertQuickEntryIpcSender(event);
+    if (process.platform !== "win32") throw new Error("此剪贴板服务仅支持 Windows");
+    return clipboardFollower.writeInternal(text);
+  });
   ipcMain.handle("gene-ledger:save-workbook", async (event, payload) => {
     assertTrustedIpcSender(event);
     const requestedName = path.basename(String(payload?.filename || "台账.xlsx"));
@@ -829,7 +876,7 @@ app.on("before-quit", (event) => {
   }
   event.preventDefault();
   quitting = true;
-  void stopBackend().finally(() => app.exit(0));
+  void Promise.all([clipboardFollower.close(), stopBackend()]).finally(() => app.exit(0));
 });
 
 app.on("window-all-closed", () => {

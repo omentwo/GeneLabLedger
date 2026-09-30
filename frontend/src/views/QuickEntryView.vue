@@ -11,13 +11,14 @@ import {
   Settings2 as Setting,
 } from "@lucide/vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import {
   commitCellBatch,
   listRecords,
   previewCellBatch,
+  queryRecords,
   quickCreateRecord,
   validateNewRecord,
 } from "@/api/records";
@@ -26,7 +27,8 @@ import EditableChoiceInput from "@/components/EditableChoiceInput.vue";
 import EditableDateInput from "@/components/EditableDateInput.vue";
 import { useAppStore } from "@/stores/app";
 import type { FieldDefinition, ProjectRecord, RecordValidationIssue } from "@/types/api";
-import type { QuickEntryOpenContext } from "@/types/electron";
+import type { ClipboardFollowEvent, QuickEntryOpenContext } from "@/types/electron";
+import { ClipboardFollowSession } from "@/utils/clipboardFollow";
 import { desktopBridge } from "@/utils/desktop";
 import {
   QUICK_ENTRY_SETTINGS_KEY,
@@ -41,6 +43,7 @@ import {
   QUICK_ENTRY_INPUT_HEIGHT_MIN,
   buildQuickEntryChanges,
   isMandatoryQuickEntryField,
+  isClipboardEntryField,
   normalizeQuickEntrySettings,
   parseCombinedPathologyNumber,
   quickEntryDefaultValue,
@@ -80,6 +83,17 @@ const inputHeightDraft = ref(QUICK_ENTRY_INPUT_HEIGHT_DEFAULT);
 const draggingFieldId = ref("");
 const dragOverFieldId = ref("");
 const autoAdvanceDraft = ref(true);
+const clipboardFieldDraft = ref<string[]>([]);
+const clipboardEnabledDraft = ref(false);
+const clipboardOverwriteDraft = ref(false);
+const clipboardAutoContinueDraft = ref(false);
+const draggingClipboardFieldId = ref("");
+const clipboardEnabled = ref(false);
+const clipboardBusy = ref(false);
+const clipboardSession = reactive(new ClipboardFollowSession());
+const matchingRecords = ref<ProjectRecord[]>([]);
+const matchDialogVisible = ref(false);
+const clipboardAvailable = Boolean(bridge?.windowKind === "quick-entry" && bridge.clipboardFollowAvailable);
 const combinedPathologyInput = ref("");
 const combinedPathologyInputRef = ref<{ focus: () => void } | null>(null);
 const settingsDocument = ref<QuickEntrySettingsDocument>(normalizeQuickEntrySettings(null));
@@ -91,12 +105,17 @@ const fieldSettings = ref<QuickEntryProjectSettings>({
   fontSize: QUICK_ENTRY_FONT_SIZE_DEFAULT,
   inputHeight: QUICK_ENTRY_INPUT_HEIGHT_DEFAULT,
   autoAdvanceAfterUpdate: true,
+  clipboardFieldIds: [],
+  clipboardEnabled: false,
+  clipboardOverwriteExisting: false,
+  clipboardAutoContinue: false,
 });
 const contextDefaults = new Map<string, QuickEntryFieldDefaults>();
 let recordsLoadSequence = 0;
 let refreshTimer: number | undefined;
 let removeOpenRequestListener: (() => void) | undefined;
 let removeFieldsChangedListener: (() => void) | undefined;
+let removeClipboardListener: (() => void) | undefined;
 const pendingProjectRefreshIds = new Set<string>();
 let projectRefreshPromise: Promise<void> | null = null;
 
@@ -130,6 +149,18 @@ const entryFields = computed(() =>
     return field ? [field] : [];
   }),
 );
+const clipboardNextField = computed(() => fieldById.value.get(clipboardSession.nextFieldId));
+const clipboardDialogFields = computed(() => {
+  const eligible = selectedFieldDraft.value.flatMap((id) => {
+    const field = fieldById.value.get(id);
+    return field && isClipboardEntryField(field) ? [field] : [];
+  });
+  const selected = new Set(clipboardFieldDraft.value);
+  return [
+    ...clipboardFieldDraft.value.flatMap((id) => eligible.filter((field) => field.id === id)),
+    ...eligible.filter((field) => !selected.has(field.id)),
+  ];
+});
 const fieldDialogFields = computed(() => {
   const selected = selectedFieldDraft.value.flatMap((fieldId) => {
     const field = fieldById.value.get(fieldId);
@@ -156,6 +187,153 @@ const isDirty = computed(() =>
   ),
 );
 
+function stopNativeClipboard(): void {
+  const sessionId = clipboardSession.context?.sessionId;
+  if (sessionId && bridge?.stopClipboardFollow) void bridge.stopClipboardFollow(sessionId).catch(() => undefined);
+}
+
+function resetClipboardFollow(message?: string): void {
+  stopNativeClipboard();
+  clipboardSession.reset(message);
+}
+
+function pauseClipboardFollow(message?: string): void {
+  if (!clipboardSession.context) return;
+  clipboardSession.pause(message);
+  stopNativeClipboard();
+}
+
+async function beginClipboardFollow(resume = false): Promise<boolean> {
+  const record = activeRecord.value;
+  if (!clipboardAvailable || !clipboardEnabled.value || !record || saving.value || clipboardBusy.value) return false;
+  if (formReadonly.value || record.report_generated) {
+    resetClipboardFollow("当前记录不可编辑，请选择其他病理号");
+    return false;
+  }
+  if (projectFields.value.some((field) =>
+    ["pathology_number", "block_number"].includes(field.system_key ?? "") &&
+    (entryValues[field.id] ?? "") !== (baselineValues[field.id] ?? ""))) {
+    ElMessage.warning("病理号或蜡块号有未保存修改，请先保存后重新确认");
+    return false;
+  }
+  const fieldIds = fieldSettings.value.clipboardFieldIds;
+  if (!fieldIds.length) {
+    ElMessage.warning("请先在快捷表头设置中选择粘贴字段与顺序");
+    return false;
+  }
+  stopNativeClipboard();
+  const context = { sessionId: crypto.randomUUID(), projectId: activeProjectId.value, recordId: record.id };
+  clipboardSession.start(context, fieldIds, resume);
+  if (clipboardSession.status === "complete") return false;
+  clipboardBusy.value = true;
+  try {
+    await bridge!.startClipboardFollow(context);
+    if (!clipboardSession.matches(context) || clipboardSession.status !== "listening") {
+      await bridge!.stopClipboardFollow(context.sessionId).catch(() => undefined);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    if (clipboardSession.matches(context)) {
+      clipboardSession.pause(error instanceof Error ? error.message : "剪贴板监听无法启动");
+    }
+    await bridge!.stopClipboardFollow(context.sessionId).catch(() => undefined);
+    return false;
+  } finally {
+    clipboardBusy.value = false;
+  }
+}
+
+function applyClipboardFill(result: ReturnType<ClipboardFollowSession["receive"]>): void {
+  if (result.kind === "filled") setEntryValue(result.field, result.value);
+  if (clipboardSession.status !== "listening") stopNativeClipboard();
+}
+
+function handleClipboardEvent(event: ClipboardFollowEvent): void {
+  if (!clipboardSession.matches(event)) return;
+  if (event.type === "stopped") {
+    clipboardSession.pause(event.reason);
+    return;
+  }
+  if (
+    !clipboardEnabled.value || activeRecord.value?.id !== event.recordId ||
+    activeProjectId.value !== event.projectId || formReadonly.value ||
+    activeRecord.value.report_generated || fieldDialogVisible.value || matchDialogVisible.value
+  ) {
+    pauseClipboardFollow("当前记录或表头暂不可接收，请重新确认后继续");
+    return;
+  }
+  applyClipboardFill(clipboardSession.receive(
+    event, projectFields.value, entryValues, fieldSettings.value.clipboardOverwriteExisting,
+  ));
+}
+
+async function skipClipboardField(): Promise<void> {
+  if (saving.value || clipboardBusy.value) return;
+  pauseClipboardFollow();
+  clipboardSession.skip();
+  if (clipboardSession.status === "listening") await beginClipboardFollow(true);
+}
+
+function undoClipboardField(): void {
+  if (saving.value || clipboardBusy.value) return;
+  pauseClipboardFollow();
+  const change = clipboardSession.undo(entryValues);
+  const field = change && fieldById.value.get(change.fieldId);
+  if (change && field) setEntryValue(field, change.value);
+}
+
+async function overwriteClipboardField(): Promise<void> {
+  if (formReadonly.value || clipboardBusy.value) return;
+  applyClipboardFill(clipboardSession.overwritePending(projectFields.value, entryValues));
+  if (clipboardSession.status === "listening") await beginClipboardFollow(true);
+}
+
+async function acceptCurrentClipboard(): Promise<void> {
+  if (clipboardSession.status !== "listening" && !(await beginClipboardFollow(true))) return;
+  const context = clipboardSession.context;
+  if (!context) return;
+  try {
+    await bridge!.acceptCurrentClipboard(context.sessionId);
+  } catch (error) {
+    if (clipboardSession.matches(context)) {
+      pauseClipboardFollow(error instanceof Error ? error.message : "无法读取当前剪贴板");
+    }
+  }
+}
+
+async function toggleClipboardFollow(enabled: boolean): Promise<void> {
+  if (!clipboardAvailable || !activeProjectId.value || settingsSaving.value || saving.value) return;
+  const projectId = activeProjectId.value;
+  const previous = fieldSettings.value.clipboardEnabled;
+  resetClipboardFollow();
+  clipboardEnabled.value = enabled;
+  settingsSaving.value = true;
+  try {
+    const document: QuickEntrySettingsDocument = {
+      version: 5, projects: { ...settingsDocument.value.projects,
+        [projectId]: { ...fieldSettings.value, clipboardEnabled: enabled } },
+    };
+    const result = await putSetting(QUICK_ENTRY_SETTINGS_KEY, document);
+    settingsDocument.value = normalizeQuickEntrySettings(result.value);
+    if (projectId === activeProjectId.value) fieldSettings.value = resolveFieldSettings(projectId);
+  } catch (error) {
+    if (projectId === activeProjectId.value) clipboardEnabled.value = previous;
+    ElMessage.error(error instanceof Error ? error.message : "剪贴板跟随设置保存失败");
+  } finally {
+    settingsSaving.value = false;
+  }
+}
+
+watch([isLocked, activeRecordUnavailable], ([locked, unavailable]) => {
+  if (locked || unavailable) resetClipboardFollow("当前记录不可编辑，接收已停止");
+});
+watch(() => JSON.stringify(entryFields.value.map((field) => [
+  field.id, field.hidden, field.data_type, field.options.map((option) => option.value),
+])), () => {
+  if (clipboardSession.context) resetClipboardFollow("表头已变化，请重新确认粘贴顺序");
+});
+
 function replaceValues(target: Record<string, string>, values: Record<string, string>): void {
   Object.keys(target).forEach((key) => delete target[key]);
   Object.assign(target, values);
@@ -181,6 +359,10 @@ function focusPathology(): void {
 
 async function copyPathologyNumber(pathologyNumber: string): Promise<void> {
   try {
+    if (clipboardAvailable) {
+      await bridge!.writeInternalClipboard(pathologyNumber);
+      return;
+    }
     const clipboard = navigator.clipboard;
     if (!clipboard) throw new Error("clipboard-unavailable");
     await clipboard.writeText(pathologyNumber);
@@ -204,6 +386,9 @@ function valuesForRecord(record: ProjectRecord): Record<string, string> {
 }
 
 function loadRecordIntoForm(record: ProjectRecord): void {
+  if (activeRecord.value?.id !== record.id || activeRecord.value?.project_id !== record.project_id) {
+    resetClipboardFollow();
+  }
   activeRecord.value = record;
   activeRecordUnavailable.value = record.report_generated;
   const values = valuesForRecord(record);
@@ -212,6 +397,7 @@ function loadRecordIntoForm(record: ProjectRecord): void {
 }
 
 function resetCreateForm(preservePinned = false): void {
+  resetClipboardFollow();
   const previous = { ...entryValues };
   const values = Object.fromEntries(
     projectFields.value.map((field) => {
@@ -242,10 +428,14 @@ function fieldOptions(field: FieldDefinition): string[] {
 }
 
 function setEntryValue(field: FieldDefinition, value: string): void {
+  if (["pathology_number", "block_number"].includes(field.system_key ?? "") && entryValues[field.id] !== value) {
+    resetClipboardFollow("记录标识已修改，请保存后重新确认");
+  }
   entryValues[field.id] = value;
 }
 
 async function confirmDiscardChanges(action: string): Promise<boolean> {
+  pauseClipboardFollow();
   if (!isDirty.value) return true;
   try {
     await ElMessageBox.confirm(
@@ -433,6 +623,7 @@ async function activateProject(
   recordSearch.value = "";
   unreportedRecords.value = [];
   fieldSettings.value = resolveFieldSettings(projectId);
+  clipboardEnabled.value = clipboardAvailable && fieldSettings.value.clipboardEnabled;
   resetCreateForm(false);
   await router.replace({ name: "quick-entry", query: { project: projectId } });
   await loadUnreportedRecords(projectId);
@@ -473,6 +664,7 @@ async function handleOpenRequest(context: QuickEntryOpenContext): Promise<void> 
 
 function openFieldSettings(): void {
   if (saving.value || settingsSaving.value) return;
+  pauseClipboardFollow("正在设置表头，接收已暂停");
   selectedFieldDraft.value = [...fieldSettings.value.selectedFieldIds];
   pinnedFieldDraft.value = [...fieldSettings.value.pinnedFieldIds];
   fieldWidthDraft.value = fieldSettings.value.fieldWidth;
@@ -480,6 +672,10 @@ function openFieldSettings(): void {
   fontSizeDraft.value = fieldSettings.value.fontSize;
   inputHeightDraft.value = fieldSettings.value.inputHeight;
   autoAdvanceDraft.value = fieldSettings.value.autoAdvanceAfterUpdate;
+  clipboardFieldDraft.value = [...fieldSettings.value.clipboardFieldIds];
+  clipboardEnabledDraft.value = fieldSettings.value.clipboardEnabled;
+  clipboardOverwriteDraft.value = fieldSettings.value.clipboardOverwriteExisting;
+  clipboardAutoContinueDraft.value = fieldSettings.value.clipboardAutoContinue;
   fieldDialogVisible.value = true;
 }
 
@@ -495,6 +691,31 @@ function setDraftFieldSelected(field: FieldDefinition, selected: boolean): void 
     selectedFieldDraft.value = selectedFieldDraft.value.filter((id) => id !== field.id);
   }
   if (!selected) pinnedFieldDraft.value = pinnedFieldDraft.value.filter((id) => id !== field.id);
+  if (!selected) clipboardFieldDraft.value = clipboardFieldDraft.value.filter((id) => id !== field.id);
+}
+
+function setClipboardFieldSelected(fieldId: string, selected: boolean): void {
+  clipboardFieldDraft.value = clipboardFieldDraft.value.filter((id) => id !== fieldId);
+  if (selected) clipboardFieldDraft.value.push(fieldId);
+}
+
+function moveClipboardField(fieldId: string, offset: number): void {
+  const next = [...clipboardFieldDraft.value];
+  const index = next.indexOf(fieldId);
+  const target = index + offset;
+  if (index < 0 || target < 0 || target >= next.length) return;
+  [next[index], next[target]] = [next[target]!, next[index]!];
+  clipboardFieldDraft.value = next;
+}
+
+function dropClipboardField(event: DragEvent, targetId: string): void {
+  event.preventDefault();
+  const sourceId = draggingClipboardFieldId.value;
+  draggingClipboardFieldId.value = "";
+  if (!sourceId || sourceId === targetId || !clipboardFieldDraft.value.includes(targetId)) return;
+  const next = clipboardFieldDraft.value.filter((id) => id !== sourceId);
+  next.splice(next.indexOf(targetId), 0, sourceId);
+  clipboardFieldDraft.value = next;
 }
 
 function entryFieldStyle(): Record<string, string> {
@@ -576,8 +797,16 @@ async function saveFieldSettings(): Promise<void> {
       fontSize: fontSizeDraft.value,
       inputHeight: inputHeightDraft.value,
       autoAdvanceAfterUpdate: autoAdvanceDraft.value,
+      clipboardFieldIds: clipboardFieldDraft.value,
+      clipboardEnabled: clipboardEnabledDraft.value,
+      clipboardOverwriteExisting: clipboardOverwriteDraft.value,
+      clipboardAutoContinue: clipboardAutoContinueDraft.value,
     },
   );
+  if (resolved.clipboardEnabled && !resolved.clipboardFieldIds.length) {
+    ElMessage.warning("开启剪贴板跟随前，请至少选择一个粘贴字段");
+    return;
+  }
   const nextSelected = new Set(resolved.selectedFieldIds);
   const removedDirtyFields = projectFields.value.filter(
     (field) =>
@@ -601,7 +830,7 @@ async function saveFieldSettings(): Promise<void> {
     }
   }
   const nextDocument: QuickEntrySettingsDocument = {
-    version: 4,
+    version: 5,
     projects: {
       ...settingsDocument.value.projects,
       [projectId]: resolved,
@@ -612,6 +841,8 @@ async function saveFieldSettings(): Promise<void> {
     const result = await putSetting(QUICK_ENTRY_SETTINGS_KEY, nextDocument);
     settingsDocument.value = normalizeQuickEntrySettings(result.value);
     fieldSettings.value = resolveFieldSettings(projectId);
+    resetClipboardFollow();
+    clipboardEnabled.value = clipboardAvailable && fieldSettings.value.clipboardEnabled;
     removedDirtyFields.forEach((field) => {
       entryValues[field.id] = baselineValues[field.id] ?? quickEntryDefaultValue(field);
     });
@@ -661,7 +892,7 @@ async function notifyMain(recordId: string, action: "create" | "update"): Promis
   }
 }
 
-async function saveNewRecord(): Promise<void> {
+async function saveNewRecord(): Promise<ProjectRecord | undefined> {
   const project = currentProject.value;
   if (!project) return;
   const parsed = parseCombinedPathologyNumber(combinedPathologyInput.value);
@@ -689,12 +920,69 @@ async function saveNewRecord(): Promise<void> {
   ]);
   recordSearch.value = "";
   await notifyMain(created.id, "create");
-  resetCreateForm(false);
+  if (clipboardEnabled.value) loadRecordIntoForm(created);
+  else resetCreateForm(false);
   await scrollRecordIntoView(created.id);
-  ElMessage.success("记录已保存，可继续录入下一条");
+  ElMessage.success(clipboardEnabled.value ? "记录已创建，可开始跟随录入" : "记录已保存，可继续录入下一条");
+  return created;
 }
 
-async function saveExistingRecord(): Promise<void> {
+async function exactPathologyRecords(pathologyNumber: string, blockNumber?: string): Promise<ProjectRecord[]> {
+  const pathologyField = projectFields.value.find((field) => field.system_key === "pathology_number");
+  const blockField = projectFields.value.find((field) => field.system_key === "block_number");
+  if (!pathologyField || (blockNumber !== undefined && !blockField)) throw new Error("项目缺少病理号或蜡块号表头");
+  const filters = [{ field_id: pathologyField.id, operator: "equals" as const, value: pathologyNumber }];
+  if (blockNumber !== undefined) filters.push({ field_id: blockField!.id, operator: "equals", value: blockNumber });
+  const result = await queryRecords({
+    project_id: activeProjectId.value, include_locked: true, field_filters: filters, limit: 1000, offset: 0,
+  });
+  if (result.total > 1000) throw new Error("匹配记录过多，请输入完整病理号和蜡块号");
+  return result.items;
+}
+
+async function bindClipboardRecord(record: ProjectRecord): Promise<void> {
+  if (record.project_id !== activeProjectId.value || saving.value) return;
+  if (record.locked || record.report_generated) {
+    ElMessage.warning("该病理号已锁定或已生成报告，不能跟随录入");
+    return;
+  }
+  matchDialogVisible.value = false;
+  loadRecordIntoForm(record);
+  await scrollRecordIntoView(record.id);
+  await beginClipboardFollow();
+}
+
+async function openClipboardRecord(): Promise<void> {
+  if (saving.value || !clipboardEnabled.value) return;
+  const projectId = activeProjectId.value;
+  const input = combinedPathologyInput.value.trim().replace(/[－—–﹣]/g, "-");
+  if (!input) {
+    ElMessage.warning("请先输入病理号或病理号-蜡块号");
+    return;
+  }
+  saving.value = true;
+  let selected: ProjectRecord | undefined;
+  try {
+    let matches = await exactPathologyRecords(input);
+    if (!matches.length) {
+      const parsed = parseCombinedPathologyNumber(input);
+      matches = await exactPathologyRecords(parsed.pathologyNumber, parsed.blockNumber);
+    }
+    if (projectId !== activeProjectId.value) return;
+    if (matches.length > 1) {
+      matchingRecords.value = matches;
+      matchDialogVisible.value = true;
+    } else if (matches.length === 1) selected = matches[0];
+    else selected = await saveNewRecord();
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "病理号查找失败");
+  } finally {
+    saving.value = false;
+  }
+  if (selected && projectId === activeProjectId.value) await bindClipboardRecord(selected);
+}
+
+async function saveExistingRecord(): Promise<ProjectRecord | undefined> {
   const record = activeRecord.value;
   if (!record) return;
   if (activeRecordUnavailable.value || record.report_generated) {
@@ -745,6 +1033,7 @@ async function saveExistingRecord(): Promise<void> {
     await loadUnreportedRecords(record.project_id);
   }
   await notifyMain(record.id, "update");
+  resetClipboardFollow("本条已保存，确认病理号后可再次接收");
   ElMessage.success(`病理号 ${updated?.pathology_number ?? record.pathology_number} 已更新`);
   if (fieldSettings.value.autoAdvanceAfterUpdate && nextRecordId) {
     const nextRecord = unreportedRecords.value.find((item) => item.id === nextRecordId);
@@ -753,6 +1042,7 @@ async function saveExistingRecord(): Promise<void> {
       await scrollRecordIntoView(nextRecord.id);
       focusPathology();
       await copyPathologyNumber(nextRecord.pathology_number);
+      if (clipboardEnabled.value && fieldSettings.value.clipboardAutoContinue) return nextRecord;
     }
   } else if (fieldSettings.value.autoAdvanceAfterUpdate && currentIndex >= 0) {
     ElMessage.info("已到最后一条记录");
@@ -767,18 +1057,26 @@ function handleCombinedPathologyKeydown(event: KeyboardEvent): void {
 
 async function saveEntry(): Promise<void> {
   if (saving.value) return;
+  if (!activeRecord.value && clipboardEnabled.value) {
+    await openClipboardRecord();
+    return;
+  }
+  pauseClipboardFollow("正在保存，接收已暂停");
   saving.value = true;
+  let nextClipboardRecord: ProjectRecord | undefined;
   try {
-    if (activeRecord.value) await saveExistingRecord();
+    if (activeRecord.value) nextClipboardRecord = await saveExistingRecord();
     else await saveNewRecord();
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "快速录入保存失败");
   } finally {
     saving.value = false;
   }
+  if (nextClipboardRecord && nextClipboardRecord.id === activeRecord.value?.id) await beginClipboardFollow();
 }
 
 function restoreEntry(): void {
+  resetClipboardFollow();
   if (activeRecord.value) replaceValues(entryValues, { ...baselineValues });
   else resetCreateForm(false);
 }
@@ -791,6 +1089,11 @@ function handleEntryKeydown(event: KeyboardEvent, field: FieldDefinition): void 
     return;
   }
   if (event.key !== "Enter" || event.shiftKey) return;
+  if (clipboardEnabled.value && field.system_key === "pathology_number") {
+    event.preventDefault();
+    void beginClipboardFollow(true);
+    return;
+  }
   if (field.data_type === "text" && !field.is_core) return;
   event.preventDefault();
   const index = entryFields.value.findIndex((item) => item.id === field.id);
@@ -807,7 +1110,16 @@ function handleEntryKeydown(event: KeyboardEvent, field: FieldDefinition): void 
     ?.focus();
 }
 
+function handleQuickEntryShortcut(event: KeyboardEvent): void {
+  if (event.defaultPrevented || event.isComposing || fieldDialogVisible.value || matchDialogVisible.value) return;
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+    event.preventDefault();
+    void saveEntry();
+  }
+}
+
 async function returnToMain(): Promise<void> {
+  pauseClipboardFollow("已返回主程序，接收已暂停");
   if (bridge?.windowKind === "quick-entry") {
     await bridge.focusMainWindow();
     return;
@@ -860,8 +1172,10 @@ onMounted(() => {
     removeFieldsChangedListener = bridge.onQuickEntryFieldsChanged((payload) => {
       void refreshProjectData(payload.projectId);
     });
+    if (clipboardAvailable) removeClipboardListener = bridge.onClipboardFollowEvent(handleClipboardEvent);
   }
   window.addEventListener("focus", refreshOnFocus);
+  window.addEventListener("keydown", handleQuickEntryShortcut);
   refreshTimer = window.setInterval(refreshRecordsPeriodically, 30_000);
   void initialize().finally(() => {
     if (bridge?.windowKind === "quick-entry") {
@@ -873,12 +1187,15 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  resetClipboardFollow();
+  removeClipboardListener?.();
   recordsLoadSequence += 1;
   removeOpenRequestListener?.();
   removeOpenRequestListener = undefined;
   removeFieldsChangedListener?.();
   removeFieldsChangedListener = undefined;
   window.removeEventListener("focus", refreshOnFocus);
+  window.removeEventListener("keydown", handleQuickEntryShortcut);
   if (refreshTimer !== undefined) window.clearInterval(refreshTimer);
 });
 </script>
@@ -994,7 +1311,7 @@ onBeforeUnmount(() => {
               <el-tag v-if="isDirty" type="info" effect="plain">未保存</el-tag>
             </div>
             <p>
-              {{ activeRecord ? '只保存下方已选择表头的改动，成功后自动进入下一条。' : '输入“病理号-蜡块号”，按 Enter 即可连续创建。' }}
+              {{ clipboardEnabled ? '确认病理号后，在其他软件逐项复制；自动填入草稿，检查后保存。' : activeRecord ? '只保存下方已选择表头的改动，成功后自动进入下一条。' : '输入“病理号-蜡块号”，按 Enter 即可连续创建。' }}
             </p>
           </div>
           <div class="entry-toolbar">
@@ -1007,24 +1324,74 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <el-alert
-          v-if="activeRecordUnavailable"
-          class="locked-alert"
-          type="error"
-          title="该记录已锁定或已生成报告并移出病理号侧栏，当前内容仅保留供查看，不能再提交。"
-          :closable="false"
-          show-icon
-        />
-        <el-alert
-          v-else-if="isLocked"
-          class="locked-alert"
-          type="warning"
-          title="该记录已锁定，只能查看，不能快速修改。"
-          :closable="false"
-          show-icon
-        />
-
         <el-scrollbar class="entry-form-scroll">
+          <div class="clipboard-follow-panel" :class="{ 'is-listening': clipboardSession.status === 'listening' }">
+            <div class="clipboard-follow-heading">
+              <el-switch
+                :model-value="clipboardEnabled"
+                :disabled="!clipboardAvailable || saving || settingsSaving || clipboardBusy"
+                active-text="剪贴板跟随"
+                @change="toggleClipboardFollow(Boolean($event))"
+              />
+              <span v-if="!clipboardAvailable" class="clipboard-note">仅 Windows 桌面版可用</span>
+              <span v-else-if="clipboardEnabled && activeRecord" class="clipboard-record">
+                当前：{{ activeRecord.pathology_number }}{{ activeRecord.block_number ? ` / 蜡块 ${activeRecord.block_number}` : '' }}
+              </span>
+            </div>
+            <template v-if="clipboardEnabled">
+              <div class="clipboard-progress" aria-live="polite">
+                <strong v-if="clipboardNextField">
+                  下一项：{{ clipboardNextField.label }}（{{ clipboardSession.index + 1 }}/{{ clipboardSession.fieldIds.length }}）
+                </strong>
+                <strong v-else-if="clipboardSession.status === 'complete'">全部填完，请检查后 Ctrl+Enter 保存</strong>
+                <strong v-else>等待确认病理号</strong>
+                <span>{{ clipboardSession.message }}</span>
+              </div>
+              <div v-if="activeRecord" class="clipboard-toolbar">
+                <el-button
+                  v-if="clipboardSession.status === 'waiting' || clipboardSession.status === 'paused'"
+                  size="small" type="primary" :disabled="formReadonly" :loading="clipboardBusy"
+                  @click="beginClipboardFollow(clipboardSession.status === 'paused')"
+                >{{ clipboardSession.status === 'paused' ? '继续接收' : '确认本条并开始' }}</el-button>
+                <el-button v-if="clipboardSession.status === 'listening'" size="small" @click="pauseClipboardFollow()">暂停</el-button>
+                <el-button
+                  size="small" :disabled="formReadonly || clipboardBusy || !clipboardSession.nextFieldId"
+                  @click="skipClipboardField"
+                >跳过当前项</el-button>
+                <el-button
+                  v-if="clipboardSession.pending" size="small" type="warning" :disabled="formReadonly || clipboardBusy"
+                  @click="overwriteClipboardField"
+                >覆盖当前项</el-button>
+                <el-button
+                  size="small" :disabled="formReadonly || clipboardBusy || !clipboardSession.history.length"
+                  @click="undoClipboardField"
+                >撤回上一步</el-button>
+                <el-button
+                  size="small" :disabled="formReadonly || clipboardBusy || clipboardSession.status === 'waiting' || clipboardSession.status === 'complete'"
+                  @click="acceptCurrentClipboard"
+                >接受当前剪贴板</el-button>
+                <el-button size="small" :disabled="formReadonly || clipboardBusy" @click="beginClipboardFollow(false)">重置本条顺序</el-button>
+              </div>
+            </template>
+          </div>
+
+          <el-alert
+            v-if="activeRecordUnavailable"
+            class="locked-alert"
+            type="error"
+            title="该记录已锁定或已生成报告并移出病理号侧栏，当前内容仅保留供查看，不能再提交。"
+            :closable="false"
+            show-icon
+          />
+          <el-alert
+            v-else-if="isLocked"
+            class="locked-alert"
+            type="warning"
+            title="该记录已锁定，只能查看，不能快速修改。"
+            :closable="false"
+            show-icon
+          />
+
           <el-form
             v-if="activeRecord"
             class="entry-form"
@@ -1036,10 +1403,12 @@ onBeforeUnmount(() => {
               v-for="field in entryFields"
               :key="field.id"
               :style="entryFieldStyle()"
+              :class="{ 'clipboard-next-field': clipboardEnabled && clipboardNextField?.id === field.id, 'clipboard-filled-field': clipboardEnabled && clipboardSession.lastFilledFieldId === field.id }"
             >
               <template #label>
                 <span class="entry-field-label">
                   <span>{{ field.label }}</span>
+                  <span v-if="clipboardEnabled && clipboardNextField?.id === field.id" class="clipboard-field-mark">下一项</span>
                   <span v-if="isMandatoryQuickEntryField(field)" class="required-mark">必填</span>
                   <span
                     v-if="!activeRecord && pinnedFieldIdSet.has(field.id)"
@@ -1078,7 +1447,7 @@ onBeforeUnmount(() => {
             </el-form-item>
           </el-form>
           <div v-else class="quick-create-form" :style="quickCreateFieldStyle()">
-            <label for="combined-pathology-number">病理号-蜡块号</label>
+            <label for="combined-pathology-number">{{ clipboardEnabled ? '病理号或病理号-蜡块号' : '病理号-蜡块号' }}</label>
             <el-input
               id="combined-pathology-number"
               ref="combinedPathologyInputRef"
@@ -1089,7 +1458,7 @@ onBeforeUnmount(() => {
               placeholder="例如 A-20260907-3"
               @keydown="handleCombinedPathologyKeydown"
             />
-            <p>系统会按最后一个连接符拆分；前半部分写入病理号，最后一段写入蜡块号。</p>
+            <p>{{ clipboardEnabled ? '按 Enter 查找并进入记录；有多个蜡块时先选择。创建新记录请填写完整“病理号-蜡块号”。' : '系统会按最后一个连接符拆分；前半部分写入病理号，最后一段写入蜡块号。' }}</p>
           </div>
         </el-scrollbar>
 
@@ -1105,7 +1474,7 @@ onBeforeUnmount(() => {
               :disabled="isLocked || activeRecordUnavailable"
               @click="saveEntry"
             >
-              {{ activeRecord ? '保存修改（Ctrl+Enter）' : '创建并继续（Enter）' }}
+              {{ activeRecord ? '保存修改（Ctrl+Enter）' : clipboardEnabled ? '确认并进入（Enter）' : '创建并继续（Enter）' }}
             </el-button>
           </div>
         </footer>
@@ -1218,6 +1587,36 @@ onBeforeUnmount(() => {
           />
         </div>
       </div>
+      <section class="clipboard-order-settings">
+        <h3>剪贴板粘贴顺序</h3>
+        <p class="field-dialog-note">只从上方已选的可见表头中选择，病理号和蜡块号用于确认记录。拖动或点击箭头调整顺序，不改变表单显示顺序。</p>
+        <div class="clipboard-options">
+          <el-checkbox v-model="clipboardEnabledDraft" :disabled="!clipboardAvailable">默认开启剪贴板跟随</el-checkbox>
+          <el-checkbox v-model="clipboardOverwriteDraft">允许覆盖已有字段内容</el-checkbox>
+          <el-checkbox v-model="clipboardAutoContinueDraft">保存进入下一条后自动开始接收</el-checkbox>
+        </div>
+        <div
+          v-for="field in clipboardDialogFields" :key="field.id" class="clipboard-order-row"
+          @dragover="draggingClipboardFieldId && clipboardFieldDraft.includes(field.id) && $event.preventDefault()"
+          @drop="dropClipboardField($event, field.id)"
+        >
+          <span
+            v-if="clipboardFieldDraft.includes(field.id)" class="field-drag-handle" draggable="true"
+            aria-label="拖动调整粘贴顺序"
+            @dragstart="draggingClipboardFieldId = field.id; $event.dataTransfer?.setData('text/plain', field.id)"
+            @dragend="draggingClipboardFieldId = ''"
+          ><GripVertical :size="16" /></span>
+          <el-checkbox
+            :model-value="clipboardFieldDraft.includes(field.id)"
+            @change="setClipboardFieldSelected(field.id, Boolean($event))"
+          >{{ clipboardFieldDraft.includes(field.id) ? `${clipboardFieldDraft.indexOf(field.id) + 1}. ` : '' }}{{ field.label }}</el-checkbox>
+          <span v-if="clipboardFieldDraft.includes(field.id)" class="clipboard-order-arrows">
+            <el-button size="small" :disabled="clipboardFieldDraft.indexOf(field.id) === 0" :aria-label="`上移${field.label}`" @click="moveClipboardField(field.id, -1)">↑</el-button>
+            <el-button size="small" :disabled="clipboardFieldDraft.indexOf(field.id) === clipboardFieldDraft.length - 1" :aria-label="`下移${field.label}`" @click="moveClipboardField(field.id, 1)">↓</el-button>
+          </span>
+        </div>
+        <p v-if="!clipboardDialogFields.length" class="field-dialog-note">请先选择至少一个可见的业务表头。</p>
+      </section>
       <template #footer>
         <el-button @click="fieldDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="settingsSaving" @click="saveFieldSettings">
@@ -1225,10 +1624,55 @@ onBeforeUnmount(() => {
         </el-button>
       </template>
     </el-dialog>
+    <el-dialog v-model="matchDialogVisible" title="选择对应蜡块与记录" width="min(620px, 94vw)" append-to-body destroy-on-close>
+      <p>同一病理号匹配多条记录，请确认后开始跟随录入。</p>
+      <div class="clipboard-record-matches">
+        <el-button
+          v-for="record in matchingRecords" :key="record.id"
+          :disabled="record.locked || record.report_generated"
+          @click="bindClipboardRecord(record)"
+        >
+          {{ record.pathology_number }} / 蜡块 {{ record.block_number || '未填' }} / 第 {{ record.position }} 条
+          {{ record.locked ? '（已锁定）' : record.report_generated ? '（已生成报告）' : '' }}
+        </el-button>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <style scoped>
+.clipboard-follow-panel {
+  flex: 0 0 auto;
+  margin: 10px 12px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+}
+.clipboard-follow-panel.is-listening { border-color: var(--app-primary); }
+.clipboard-follow-heading, .clipboard-toolbar, .clipboard-options, .clipboard-order-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.clipboard-toolbar { margin-top: 8px; gap: 5px; flex-wrap: nowrap; overflow-x: auto; padding-bottom: 3px; }
+.clipboard-toolbar :deep(.el-button) { flex: 0 0 auto; }
+.clipboard-toolbar :deep(.el-button + .el-button) { margin-left: 0; }
+.clipboard-note, .clipboard-progress span { color: var(--app-muted); font-size: 12px; }
+.clipboard-record { overflow-wrap: anywhere; font-size: 12px; }
+.clipboard-progress { display: grid; gap: 3px; margin-top: 5px; }
+.clipboard-progress strong { color: var(--app-primary-text); font-size: 13px; }
+.clipboard-field-mark { color: var(--app-primary-text); font-size: 11px; }
+.clipboard-next-field .entry-field { outline: 2px solid var(--app-primary-border); border-radius: 5px; }
+.clipboard-filled-field .entry-field { background: var(--app-primary-soft); border-radius: 5px; }
+.clipboard-order-settings { margin-top: 18px; border-top: 1px solid var(--app-border); padding-top: 10px; }
+.clipboard-order-settings h3 { margin: 0 0 8px; font-size: 15px; }
+.clipboard-options { margin-bottom: 8px; }
+.clipboard-order-row { min-height: 38px; border-bottom: 1px solid var(--app-border-light); padding: 4px; }
+.clipboard-order-arrows { margin-left: auto; display: flex; gap: 4px; }
+.clipboard-order-arrows :deep(.el-button + .el-button) { margin-left: 0; }
+.clipboard-record-matches { display: grid; gap: 8px; }
+.clipboard-record-matches :deep(.el-button) { margin-left: 0; height: auto; min-height: 34px; white-space: normal; }
 .quick-entry-page {
   display: flex;
   height: 100vh;
@@ -1803,6 +2247,25 @@ onBeforeUnmount(() => {
 }
 
 @media (max-height: 560px) {
+  .entry-pane-header {
+    gap: 7px;
+    padding: 8px 12px;
+  }
+
+  .entry-heading p {
+    display: none;
+  }
+
+  .clipboard-follow-panel {
+    margin: 7px 10px 0;
+    padding: 5px 8px;
+  }
+
+  .entry-footer {
+    min-height: 48px;
+    padding-block: 6px;
+  }
+
   .quick-entry-header {
     min-height: 54px;
     padding-block: 7px;

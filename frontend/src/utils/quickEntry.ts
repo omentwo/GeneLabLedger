@@ -23,10 +23,14 @@ export interface QuickEntryProjectSettings {
   fontSize: number;
   inputHeight: number;
   autoAdvanceAfterUpdate: boolean;
+  clipboardFieldIds: string[];
+  clipboardEnabled: boolean;
+  clipboardOverwriteExisting: boolean;
+  clipboardAutoContinue: boolean;
 }
 
 export interface QuickEntrySettingsDocument {
-  version: 4;
+  version: 5;
   projects: Record<string, QuickEntryProjectSettings>;
 }
 
@@ -102,20 +106,28 @@ export function normalizeQuickEntrySettings(value: unknown): QuickEntrySettingsD
             QUICK_ENTRY_INPUT_HEIGHT_MAX,
           ),
           autoAdvanceAfterUpdate: settings.autoAdvanceAfterUpdate !== false,
+          clipboardFieldIds: stringList(settings.clipboardFieldIds ?? settings.selectedFieldIds),
+          clipboardEnabled: settings.clipboardEnabled === true,
+          clipboardOverwriteExisting: settings.clipboardOverwriteExisting === true,
+          clipboardAutoContinue: settings.clipboardAutoContinue === true,
         },
       ]];
     }),
   );
-  return { version: 4, projects };
+  return { version: 5, projects };
 }
 
 export function isMandatoryQuickEntryField(field: FieldDefinition): boolean {
   return field.system_key === "pathology_number";
 }
 
+export function isClipboardEntryField(field: FieldDefinition): boolean {
+  return !field.hidden && field.system_key !== "pathology_number" && field.system_key !== "block_number";
+}
+
 export function resolveQuickEntryProjectSettings(
   fields: FieldDefinition[],
-  saved: QuickEntryProjectSettings | undefined,
+  saved: Partial<QuickEntryProjectSettings> | undefined,
   defaults: QuickEntryFieldDefaults = {},
 ): QuickEntryProjectSettings {
   const orderedFields = fields.slice().sort((left, right) => left.sort_order - right.sort_order);
@@ -126,7 +138,7 @@ export function resolveQuickEntryProjectSettings(
   const defaultSelected = defaults.selectedFieldIds !== undefined
     ? defaults.selectedFieldIds
     : orderedFields.filter((field) => field.is_core || !field.hidden).map((field) => field.id);
-  const requestedSelected = saved ? saved.selectedFieldIds : defaultSelected;
+  const requestedSelected = saved?.selectedFieldIds ?? defaultSelected;
   const selectedFieldIds = stringList(requestedSelected).filter((fieldId) => validIds.has(fieldId));
   mandatoryIds.forEach((fieldId) => {
     if (!selectedFieldIds.includes(fieldId)) selectedFieldIds.push(fieldId);
@@ -138,7 +150,7 @@ export function resolveQuickEntryProjectSettings(
     : orderedFields
         .filter((field) => field.system_key === "experiment_date" || field.system_key === "status")
         .map((field) => field.id);
-  const requestedPinned = saved ? saved.pinnedFieldIds : defaultPinned;
+  const requestedPinned = saved?.pinnedFieldIds ?? defaultPinned;
   const pinnedSet = new Set(requestedPinned);
   const pinnedFieldIds = stringList(requestedPinned).filter((fieldId) => {
     const field = orderedFields.find((item) => item.id === fieldId);
@@ -172,6 +184,13 @@ export function resolveQuickEntryProjectSettings(
       QUICK_ENTRY_INPUT_HEIGHT_MAX,
     ),
     autoAdvanceAfterUpdate: saved?.autoAdvanceAfterUpdate !== false,
+    clipboardFieldIds: stringList(saved?.clipboardFieldIds ?? selectedFieldIds).filter((fieldId) => {
+      const field = orderedFields.find((item) => item.id === fieldId);
+      return Boolean(field && selectedSet.has(fieldId) && isClipboardEntryField(field));
+    }),
+    clipboardEnabled: saved?.clipboardEnabled === true,
+    clipboardOverwriteExisting: saved?.clipboardOverwriteExisting === true,
+    clipboardAutoContinue: saved?.clipboardAutoContinue === true,
   };
 }
 
