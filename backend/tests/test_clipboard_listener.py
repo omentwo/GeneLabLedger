@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from unittest.mock import Mock
@@ -153,10 +154,18 @@ def test_server_mode_still_requires_explicit_port_and_directory():
         launcher.parse_args([])
 
 
-def test_launcher_can_run_directly_from_an_unrelated_directory(tmp_path):
+@pytest.mark.parametrize(
+    ("arguments", "expected_code", "expected_output"),
+    [(["--help"], 0, "--clipboard-listener"), ([], 2, "requires --port and --data-dir")],
+    ids=["help", "missing-server-arguments"],
+)
+def test_launcher_cli_supports_legacy_windows_encoding(
+    tmp_path, arguments, expected_code, expected_output,
+):
     result = subprocess.run(
-        [sys.executable, launcher.__file__, "--help"], cwd=tmp_path,
-        capture_output=True, text=True, timeout=10,
+        [sys.executable, launcher.__file__, *arguments], cwd=tmp_path,
+        env={**os.environ, "PYTHONUTF8": "0", "PYTHONIOENCODING": "cp1252"},
+        capture_output=True, text=True, encoding="cp1252", timeout=10,
     )
-    assert result.returncode == 0, result.stderr
-    assert "--clipboard-listener" in result.stdout
+    assert result.returncode == expected_code, result.stderr
+    assert expected_output in result.stdout + result.stderr

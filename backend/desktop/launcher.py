@@ -15,14 +15,14 @@ from app.config import Settings
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="基因检测台账本机后端")
+    parser = argparse.ArgumentParser(description="GeneLab Ledger local backend")
     parser.add_argument("--clipboard-listener", action="store_true")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int)
     parser.add_argument("--data-dir", type=Path)
     arguments = parser.parse_args(argv)
     if not arguments.clipboard_listener and (arguments.port is None or arguments.data_dir is None):
-        parser.error("本机后端需要 --port 和 --data-dir")
+        parser.error("The local backend requires --port and --data-dir")
     return arguments
 
 
