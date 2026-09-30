@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   previewCellBatch: vi.fn(),
   commitCellBatch: vi.fn(),
   createRecord: vi.fn(),
+  writeClipboardText: vi.fn(),
   message: { success: vi.fn(), info: vi.fn(), warning: vi.fn(), error: vi.fn() },
 }));
 
@@ -67,11 +68,27 @@ interface LedgerState {
   cellSaveStates: Map<string, { status: string }>;
   editingGridCell: Position | null;
   editingGridSnapshot: { rowId: string; fieldId: string; value: string } | null;
+  activeGridCell: Position | null;
+  selectedGridCellKeys: Set<string>;
+  gridCutInProgress: boolean;
+  ledgerContextMenu: {
+    x: number; y: number; submenuLeft: boolean;
+    target: { kind: "cell"; rowId: string; fieldId: string };
+  } | null;
   appendDraftRow: (scroll?: boolean) => void;
   selectProject: (id: string) => void;
   setValue: (record: ProjectRecord, field: FieldDefinition, value: string) => void;
   saveField: (record: LedgerRow, field: FieldDefinition) => Promise<boolean>;
   finishGridCellEdit: (commit?: boolean, focusAfter?: boolean) => Promise<boolean>;
+  selectGridCell: (position: Position) => void;
+  replaceGridCellSelection: (positions: Position[], active: Position) => void;
+  handleGridKeydown: (event: KeyboardEvent) => void;
+  handleGridCut: (event: ClipboardEvent) => void;
+  handleGridPaste: (event: ClipboardEvent) => void;
+  contextCut: () => Promise<void>;
+  cancelValidationPanel: () => void;
+  undoLedger: () => Promise<void>;
+  redoLedger: () => Promise<void>;
   pasteGrid: (
     event: null, row: number, column: number,
     cells: Array<{ rowOffset: number; columnOffset: number; value: string }>,
@@ -169,6 +186,304 @@ afterEach(() => {
   app?.unmount();
   app = undefined;
   container?.remove();
+  vi.unstubAllGlobals();
+});
+
+function cellTarget(state: LedgerState, position?: Position): HTMLDivElement {
+  const target = document.createElement("div");
+  if (position) {
+    target.dataset.rowId = state.records[position.rowIndex]!.id;
+    target.dataset.fieldIndex = String(position.columnIndex);
+  }
+  target.addEventListener("keydown", state.handleGridKeydown);
+  target.addEventListener("cut", state.handleGridCut as EventListener);
+  target.addEventListener("paste", state.handleGridPaste as EventListener);
+  container.append(target);
+  return target;
+}
+
+function cutKey(target: HTMLElement, init: KeyboardEventInit = { ctrlKey: true }): KeyboardEvent {
+  const event = new KeyboardEvent("keydown", { key: "x", bubbles: true, cancelable: true, ...init });
+  target.dispatchEvent(event);
+  return event;
+}
+
+function clipboardEvent(type: "cut" | "paste", contents: Map<string, string> = new Map()) {
+  const event = new Event(type, { bubbles: true, cancelable: true }) as ClipboardEvent;
+  const setData = vi.fn((format: string, value: string) => { contents.set(format, value); });
+  Object.defineProperty(event, "clipboardData", {
+    value: { setData, getData: (format: string) => contents.get(format) ?? "" },
+  });
+  return { event, contents, setData };
+}
+
+function openCutMenu(state: LedgerState, position: Position): void {
+  state.selectGridCell(position);
+  state.ledgerContextMenu = {
+    x: 0, y: 0, submenuLeft: false,
+    target: { kind: "cell", rowId: state.records[position.rowIndex]!.id, fieldId: state.fields[position.columnIndex]!.id },
+  };
+}
+
+describe("ledger cut", () => {
+  beforeEach(() => {
+    const source = record("A", "cut-source");
+    source.values["A-note"] = "source note";
+    source.block_number = "source block";
+    const target = record("A", "cut-target");
+    target.position = 2;
+    target.values["A-note"] = "target note";
+    target.block_number = "target block";
+    database.set("A", [source, target]);
+    database.get("B")![0]!.values["B-note"] = "project B note";
+    mocks.writeClipboardText.mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", {
+      clipboard: { writeText: mocks.writeClipboardText },
+      userAgent: navigator.userAgent, platform: navigator.platform,
+    });
+    vi.stubGlobal("ClipboardItem", undefined);
+  });
+
+  it.each([
+    { name: "Ctrl+X", init: { ctrlKey: true } },
+    { name: "Cmd+X", init: { metaKey: true } },
+    { name: "the physical X key with another keyboard layout", init: { key: "ч", code: "KeyX", ctrlKey: true } },
+  ])("cuts and supports undo/redo with $name", async ({ init }) => {
+    const state = await mountLedger();
+    const position = { rowIndex: 0, columnIndex: 2 };
+    state.selectGridCell(position);
+    expect(cutKey(cellTarget(state, position), init).defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(database.get("A")![0]!.values["A-note"]).toBe(""));
+    expect(mocks.writeClipboardText).toHaveBeenCalledWith("source note");
+    expect(state.records[0]!.values["A-note"]).toBe("");
+    await state.undoLedger();
+    expect(database.get("A")![0]!.values["A-note"]).toBe("source note");
+    await state.redoLedger();
+    expect(database.get("A")![0]!.values["A-note"]).toBe("");
+  });
+
+  it("uses the native cut event and preserves sparse selection clipboard data", async () => {
+    const state = await mountLedger();
+    const positions = [{ rowIndex: 0, columnIndex: 2 }, { rowIndex: 1, columnIndex: 1 }];
+    state.replaceGridCellSelection(positions, positions[0]!);
+    const { event, contents } = clipboardEvent("cut");
+    cellTarget(state, positions[0]).dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(database.get("A")![0]!.values["A-note"]).toBe(""));
+    expect(contents.get("text/plain")).toBe("\tsource note\ntarget block\t");
+    expect(JSON.parse(contents.get("application/x-gene-lab-ledger-cells")!)).toEqual({
+      version: 1, cells: [
+        { rowOffset: 0, columnOffset: 1, value: "source note" },
+        { rowOffset: 1, columnOffset: 0, value: "target block" },
+      ],
+    });
+    expect(database.get("A")![1]!.block_number).toBeNull();
+    expect(database.get("A")![1]!.values["A-note"]).toBe("target note");
+    expect(mocks.writeClipboardText).not.toHaveBeenCalled();
+  });
+
+  it("cuts the original cells if selection changes while the clipboard write is pending", async () => {
+    const state = await mountLedger();
+    const pending = deferred<void>();
+    mocks.writeClipboardText.mockImplementationOnce(() => pending.promise);
+    openCutMenu(state, { rowIndex: 0, columnIndex: 2 });
+    const cut = state.contextCut();
+    state.selectGridCell({ rowIndex: 1, columnIndex: 2 });
+    pending.resolve();
+    await cut;
+    expect(database.get("A")![0]!.values["A-note"]).toBe("");
+    expect(database.get("A")![1]!.values["A-note"]).toBe("target note");
+    expect(state.activeGridCell).toEqual({ rowIndex: 1, columnIndex: 2 });
+  });
+
+  it("cancels clearing after a project switch during the clipboard write", async () => {
+    const state = await mountLedger();
+    const pending = deferred<void>();
+    mocks.writeClipboardText.mockImplementationOnce(() => pending.promise);
+    openCutMenu(state, { rowIndex: 0, columnIndex: 2 });
+    const cut = state.contextCut();
+    state.selectProject("B");
+    await vi.waitFor(() => expect(state.records[0]?.id).toBe("record-B"));
+    state.selectGridCell({ rowIndex: 0, columnIndex: 2 });
+    pending.resolve();
+    await cut;
+    expect(database.get("A")![0]!.values["A-note"]).toBe("source note");
+    expect(database.get("B")![0]!.values["B-note"]).toBe("project B note");
+    expect(mocks.previewCellBatch).not.toHaveBeenCalled();
+  });
+
+  it("keeps edits made to the source while the clipboard write is pending", async () => {
+    const state = await mountLedger();
+    const pending = deferred<void>();
+    mocks.writeClipboardText.mockImplementationOnce(() => pending.promise);
+    openCutMenu(state, { rowIndex: 0, columnIndex: 2 });
+    const cut = state.contextCut();
+    state.setValue(state.records[0]!, state.fields[2]!, "later edit");
+    pending.resolve();
+    await cut;
+    expect(state.records[0]!.values["A-note"]).toBe("later edit");
+    expect(database.get("A")![0]!.values["A-note"]).toBe("source note");
+    expect(mocks.previewCellBatch).not.toHaveBeenCalled();
+  });
+
+  it("keeps native text cutting inside an active cell editor", async () => {
+    const state = await mountLedger();
+    const position = { rowIndex: 0, columnIndex: 2 };
+    state.selectGridCell(position);
+    state.editingGridCell = position;
+    state.editingGridSnapshot = { rowId: "cut-source", fieldId: "A-note", value: "source note" };
+    const target = cellTarget(state, position);
+    const input = document.createElement("textarea");
+    target.append(input);
+    expect(cutKey(input).defaultPrevented).toBe(false);
+    const { event } = clipboardEvent("cut");
+    input.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(mocks.writeClipboardText).not.toHaveBeenCalled();
+    expect(mocks.previewCellBatch).not.toHaveBeenCalled();
+    expect(state.records[0]!.values["A-note"]).toBe("source note");
+  });
+
+  it("cuts a selected range when focus is on the table rather than a cell", async () => {
+    const state = await mountLedger();
+    state.selectGridCell({ rowIndex: 0, columnIndex: 2 });
+    expect(cutKey(cellTarget(state)).defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(database.get("A")![0]!.values["A-note"]).toBe(""));
+  });
+
+  it("preserves source values when clipboard permission is denied", async () => {
+    const state = await mountLedger();
+    mocks.writeClipboardText.mockRejectedValueOnce(new Error("denied"));
+    openCutMenu(state, { rowIndex: 0, columnIndex: 2 });
+    await state.contextCut();
+    expect(database.get("A")![0]!.values["A-note"]).toBe("source note");
+    expect(state.records[0]!.values["A-note"]).toBe("source note");
+    expect(mocks.previewCellBatch).not.toHaveBeenCalled();
+    expect(mocks.message.warning).toHaveBeenCalledWith(expect.stringContaining("原内容已保留"));
+    expect(state.gridCutInProgress).toBe(false);
+  });
+
+  it("falls back to plain text when custom clipboard MIME is unsupported", async () => {
+    const state = await mountLedger();
+    const write = vi.fn(async () => { throw new Error("unsupported MIME"); });
+    vi.stubGlobal("ClipboardItem", class { constructor(public readonly data: Record<string, Blob>) {} });
+    vi.stubGlobal("navigator", { clipboard: { write, writeText: mocks.writeClipboardText } });
+    openCutMenu(state, { rowIndex: 0, columnIndex: 2 });
+    await state.contextCut();
+    expect(write).toHaveBeenCalledOnce();
+    expect(mocks.writeClipboardText).toHaveBeenCalledWith("source note");
+    expect(database.get("A")![0]!.values["A-note"]).toBe("");
+  });
+
+  it("keeps the source when writing the native cut clipboard fails", async () => {
+    const state = await mountLedger();
+    const position = { rowIndex: 0, columnIndex: 2 };
+    state.selectGridCell(position);
+    const { event, setData } = clipboardEvent("cut");
+    setData.mockImplementation(() => { throw new Error("clipboard failure"); });
+    cellTarget(state, position).dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(database.get("A")![0]!.values["A-note"]).toBe("source note");
+    expect(mocks.previewCellBatch).not.toHaveBeenCalled();
+    expect(mocks.message.warning).toHaveBeenCalledWith(expect.stringContaining("原内容已保留"));
+  });
+
+  it("preserves locked cells, pathology numbers and status in a mixed selection", async () => {
+    database.get("A")![1]!.locked = true;
+    mocks.store.projectById("A")!.fields.push(field("A", "status", "status"));
+    const state = await mountLedger();
+    const noteColumn = state.fields.findIndex((item) => item.id === "A-note");
+    const positions = [...state.fields.map((_, columnIndex) => ({ rowIndex: 0, columnIndex })),
+      { rowIndex: 1, columnIndex: noteColumn }];
+    state.replaceGridCellSelection(positions, positions[0]!);
+    cutKey(cellTarget(state, positions[0]));
+    await vi.waitFor(() => expect(state.gridCutInProgress).toBe(false));
+    const [source, locked] = database.get("A")!;
+    expect(source!.pathology_number).toBe("cut-source");
+    expect(source!.status).toBe("待实验");
+    expect(source!.block_number).toBeNull();
+    expect(source!.values["A-note"]).toBe("");
+    expect(locked!.values["A-note"]).toBe("target note");
+    const changes = mocks.previewCellBatch.mock.calls[0]![1] as RecordCellChange[];
+    expect(changes.map((change) => change.field_id)).toEqual(["A-block", "A-note"]);
+    expect(mocks.message.info).toHaveBeenCalledWith(expect.stringContaining("锁定"));
+    expect(mocks.message.info).toHaveBeenCalledWith(expect.stringContaining("病理号或状态"));
+  });
+
+  it("allows cut content to be pasted to another cell using the existing paste handler", async () => {
+    const state = await mountLedger();
+    openCutMenu(state, { rowIndex: 0, columnIndex: 2 });
+    await state.contextCut();
+    const position = { rowIndex: 1, columnIndex: 2 };
+    state.selectGridCell(position);
+    const { event } = clipboardEvent("paste", new Map([["text/plain", "source note"]]));
+    cellTarget(state, position).dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(database.get("A")![1]!.values["A-note"]).toBe("source note"));
+    expect(database.get("A")![0]!.values["A-note"]).toBe("");
+  });
+
+  it("does not repeat a cut while its clipboard request is pending or the X key is held", async () => {
+    const state = await mountLedger();
+    const pending = deferred<void>();
+    mocks.writeClipboardText.mockImplementationOnce(() => pending.promise);
+    const position = { rowIndex: 0, columnIndex: 2 };
+    state.selectGridCell(position);
+    const target = cellTarget(state, position);
+    cutKey(target);
+    cutKey(target);
+    cutKey(target, { ctrlKey: true, repeat: true });
+    expect(mocks.writeClipboardText).toHaveBeenCalledOnce();
+    pending.resolve();
+    await vi.waitFor(() => expect(state.gridCutInProgress).toBe(false));
+    cutKey(target, { ctrlKey: true, repeat: true });
+    expect(mocks.writeClipboardText).toHaveBeenCalledOnce();
+    expect(mocks.commitCellBatch).toHaveBeenCalledOnce();
+  });
+
+  it.each(["preview", "commit"])("keeps project B's selection intact after project A's cut %s finishes", async (phase) => {
+    const state = await mountLedger();
+    const pending = pauseRequest(phase === "preview" ? mocks.previewCellBatch : mocks.commitCellBatch);
+    openCutMenu(state, { rowIndex: 0, columnIndex: 2 });
+    const cut = state.contextCut();
+    await vi.waitFor(() => expect(phase === "preview" ? mocks.previewCellBatch : mocks.commitCellBatch).toHaveBeenCalled());
+    state.selectProject("B");
+    await vi.waitFor(() => expect(state.records[0]?.id).toBe("record-B"));
+    const position = { rowIndex: 0, columnIndex: 1 };
+    state.selectGridCell(position);
+    pending.resolve();
+    await cut;
+    expect(state.activeGridCell).toEqual(position);
+    expect([...state.selectedGridCellKeys]).toEqual(["record-B\u0000B-block"]);
+    expect(state.records[0]!.values["B-note"]).toBe("project B note");
+  });
+
+  it("restores the source if a cut warning is cancelled", async () => {
+    const state = await mountLedger();
+    const perform = mocks.previewCellBatch.getMockImplementation()!;
+    mocks.previewCellBatch.mockImplementationOnce(async (...args: unknown[]) => {
+      const preview = await perform(...args) as RecordCellBatchPreview;
+      return { ...preview, issues: [{ record_id: "cut-source", field_id: "A-note", severity: "warning", message: "warning" }] };
+    });
+    openCutMenu(state, { rowIndex: 0, columnIndex: 2 });
+    await state.contextCut();
+    expect(state.validationPanel).toMatchObject({ projectId: "A", label: "剪切台账数据" });
+    state.cancelValidationPanel();
+    expect(state.records[0]!.values["A-note"]).toBe("source note");
+    expect(database.get("A")![0]!.values["A-note"]).toBe("source note");
+    expect(mocks.commitCellBatch).not.toHaveBeenCalled();
+  });
+
+  it("restores the source after a failed cut commit", async () => {
+    const state = await mountLedger();
+    mocks.commitCellBatch.mockRejectedValueOnce(new Error("save failed"));
+    openCutMenu(state, { rowIndex: 0, columnIndex: 2 });
+    await state.contextCut();
+    expect(state.records[0]!.values["A-note"]).toBe("source note");
+    expect(database.get("A")![0]!.values["A-note"]).toBe("source note");
+    expect(state.gridCutInProgress).toBe(false);
+    expect(mocks.message.error).toHaveBeenCalledWith("save failed");
+  });
 });
 
 async function mountLedger(): Promise<LedgerState> {

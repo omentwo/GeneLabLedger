@@ -223,6 +223,12 @@ type NormalizedGridRange = {
   columnEnd: number;
 };
 type GridCellEditSnapshot = { rowId: string; fieldId: string; value: string };
+type GridClipboardSelection = { positions: GridCellPosition[]; active: GridCellPosition };
+type GridCutSnapshot = {
+  projectId: string;
+  projectGeneration: number;
+  cells: Array<GridCellEditSnapshot & { version: number }>;
+};
 type GridCellDragMode = "replace" | "shift" | "add";
 type GridPasteEntry = GridClipboardCell;
 type GridCellDragState = {
@@ -290,6 +296,7 @@ let gridCellWheelUpdateTimer: number | null = null;
 let gridCellEditFinishPromise: Promise<boolean> | null = null;
 let gridCellEditSession = 0;
 let lastGridClipboard: { plainText: string; payload: GridClipboardPayload } | null = null;
+const gridCutInProgress = ref(false);
 let suppressGridClick = false;
 let gridFillDragState: GridFillDragState | null = null;
 const gridFillPreviewRange = ref<NormalizedGridRange | null>(null);
@@ -2573,6 +2580,18 @@ function runGridShortcutFill(
 function handleGridKeydown(event: KeyboardEvent): void {
   if (event.isComposing) return;
   const undoModifier = event.ctrlKey || event.metaKey;
+  if (
+    undoModifier && !event.altKey && !event.shiftKey
+    && (event.key.toLowerCase() === "x" || event.code === "KeyX")
+  ) {
+    if (nativeGridClipboardTarget(event.target)) return;
+    const selection = gridClipboardSelection(gridCellFromElement(event.target) ?? activeGridCell.value);
+    if (!selection) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!event.repeat) void cutGridSelectionToClipboard(selection);
+    return;
+  }
   if (undoModifier && !event.altKey && ["z", "y"].includes(event.key.toLowerCase())) {
     const cell = gridCellFromElement(event.target);
     if (cell) {
@@ -2697,10 +2716,7 @@ function handleGridKeydown(event: KeyboardEvent): void {
   void focusGridCell(nextCell);
 }
 
-function gridClipboardSelection(eventCell: GridCellPosition | null): {
-  positions: GridCellPosition[];
-  active: GridCellPosition;
-} | null {
+function gridClipboardSelection(eventCell: GridCellPosition | null): GridClipboardSelection | null {
   let positions = selectedGridCellPositions();
   if (!positions.length && eventCell) positions = [clampGridCell(eventCell)];
   if (!positions.length) return null;
@@ -2714,10 +2730,7 @@ function gridClipboardSelection(eventCell: GridCellPosition | null): {
   return { positions, active: clampGridCell(active) };
 }
 
-function buildGridClipboardData(selection: {
-  positions: GridCellPosition[];
-  active: GridCellPosition;
-}): { plainText: string; payload: GridClipboardPayload } {
+function buildGridClipboardData(selection: GridClipboardSelection): { plainText: string; payload: GridClipboardPayload } {
   return buildLedgerGridClipboardData(selection.positions, (position) => {
       const row = tableRows.value[position.rowIndex];
       const field = fields.value[position.columnIndex];
@@ -2725,33 +2738,126 @@ function buildGridClipboardData(selection: {
     });
 }
 
-function handleGridCopy(event: ClipboardEvent): void {
-  const eventCell = gridCellFromElement(event.target);
-  // Editing keeps the browser's native text-copy behavior. Cell/range copy
-  // is only active while the grid itself owns the selection.
-  if (eventCell && isGridCellEditing(eventCell)) {
-    lastGridClipboard = null;
-    return;
-  }
-  const selection = gridClipboardSelection(eventCell);
-  if (!selection) return;
+function nativeGridClipboardTarget(target: EventTarget | null): boolean {
+  const cell = gridCellFromElement(target);
+  if (cell) return isGridCellEditing(cell);
+  return target instanceof Element
+    && Boolean(target.closest("input, textarea, [contenteditable]:not([contenteditable='false'])"));
+}
+
+function writeGridClipboardEvent(event: ClipboardEvent, selection: GridClipboardSelection): boolean {
   const { plainText, payload } = buildGridClipboardData(selection);
   const clipboard = event.clipboardData;
-  if (!clipboard) return;
-  lastGridClipboard = { plainText, payload };
+  if (!clipboard) return false;
+  try {
+    clipboard.setData("text/plain", plainText);
+  } catch {
+    return false;
+  }
   try {
     clipboard.setData(LEDGER_GRID_CLIPBOARD_MIME, JSON.stringify(payload));
   } catch {
     // Browsers may reject custom clipboard MIME types; text/plain remains usable.
   }
-  clipboard.setData("text/plain", plainText);
+  lastGridClipboard = { plainText, payload };
   event.preventDefault();
   event.stopPropagation();
+  return true;
+}
+
+function handleGridCopy(event: ClipboardEvent): void {
+  // Editing keeps the browser's native text-copy behavior. Cell/range copy
+  // is only active while the grid itself owns the selection.
+  if (nativeGridClipboardTarget(event.target)) {
+    lastGridClipboard = null;
+    return;
+  }
+  const selection = gridClipboardSelection(gridCellFromElement(event.target));
+  if (selection) writeGridClipboardEvent(event, selection);
+}
+
+function handleGridCut(event: ClipboardEvent): void {
+  if (nativeGridClipboardTarget(event.target)) {
+    lastGridClipboard = null;
+    return;
+  }
+  const selection = gridClipboardSelection(gridCellFromElement(event.target) ?? activeGridCell.value);
+  if (!selection) return;
+  event.preventDefault();
+  event.stopPropagation();
+  void cutGridSelectionToClipboard(selection, event);
+}
+
+function captureGridCutSnapshot(selection: GridClipboardSelection): GridCutSnapshot | null {
+  const cells: GridCutSnapshot["cells"] = [];
+  for (const position of selection.positions) {
+    const data = gridCellData(position);
+    if (!data) return null;
+    cells.push({
+      rowId: data.record.id,
+      fieldId: data.field.id,
+      value: valueFor(data.record, data.field),
+      version: cellSaveVersions.get(persistedKey(data.record.id, data.field.id)) ?? 0,
+    });
+  }
+  return { projectId: activeProjectId.value, projectGeneration: projectViewGeneration, cells };
+}
+
+function resolveGridCutPositions(snapshot: GridCutSnapshot): GridCellPosition[] | null {
+  if (ledgerDisposed) return null;
+  if (snapshot.projectId !== activeProjectId.value || snapshot.projectGeneration !== projectViewGeneration) {
+    ElMessage.info("台账已切换，剪切已取消，原内容已保留");
+    return null;
+  }
+  const fieldIndexes = new Map(fields.value.map((field, index) => [field.id, index]));
+  const positions: GridCellPosition[] = [];
+  for (const cell of snapshot.cells) {
+    const rowIndex = tableRowIndexById.value.get(cell.rowId);
+    const columnIndex = fieldIndexes.get(cell.fieldId);
+    const data = rowIndex !== undefined && columnIndex !== undefined
+      ? gridCellData({ rowIndex, columnIndex }) : null;
+    if (
+      !data || valueFor(data.record, data.field) !== cell.value
+      || (cellSaveVersions.get(persistedKey(cell.rowId, cell.fieldId)) ?? 0) !== cell.version
+    ) {
+      ElMessage.warning("剪切范围的内容已变化，原内容已保留，请重新剪切");
+      return null;
+    }
+    positions.push({ rowIndex: rowIndex!, columnIndex: columnIndex! });
+  }
+  return positions;
+}
+
+async function cutGridSelectionToClipboard(
+  selection: GridClipboardSelection,
+  event?: ClipboardEvent,
+): Promise<void> {
+  if (gridCutInProgress.value || loading.value || ledgerDisposed) return;
+  const snapshot = captureGridCutSnapshot(selection);
+  if (!snapshot) return;
+  gridCutInProgress.value = true;
+  const writeFailureMessage = "剪贴板写入失败，原内容已保留，请检查剪贴板权限后重试";
+  try {
+    const copied = event
+      ? writeGridClipboardEvent(event, selection)
+      : await copyGridSelectionToClipboard(selection, false, writeFailureMessage);
+    if (!copied) {
+      if (event) ElMessage.warning(writeFailureMessage);
+      return;
+    }
+    const positions = resolveGridCutPositions(snapshot);
+    if (positions) await clearGridCellRange("剪切", { positions, preserveSelection: true });
+  } catch (error) {
+    if (!ledgerDisposed) ElMessage.error(error instanceof Error ? error.message : "剪切失败");
+  } finally {
+    gridCutInProgress.value = false;
+  }
 }
 
 async function copyGridSelectionToClipboard(
-  selectionOverride?: { positions: GridCellPosition[]; active: GridCellPosition },
+  selectionOverride?: GridClipboardSelection,
   showSuccess = true,
+  failureMessage = "浏览器未授予剪贴板权限，请使用 Ctrl/Cmd+C 复制",
 ): Promise<boolean> {
   const selection = selectionOverride ?? gridClipboardSelection(null);
   if (!selection) {
@@ -2759,7 +2865,6 @@ async function copyGridSelectionToClipboard(
     return false;
   }
   const { plainText, payload } = buildGridClipboardData(selection);
-  lastGridClipboard = { plainText, payload };
   try {
     const clipboard = navigator.clipboard;
     if (!clipboard) throw new Error("clipboard-unavailable");
@@ -2781,10 +2886,11 @@ async function copyGridSelectionToClipboard(
     if (!written) {
       await clipboard.writeText(plainText);
     }
+    if (!ledgerDisposed) lastGridClipboard = { plainText, payload };
     if (showSuccess) ElMessage.success("已复制选中单元格");
     return true;
   } catch {
-    ElMessage.warning("浏览器未授予剪贴板权限，请使用 Ctrl/Cmd+C 复制");
+    if (!ledgerDisposed) ElMessage.warning(failureMessage);
     return false;
   }
 }
@@ -2925,9 +3031,8 @@ async function contextCut(): Promise<void> {
     return;
   }
   const selection = gridClipboardSelection(cell);
-  const copied = await copyGridSelectionToClipboard(selection ?? undefined, false);
-  if (copied) await clearGridCellRange("剪切");
   finishContextMenuAction();
+  if (selection) await cutGridSelectionToClipboard(selection);
 }
 
 async function contextDelete(): Promise<void> {
@@ -3001,8 +3106,14 @@ function contextInsertRows(placement: LedgerDraftPlacement): void {
   if (insertDraftRowsAt(anchorId, placement, count)) notifyInsertedRows(count);
 }
 
-async function clearGridCellRange(operationLabel = "清空"): Promise<void> {
-  const positions = selectedGridCellPositions();
+async function clearGridCellRange(
+  operationLabel = "清空",
+  options: { positions?: GridCellPosition[]; preserveSelection?: boolean } = {},
+): Promise<void> {
+  const projectId = activeProjectId.value;
+  const projectGeneration = projectViewGeneration;
+  const selectionBefore = selectedGridCellKeys.value;
+  const positions = options.positions ?? selectedGridCellPositions();
   if (!positions.length) return;
   let skippedLocked = 0;
   let skippedRequired = 0;
@@ -3038,6 +3149,10 @@ async function clearGridCellRange(operationLabel = "清空"): Promise<void> {
       operationLabel,
     );
   }
+  if (ledgerDisposed || projectId !== activeProjectId.value || projectGeneration !== projectViewGeneration) return;
+  if (skippedLocked) ElMessage.info(`已跳过 ${skippedLocked} 个锁定单元格`);
+  if (skippedRequired) ElMessage.info(`已保留 ${skippedRequired} 个病理号或状态单元格`);
+  if (options.preserveSelection || selectedGridCellKeys.value !== selectionBefore) return;
   const currentActive = activeGridCell.value;
   const active =
     currentActive && positions.some((position) => sameGridCell(position, currentActive))
@@ -3050,8 +3165,6 @@ async function clearGridCellRange(operationLabel = "清空"): Promise<void> {
     ? { anchor: { ...active }, focus: { ...active } }
     : null;
   void focusGridCell(active);
-  if (skippedLocked) ElMessage.info(`已跳过 ${skippedLocked} 个锁定单元格`);
-  if (skippedRequired) ElMessage.info(`已跳过 ${skippedRequired} 个必填状态单元格`);
 }
 
 function makeDraftRow(
@@ -6393,6 +6506,7 @@ onBeforeUnmount(() => {
       @focusout.capture="handleGridFocusOut"
       @keydown.capture="handleGridKeydown"
       @copy.capture="handleGridCopy"
+      @cut.capture="handleGridCut"
       @paste.capture="handleGridPaste"
       @contextmenu.capture="handleLedgerContextMenu"
     >
@@ -6743,12 +6857,17 @@ onBeforeUnmount(() => {
         <button
           type="button"
           role="menuitem"
-          :disabled="ledgerContextMenu.target.kind !== 'cell' || !hasGridCellSelection"
+          :disabled="ledgerContextMenu.target.kind !== 'cell' || !hasGridCellSelection || loading || gridCutInProgress"
+          class="ledger-context-menu-shortcut-item"
+          title="剪切选中单元格（Ctrl+X / Cmd+X）"
+          aria-keyshortcuts="Control+X Meta+X"
           @click="contextCut"
         >
-          剪切
+          <span>剪切</span><kbd>Ctrl+X</kbd>
         </button>
-        <button type="button" role="menuitem" @click="contextCopy">复制</button>
+        <button type="button" role="menuitem" class="ledger-context-menu-shortcut-item" @click="contextCopy">
+          <span>复制</span><kbd>Ctrl+C</kbd>
+        </button>
         <button
           type="button"
           role="menuitem"
@@ -7794,6 +7913,18 @@ onBeforeUnmount(() => {
 .ledger-context-menu button:disabled {
   color: #b8c0cc;
   cursor: not-allowed;
+}
+
+.ledger-context-menu .ledger-context-menu-shortcut-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ledger-context-menu-shortcut-item kbd {
+  color: var(--app-text-muted);
+  font-family: inherit;
+  font-size: 11px;
 }
 
 .ledger-context-menu-separator {
