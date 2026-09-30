@@ -69,6 +69,7 @@ interface LedgerState {
   editingGridCell: Position | null;
   editingGridSnapshot: { rowId: string; fieldId: string; value: string } | null;
   activeGridCell: Position | null;
+  gridCellRange: { anchor: Position; focus: Position } | null;
   selectedGridCellKeys: Set<string>;
   gridCutInProgress: boolean;
   ledgerContextMenu: {
@@ -81,11 +82,14 @@ interface LedgerState {
   saveField: (record: LedgerRow, field: FieldDefinition) => Promise<boolean>;
   finishGridCellEdit: (commit?: boolean, focusAfter?: boolean) => Promise<boolean>;
   selectGridCell: (position: Position) => void;
-  replaceGridCellSelection: (positions: Position[], active: Position) => void;
+  replaceGridCellSelection: (positions: Position[], active: Position, anchor?: Position, range?: { anchor: Position; focus: Position }) => void;
   handleGridKeydown: (event: KeyboardEvent) => void;
+  handleGridCopy: (event: ClipboardEvent) => void;
   handleGridCut: (event: ClipboardEvent) => void;
   handleGridPaste: (event: ClipboardEvent) => void;
   contextCut: () => Promise<void>;
+  contextCopy: () => Promise<void>;
+  loadRecords: (projectId?: string, options?: { showLoading?: boolean; preserveHistory?: boolean; preserveSelection?: boolean }) => Promise<boolean>;
   cancelValidationPanel: () => void;
   undoLedger: () => Promise<void>;
   redoLedger: () => Promise<void>;
@@ -196,6 +200,7 @@ function cellTarget(state: LedgerState, position?: Position): HTMLDivElement {
     target.dataset.fieldIndex = String(position.columnIndex);
   }
   target.addEventListener("keydown", state.handleGridKeydown);
+  target.addEventListener("copy", state.handleGridCopy as EventListener);
   target.addEventListener("cut", state.handleGridCut as EventListener);
   target.addEventListener("paste", state.handleGridPaste as EventListener);
   container.append(target);
@@ -208,7 +213,7 @@ function cutKey(target: HTMLElement, init: KeyboardEventInit = { ctrlKey: true }
   return event;
 }
 
-function clipboardEvent(type: "cut" | "paste", contents: Map<string, string> = new Map()) {
+function clipboardEvent(type: "copy" | "cut" | "paste", contents: Map<string, string> = new Map()) {
   const event = new Event(type, { bubbles: true, cancelable: true }) as ClipboardEvent;
   const setData = vi.fn((format: string, value: string) => { contents.set(format, value); });
   Object.defineProperty(event, "clipboardData", {
@@ -224,6 +229,183 @@ function openCutMenu(state: LedgerState, position: Position): void {
     target: { kind: "cell", rowId: state.records[position.rowIndex]!.id, fieldId: state.fields[position.columnIndex]!.id },
   };
 }
+
+function copyKey(target: HTMLElement, init: KeyboardEventInit = { ctrlKey: true }): KeyboardEvent {
+  const event = new KeyboardEvent("keydown", { key: "c", bubbles: true, cancelable: true, ...init });
+  target.dispatchEvent(event);
+  return event;
+}
+
+describe("ledger copy", () => {
+  beforeEach(() => {
+    const source = record("A", "copy-source");
+    source.values["A-note"] = "source note";
+    const target = record("A", "copy-target");
+    target.position = 2;
+    target.values["A-note"] = "target note";
+    database.set("A", [source, target]);
+    mocks.writeClipboardText.mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", {
+      clipboard: { writeText: mocks.writeClipboardText },
+      userAgent: navigator.userAgent, platform: navigator.platform,
+    });
+    vi.stubGlobal("ClipboardItem", undefined);
+  });
+
+  it.each([
+    { name: "Ctrl+C", init: { ctrlKey: true } },
+    { name: "Cmd+C", init: { metaKey: true } },
+    { name: "physical KeyC", init: { key: "с", code: "KeyC", ctrlKey: true } },
+  ])("copies selected cells with $name without relying on a browser keyboard copy event", async ({ init }) => {
+    const state = await mountLedger();
+    const position = { rowIndex: 0, columnIndex: 2 };
+    state.selectGridCell(position);
+    expect(copyKey(cellTarget(state, position), init).defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(mocks.writeClipboardText).toHaveBeenCalledWith("source note"));
+    expect(mocks.commitCellBatch).not.toHaveBeenCalled();
+  });
+
+  it("uses native copying when the async clipboard API is unavailable and removes its temporary listener", async () => {
+    const state = await mountLedger();
+    const position = { rowIndex: 0, columnIndex: 2 };
+    state.selectGridCell(position);
+    vi.stubGlobal("navigator", { clipboard: undefined });
+    const descriptor = Object.getOwnPropertyDescriptor(document, "execCommand");
+    const { event, contents } = clipboardEvent("copy");
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: vi.fn(() => { document.dispatchEvent(event); return true; }),
+    });
+    try {
+      copyKey(cellTarget(state, position));
+      expect(contents.get("text/plain")).toBe("source note");
+      expect(mocks.writeClipboardText).not.toHaveBeenCalled();
+      const subsequent = clipboardEvent("copy");
+      document.dispatchEvent(subsequent.event);
+      expect(subsequent.event.defaultPrevented).toBe(false);
+    } finally {
+      if (descriptor) Object.defineProperty(document, "execCommand", descriptor);
+      else Reflect.deleteProperty(document, "execCommand");
+    }
+  });
+
+  it.each([true, false])("preserves input text copying with editing state %s", async (editing) => {
+    const state = await mountLedger();
+    const position = { rowIndex: 0, columnIndex: 2 };
+    state.selectGridCell(position);
+    if (editing) state.editingGridCell = position;
+    const target = cellTarget(state, position);
+    const input = document.createElement("textarea");
+    input.value = "selected text";
+    input.setSelectionRange(0, 8);
+    target.append(input);
+    expect(copyKey(input).defaultPrevented).toBe(false);
+    const { event } = clipboardEvent("copy");
+    input.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(mocks.writeClipboardText).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing-data", "write-error"])("falls back when native copy has %s", async (failure) => {
+    const state = await mountLedger();
+    state.selectGridCell({ rowIndex: 0, columnIndex: 2 });
+    const event = failure === "missing-data"
+      ? new Event("copy", { bubbles: true, cancelable: true }) as ClipboardEvent
+      : clipboardEvent("copy").event;
+    if (failure === "missing-data") Object.defineProperty(event, "clipboardData", { value: null });
+    else (event.clipboardData!.setData as ReturnType<typeof vi.fn>).mockImplementation(() => { throw new Error("denied"); });
+    cellTarget(state).dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(mocks.writeClipboardText).toHaveBeenCalledWith("source note"));
+  });
+
+  it("copies locked cells normally", async () => {
+    database.get("A")![0]!.locked = true;
+    const state = await mountLedger();
+    state.selectGridCell({ rowIndex: 0, columnIndex: 2 });
+    const { event, contents } = clipboardEvent("copy");
+    cellTarget(state).dispatchEvent(event);
+    expect(contents.get("text/plain")).toBe("source note");
+    expect(mocks.commitCellBatch).not.toHaveBeenCalled();
+  });
+
+  it("keeps the active cell and selected cells by record ID after a refresh reorders rows", async () => {
+    const state = await mountLedger();
+    state.selectGridCell({ rowIndex: 0, columnIndex: 2 });
+    const rows = database.get("A")!;
+    rows[0]!.values["A-note"] = "updated note";
+    rows[0]!.position = 2;
+    rows[1]!.position = 1;
+    database.set("A", [rows[1]!, rows[0]!]);
+    await state.loadRecords("A", { showLoading: false, preserveSelection: true });
+    expect(state.activeGridCell).toEqual({ rowIndex: 1, columnIndex: 2 });
+    expect([...state.selectedGridCellKeys]).toEqual(["copy-source\u0000A-note"]);
+    const { event, contents } = clipboardEvent("copy");
+    cellTarget(state).dispatchEvent(event);
+    expect(contents.get("text/plain")).toBe("updated note");
+  });
+
+  it("keeps the latest selection made while a background refresh is pending", async () => {
+    const state = await mountLedger();
+    state.selectGridCell({ rowIndex: 0, columnIndex: 2 });
+    const pending = pauseRequest(mocks.queryRecords);
+    const refresh = state.loadRecords("A", { showLoading: false, preserveSelection: true });
+    state.selectGridCell({ rowIndex: 1, columnIndex: 2 });
+    pending.resolve();
+    await refresh;
+    expect([...state.selectedGridCellKeys]).toEqual(["copy-target\u0000A-note"]);
+  });
+
+  it("preserves the original selected records when a new record appears inside a rectangular range", async () => {
+    const state = await mountLedger();
+    const first = { rowIndex: 0, columnIndex: 2 };
+    const last = { rowIndex: 1, columnIndex: 2 };
+    state.replaceGridCellSelection([first, last], first, first, { anchor: first, focus: last });
+    const rows = database.get("A")!;
+    const middle = record("A", "new-middle-record");
+    middle.position = 2;
+    rows[1]!.position = 3;
+    database.set("A", [rows[0]!, middle, rows[1]!]);
+    await state.loadRecords("A", { showLoading: false, preserveSelection: true });
+    expect(state.gridCellRange).toBeNull();
+    expect([...state.selectedGridCellKeys]).toEqual(["copy-source\u0000A-note", "copy-target\u0000A-note"]);
+  });
+
+  it("clears cells removed by a refresh instead of copying another record at the old index", async () => {
+    const state = await mountLedger();
+    state.selectGridCell({ rowIndex: 0, columnIndex: 2 });
+    database.set("A", [database.get("A")![1]!]);
+    await state.loadRecords("A", { showLoading: false, preserveSelection: true });
+    expect(state.activeGridCell).toBeNull();
+    expect(state.selectedGridCellKeys.size).toBe(0);
+  });
+
+  it("does not copy an unrelated selection when the context menu record has disappeared", async () => {
+    const state = await mountLedger();
+    state.selectGridCell({ rowIndex: 0, columnIndex: 2 });
+    state.ledgerContextMenu = {
+      x: 0, y: 0, submenuLeft: false,
+      target: { kind: "cell", rowId: "removed-record", fieldId: "A-note" },
+    };
+    await state.contextCopy();
+    expect(mocks.writeClipboardText).not.toHaveBeenCalled();
+    expect(mocks.message.warning).toHaveBeenCalledWith(expect.stringContaining("复制范围已变化"));
+  });
+
+  it("closes the copied menu immediately without closing a newer menu after clipboard completion", async () => {
+    const state = await mountLedger();
+    const pending = deferred<void>();
+    mocks.writeClipboardText.mockImplementationOnce(() => pending.promise);
+    openCutMenu(state, { rowIndex: 0, columnIndex: 2 });
+    const copy = state.contextCopy();
+    expect(state.ledgerContextMenu).toBeNull();
+    openCutMenu(state, { rowIndex: 1, columnIndex: 2 });
+    pending.resolve();
+    await copy;
+    expect(state.ledgerContextMenu?.target.rowId).toBe("copy-target");
+    expect(mocks.writeClipboardText).toHaveBeenCalledWith("source note");
+  });
+});
 
 describe("ledger cut", () => {
   beforeEach(() => {

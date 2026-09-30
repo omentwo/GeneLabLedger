@@ -8,6 +8,7 @@ import shutil
 import threading
 import time
 import winreg
+from contextlib import suppress
 from ctypes import wintypes
 from dataclasses import dataclass, field
 from multiprocessing.connection import Connection
@@ -85,6 +86,74 @@ def _application_process_id(application: object) -> int | None:
     return process_id.value or None
 
 
+def _activate_native_window(application: object, opened_document: object) -> bool:
+    """Activate the opened Office document and bring its native window forward."""
+    if os.name != "nt":
+        return False
+    try:
+        opened_document.Activate()
+    except Exception:
+        pass
+    hwnd = 0
+    for owner in (opened_document, application):
+        try:
+            hwnd = int(owner.ActiveWindow.Hwnd or 0)
+        except Exception:
+            pass
+        if hwnd:
+            break
+    if not hwnd:
+        try:
+            hwnd = int(application.Hwnd or 0)
+        except Exception:
+            return False
+    if not hwnd:
+        return False
+
+    attached_threads: list[int] = []
+    current_thread = 0
+    try:
+        import win32api
+        import win32con
+        import win32gui
+        import win32process
+
+        hwnd = win32gui.GetAncestor(hwnd, win32con.GA_ROOT) or hwnd
+        if not win32gui.IsWindow(hwnd):
+            return False
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE if win32gui.IsIconic(hwnd) else win32con.SW_SHOW)
+        try:
+            win32gui.BringWindowToTop(hwnd)
+            win32gui.SetForegroundWindow(hwnd)
+            if win32gui.GetForegroundWindow() == hwnd:
+                return True
+        except Exception:
+            pass
+
+        # COM runs in a background worker. Temporarily share the foreground
+        # and Office input queues for activation, then always detach them.
+        current_thread = win32api.GetCurrentThreadId()
+        foreground = win32gui.GetForegroundWindow()
+        handles = (foreground, hwnd) if foreground else (hwnd,)
+        for handle in handles:
+            thread_id, _ = win32process.GetWindowThreadProcessId(handle)
+            if thread_id and thread_id != current_thread and thread_id not in attached_threads:
+                attached = win32process.AttachThreadInput(current_thread, thread_id, True)
+                if attached is None or attached:
+                    attached_threads.append(thread_id)
+        win32gui.BringWindowToTop(hwnd)
+        win32gui.SetForegroundWindow(hwnd)
+        return win32gui.GetForegroundWindow() == hwnd
+    except Exception:
+        # A focus restriction must not turn a successfully opened workbook
+        # into a failed job or close the user's Office window.
+        return False
+    finally:
+        for thread_id in reversed(attached_threads):
+            with suppress(Exception):
+                win32process.AttachThreadInput(current_thread, thread_id, False)
+
+
 def _native_preview_worker(
     engine: str,
     input_path: str,
@@ -127,6 +196,7 @@ def _native_preview_worker(
                 False,
                 action == "preview",
             )
+        _activate_native_window(application, document if document_type == "docx" else workbook)
         connection.send(("started", _application_process_id(application)))
 
         if action == "preview":

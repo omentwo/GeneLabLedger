@@ -2582,6 +2582,20 @@ function handleGridKeydown(event: KeyboardEvent): void {
   const undoModifier = event.ctrlKey || event.metaKey;
   if (
     undoModifier && !event.altKey && !event.shiftKey
+    && (event.key.toLowerCase() === "c" || event.code === "KeyC")
+  ) {
+    if (nativeGridClipboardTarget(event.target)) return;
+    const selection = gridClipboardSelection(gridCellFromElement(event.target) ?? activeGridCell.value);
+    if (!selection) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!event.repeat && !copyGridSelectionWithNativeCommand(selection)) {
+      void copyGridSelectionToClipboard(selection, false, "复制失败，请重新选中单元格后重试，并检查剪贴板权限");
+    }
+    return;
+  }
+  if (
+    undoModifier && !event.altKey && !event.shiftKey
     && (event.key.toLowerCase() === "x" || event.code === "KeyX")
   ) {
     if (nativeGridClipboardTarget(event.target)) return;
@@ -2739,10 +2753,12 @@ function buildGridClipboardData(selection: GridClipboardSelection): { plainText:
 }
 
 function nativeGridClipboardTarget(target: EventTarget | null): boolean {
+  if (
+    target instanceof Element
+    && target.closest("input, textarea, [contenteditable]:not([contenteditable='false'])")
+  ) return true;
   const cell = gridCellFromElement(target);
-  if (cell) return isGridCellEditing(cell);
-  return target instanceof Element
-    && Boolean(target.closest("input, textarea, [contenteditable]:not([contenteditable='false'])"));
+  return Boolean(cell && isGridCellEditing(cell));
 }
 
 function writeGridClipboardEvent(event: ClipboardEvent, selection: GridClipboardSelection): boolean {
@@ -2765,6 +2781,28 @@ function writeGridClipboardEvent(event: ClipboardEvent, selection: GridClipboard
   return true;
 }
 
+function copyGridSelectionWithNativeCommand(selection: GridClipboardSelection): boolean {
+  if (typeof document.execCommand !== "function") return false;
+  const previousClipboard = lastGridClipboard;
+  let handled = false;
+  let succeeded = false;
+  const writeClipboard = (event: ClipboardEvent) => {
+    handled = writeGridClipboardEvent(event, selection);
+  };
+  document.addEventListener("copy", writeClipboard, true);
+  try {
+    // Trigger the browser's native copy during the keyboard user gesture.
+    // This also works when the async clipboard API is unavailable or denied.
+    succeeded = document.execCommand("copy") && handled;
+  } catch {
+    // Fall back to the async clipboard API when the native command is unavailable.
+  } finally {
+    document.removeEventListener("copy", writeClipboard, true);
+    if (!succeeded) lastGridClipboard = previousClipboard;
+  }
+  return succeeded;
+}
+
 function handleGridCopy(event: ClipboardEvent): void {
   // Editing keeps the browser's native text-copy behavior. Cell/range copy
   // is only active while the grid itself owns the selection.
@@ -2772,8 +2810,12 @@ function handleGridCopy(event: ClipboardEvent): void {
     lastGridClipboard = null;
     return;
   }
-  const selection = gridClipboardSelection(gridCellFromElement(event.target));
-  if (selection) writeGridClipboardEvent(event, selection);
+  const selection = gridClipboardSelection(gridCellFromElement(event.target) ?? activeGridCell.value);
+  if (selection && !writeGridClipboardEvent(event, selection)) {
+    event.preventDefault();
+    event.stopPropagation();
+    void copyGridSelectionToClipboard(selection, false, "复制失败，请检查剪贴板权限后重试");
+  }
 }
 
 function handleGridCut(event: ClipboardEvent): void {
@@ -3019,8 +3061,14 @@ async function contextCopy(): Promise<void> {
       : cell
         ? gridClipboardSelection(cell)
         : null;
-  await copyGridSelectionToClipboard(selection ?? undefined);
   finishContextMenuAction();
+  if (!selection) {
+    ElMessage.warning("复制范围已变化，请重新选择要复制的单元格");
+    return;
+  }
+  const copying = copyGridSelectionToClipboard(selection);
+  void focusGridCell(selection.active);
+  await copying;
 }
 
 async function contextCut(): Promise<void> {
@@ -4606,6 +4654,12 @@ async function loadRecords(
       }
     }
     if (requestSequence !== loadSequence || projectId !== activeProjectId.value) return false;
+    const preserveGridSelection = !isGlobalScope && options.preserveSelection && tableProjectId.value === projectId;
+    const activeIdentity = preserveGridSelection ? captureGridIdentity(activeGridCell.value) : null;
+    const anchorIdentity = preserveGridSelection ? captureGridIdentity(gridSelectionAnchor.value) : null;
+    const rangeIdentities = preserveGridSelection && gridCellRange.value
+      ? { anchor: captureGridIdentity(gridCellRange.value.anchor), focus: captureGridIdentity(gridCellRange.value.focus) }
+      : null;
     if (isGlobalScope) {
       records.value = [];
       draftRows.value = [];
@@ -4621,8 +4675,30 @@ async function loadRecords(
       globalSearchTotal.value = 0;
       tableProjectId.value = projectId;
     }
-    activeGridCell.value = null;
-    clearGridCellSelection();
+    if (preserveGridSelection) {
+      const positions = selectedGridCellPositions();
+      const active = restoreGridIdentity(activeIdentity) ?? positions[0] ?? null;
+      const anchor = restoreGridIdentity(anchorIdentity) ?? active;
+      const rangeAnchor = restoreGridIdentity(rangeIdentities?.anchor ?? null);
+      const rangeFocus = restoreGridIdentity(rangeIdentities?.focus ?? null);
+      let range: GridCellRange | null = null;
+      if (rangeAnchor && rangeFocus) {
+        const candidate = { anchor: rangeAnchor, focus: rangeFocus };
+        const rectangle = gridCellPositionsForRange(candidate);
+        if (
+          rectangle.length === positions.length
+          && rectangle.every((position) => selectedGridCellKeys.value.has(gridCellKey(position)))
+        ) range = candidate;
+      }
+      if (active) replaceGridCellSelection(positions, active, anchor ?? active, range);
+      else {
+        activeGridCell.value = null;
+        clearGridCellSelection();
+      }
+    } else {
+      activeGridCell.value = null;
+      clearGridCellSelection();
+    }
     fieldErrors.value = {};
     clearAllCellSaveStates();
     selectedRecords.value = [];
