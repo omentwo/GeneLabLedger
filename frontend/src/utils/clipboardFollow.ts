@@ -30,7 +30,7 @@ export class ClipboardFollowSession {
   fieldIds: string[] = [];
   index = 0;
   status: ClipboardFollowStatus = "waiting";
-  message = "确认病理号后开始接收";
+  message = "确认本条后开始接收";
   history: FollowStep[] = [];
   pending: ClipboardValueEvent | null = null;
   lastEventId = 0;
@@ -38,7 +38,7 @@ export class ClipboardFollowSession {
 
   get nextFieldId(): string { return this.fieldIds[this.index] ?? ""; }
 
-  reset(message = "确认病理号后开始接收"): void {
+  reset(message = "确认本条后开始接收"): void {
     this.context = null;
     this.fieldIds = [];
     this.index = 0;
@@ -58,7 +58,7 @@ export class ClipboardFollowSession {
     this.fieldIds = [...fieldIds];
     this.lastEventId = 0;
     this.status = this.nextFieldId ? "listening" : "complete";
-    this.message = this.nextFieldId ? "在其他软件复制信息即可填入下一项" : "本条已完成，请检查后保存";
+    this.message = this.nextFieldId ? "在其他软件复制信息即可填入当前项" : "本条已完成，请检查后保存";
   }
 
   pause(message = "接收已暂停，继续后请重新复制"): void {
@@ -117,7 +117,7 @@ export class ClipboardFollowSession {
   advance(): void {
     this.index += 1;
     this.status = this.nextFieldId ? "listening" : "complete";
-    this.message = this.nextFieldId ? "在其他软件复制信息即可填入下一项" : "本条已完成，请检查后保存";
+    this.message = this.nextFieldId ? "在其他软件复制信息即可填入当前项" : "本条已完成，请检查后保存";
   }
 
   skip(): void {

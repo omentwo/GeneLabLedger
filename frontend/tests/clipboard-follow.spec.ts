@@ -13,7 +13,7 @@ const fields = [field("name"), field("unit"), field("date", { data_type: "date" 
   ] }), field("hidden", { hidden: true }), field("path", { system_key: "pathology_number" })];
 const context: ClipboardFollowContext = { sessionId: "s", projectId: "p", recordId: "r" };
 function event(text: string, eventId = 1, extra: Partial<ClipboardFollowContext> = {}): Extract<ClipboardFollowEvent, { type: "clipboard" }> {
-  return { ...context, ...extra, type: "clipboard", text, eventId, sequence: eventId + 10, manual: false };
+  return { ...context, ...extra, type: "clipboard", text, eventId, sequence: eventId + 10 };
 }
 function apply(session: ClipboardFollowSession, text: string, values: Record<string, string>, id = 1, overwrite = false) {
   const result = session.receive(event(text, id), fields, values, overwrite);

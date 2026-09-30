@@ -7,7 +7,8 @@ import type {
 export const QUICK_ENTRY_SETTINGS_KEY = "quick_entry_settings";
 export const QUICK_ENTRY_FIELD_WIDTH_MIN = 160;
 export const QUICK_ENTRY_FIELD_WIDTH_MAX = 600;
-export const QUICK_ENTRY_FIELD_WIDTH_DEFAULT = 320;
+export const QUICK_ENTRY_FIELD_WIDTH_DEFAULT = 160;
+export const QUICK_ENTRY_CREATE_FIELD_WIDTH_DEFAULT = 320;
 export const QUICK_ENTRY_FONT_SIZE_MIN = 12;
 export const QUICK_ENTRY_FONT_SIZE_MAX = 20;
 export const QUICK_ENTRY_FONT_SIZE_DEFAULT = 14;
@@ -89,7 +90,7 @@ export function normalizeQuickEntrySettings(value: unknown): QuickEntrySettingsD
           ),
           quickCreateFieldWidth: clampedDimension(
             settings.quickCreateFieldWidth ?? settings.fieldWidth ?? legacyLayoutValue(settings, "width"),
-            QUICK_ENTRY_FIELD_WIDTH_DEFAULT,
+            QUICK_ENTRY_CREATE_FIELD_WIDTH_DEFAULT,
             QUICK_ENTRY_FIELD_WIDTH_MIN,
             QUICK_ENTRY_FIELD_WIDTH_MAX,
           ),
@@ -167,7 +168,7 @@ export function resolveQuickEntryProjectSettings(
     ),
     quickCreateFieldWidth: clampedDimension(
       saved?.quickCreateFieldWidth ?? saved?.fieldWidth,
-      QUICK_ENTRY_FIELD_WIDTH_DEFAULT,
+      QUICK_ENTRY_CREATE_FIELD_WIDTH_DEFAULT,
       QUICK_ENTRY_FIELD_WIDTH_MIN,
       QUICK_ENTRY_FIELD_WIDTH_MAX,
     ),

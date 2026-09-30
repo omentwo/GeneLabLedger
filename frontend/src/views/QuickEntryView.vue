@@ -18,7 +18,6 @@ import {
   commitCellBatch,
   listRecords,
   previewCellBatch,
-  queryRecords,
   quickCreateRecord,
   validateNewRecord,
 } from "@/api/records";
@@ -32,6 +31,7 @@ import { ClipboardFollowSession } from "@/utils/clipboardFollow";
 import { desktopBridge } from "@/utils/desktop";
 import {
   QUICK_ENTRY_SETTINGS_KEY,
+  QUICK_ENTRY_CREATE_FIELD_WIDTH_DEFAULT,
   QUICK_ENTRY_FIELD_WIDTH_DEFAULT,
   QUICK_ENTRY_FIELD_WIDTH_MAX,
   QUICK_ENTRY_FIELD_WIDTH_MIN,
@@ -77,7 +77,7 @@ const fieldDialogVisible = ref(false);
 const selectedFieldDraft = ref<string[]>([]);
 const pinnedFieldDraft = ref<string[]>([]);
 const fieldWidthDraft = ref(QUICK_ENTRY_FIELD_WIDTH_DEFAULT);
-const quickCreateFieldWidthDraft = ref(QUICK_ENTRY_FIELD_WIDTH_DEFAULT);
+const quickCreateFieldWidthDraft = ref(QUICK_ENTRY_CREATE_FIELD_WIDTH_DEFAULT);
 const fontSizeDraft = ref(QUICK_ENTRY_FONT_SIZE_DEFAULT);
 const inputHeightDraft = ref(QUICK_ENTRY_INPUT_HEIGHT_DEFAULT);
 const draggingFieldId = ref("");
@@ -91,8 +91,6 @@ const draggingClipboardFieldId = ref("");
 const clipboardEnabled = ref(false);
 const clipboardBusy = ref(false);
 const clipboardSession = reactive(new ClipboardFollowSession());
-const matchingRecords = ref<ProjectRecord[]>([]);
-const matchDialogVisible = ref(false);
 const clipboardAvailable = Boolean(bridge?.windowKind === "quick-entry" && bridge.clipboardFollowAvailable);
 const combinedPathologyInput = ref("");
 const combinedPathologyInputRef = ref<{ focus: () => void } | null>(null);
@@ -101,7 +99,7 @@ const fieldSettings = ref<QuickEntryProjectSettings>({
   selectedFieldIds: [],
   pinnedFieldIds: [],
   fieldWidth: QUICK_ENTRY_FIELD_WIDTH_DEFAULT,
-  quickCreateFieldWidth: QUICK_ENTRY_FIELD_WIDTH_DEFAULT,
+  quickCreateFieldWidth: QUICK_ENTRY_CREATE_FIELD_WIDTH_DEFAULT,
   fontSize: QUICK_ENTRY_FONT_SIZE_DEFAULT,
   inputHeight: QUICK_ENTRY_INPUT_HEIGHT_DEFAULT,
   autoAdvanceAfterUpdate: true,
@@ -258,7 +256,7 @@ function handleClipboardEvent(event: ClipboardFollowEvent): void {
   if (
     !clipboardEnabled.value || activeRecord.value?.id !== event.recordId ||
     activeProjectId.value !== event.projectId || formReadonly.value ||
-    activeRecord.value.report_generated || fieldDialogVisible.value || matchDialogVisible.value
+    activeRecord.value.report_generated || fieldDialogVisible.value
   ) {
     pauseClipboardFollow("当前记录或表头暂不可接收，请重新确认后继续");
     return;
@@ -287,19 +285,6 @@ async function overwriteClipboardField(): Promise<void> {
   if (formReadonly.value || clipboardBusy.value) return;
   applyClipboardFill(clipboardSession.overwritePending(projectFields.value, entryValues));
   if (clipboardSession.status === "listening") await beginClipboardFollow(true);
-}
-
-async function acceptCurrentClipboard(): Promise<void> {
-  if (clipboardSession.status !== "listening" && !(await beginClipboardFollow(true))) return;
-  const context = clipboardSession.context;
-  if (!context) return;
-  try {
-    await bridge!.acceptCurrentClipboard(context.sessionId);
-  } catch (error) {
-    if (clipboardSession.matches(context)) {
-      pauseClipboardFollow(error instanceof Error ? error.message : "无法读取当前剪贴板");
-    }
-  }
 }
 
 async function toggleClipboardFollow(enabled: boolean): Promise<void> {
@@ -920,66 +905,10 @@ async function saveNewRecord(): Promise<ProjectRecord | undefined> {
   ]);
   recordSearch.value = "";
   await notifyMain(created.id, "create");
-  if (clipboardEnabled.value) loadRecordIntoForm(created);
-  else resetCreateForm(false);
+  resetCreateForm(false);
   await scrollRecordIntoView(created.id);
-  ElMessage.success(clipboardEnabled.value ? "记录已创建，可开始跟随录入" : "记录已保存，可继续录入下一条");
+  ElMessage.success("记录已保存，可继续录入下一条");
   return created;
-}
-
-async function exactPathologyRecords(pathologyNumber: string, blockNumber?: string): Promise<ProjectRecord[]> {
-  const pathologyField = projectFields.value.find((field) => field.system_key === "pathology_number");
-  const blockField = projectFields.value.find((field) => field.system_key === "block_number");
-  if (!pathologyField || (blockNumber !== undefined && !blockField)) throw new Error("项目缺少病理号或蜡块号表头");
-  const filters = [{ field_id: pathologyField.id, operator: "equals" as const, value: pathologyNumber }];
-  if (blockNumber !== undefined) filters.push({ field_id: blockField!.id, operator: "equals", value: blockNumber });
-  const result = await queryRecords({
-    project_id: activeProjectId.value, include_locked: true, field_filters: filters, limit: 1000, offset: 0,
-  });
-  if (result.total > 1000) throw new Error("匹配记录过多，请输入完整病理号和蜡块号");
-  return result.items;
-}
-
-async function bindClipboardRecord(record: ProjectRecord): Promise<void> {
-  if (record.project_id !== activeProjectId.value || saving.value) return;
-  if (record.locked || record.report_generated) {
-    ElMessage.warning("该病理号已锁定或已生成报告，不能跟随录入");
-    return;
-  }
-  matchDialogVisible.value = false;
-  loadRecordIntoForm(record);
-  await scrollRecordIntoView(record.id);
-  await beginClipboardFollow();
-}
-
-async function openClipboardRecord(): Promise<void> {
-  if (saving.value || !clipboardEnabled.value) return;
-  const projectId = activeProjectId.value;
-  const input = combinedPathologyInput.value.trim().replace(/[－—–﹣]/g, "-");
-  if (!input) {
-    ElMessage.warning("请先输入病理号或病理号-蜡块号");
-    return;
-  }
-  saving.value = true;
-  let selected: ProjectRecord | undefined;
-  try {
-    let matches = await exactPathologyRecords(input);
-    if (!matches.length) {
-      const parsed = parseCombinedPathologyNumber(input);
-      matches = await exactPathologyRecords(parsed.pathologyNumber, parsed.blockNumber);
-    }
-    if (projectId !== activeProjectId.value) return;
-    if (matches.length > 1) {
-      matchingRecords.value = matches;
-      matchDialogVisible.value = true;
-    } else if (matches.length === 1) selected = matches[0];
-    else selected = await saveNewRecord();
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "病理号查找失败");
-  } finally {
-    saving.value = false;
-  }
-  if (selected && projectId === activeProjectId.value) await bindClipboardRecord(selected);
 }
 
 async function saveExistingRecord(): Promise<ProjectRecord | undefined> {
@@ -1033,7 +962,7 @@ async function saveExistingRecord(): Promise<ProjectRecord | undefined> {
     await loadUnreportedRecords(record.project_id);
   }
   await notifyMain(record.id, "update");
-  resetClipboardFollow("本条已保存，确认病理号后可再次接收");
+  resetClipboardFollow("本条已保存，确认下一条后可再次接收");
   ElMessage.success(`病理号 ${updated?.pathology_number ?? record.pathology_number} 已更新`);
   if (fieldSettings.value.autoAdvanceAfterUpdate && nextRecordId) {
     const nextRecord = unreportedRecords.value.find((item) => item.id === nextRecordId);
@@ -1057,10 +986,6 @@ function handleCombinedPathologyKeydown(event: KeyboardEvent): void {
 
 async function saveEntry(): Promise<void> {
   if (saving.value) return;
-  if (!activeRecord.value && clipboardEnabled.value) {
-    await openClipboardRecord();
-    return;
-  }
   pauseClipboardFollow("正在保存，接收已暂停");
   saving.value = true;
   let nextClipboardRecord: ProjectRecord | undefined;
@@ -1111,7 +1036,7 @@ function handleEntryKeydown(event: KeyboardEvent, field: FieldDefinition): void 
 }
 
 function handleQuickEntryShortcut(event: KeyboardEvent): void {
-  if (event.defaultPrevented || event.isComposing || fieldDialogVisible.value || matchDialogVisible.value) return;
+  if (event.defaultPrevented || event.isComposing || fieldDialogVisible.value) return;
   if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
     event.preventDefault();
     void saveEntry();
@@ -1311,7 +1236,7 @@ onBeforeUnmount(() => {
               <el-tag v-if="isDirty" type="info" effect="plain">未保存</el-tag>
             </div>
             <p>
-              {{ clipboardEnabled ? '确认病理号后，在其他软件逐项复制；自动填入草稿，检查后保存。' : activeRecord ? '只保存下方已选择表头的改动，成功后自动进入下一条。' : '输入“病理号-蜡块号”，按 Enter 即可连续创建。' }}
+              {{ activeRecord && clipboardEnabled ? '确认本条后，在其他软件逐项复制；自动填入草稿，检查后保存。' : activeRecord ? '只保存下方已选择表头的改动，成功后自动进入下一条。' : '输入“病理号-蜡块号”，按 Enter 即可连续创建。' }}
             </p>
           </div>
           <div class="entry-toolbar">
@@ -1325,7 +1250,7 @@ onBeforeUnmount(() => {
         </div>
 
         <el-scrollbar class="entry-form-scroll">
-          <div class="clipboard-follow-panel" :class="{ 'is-listening': clipboardSession.status === 'listening' }">
+          <div v-if="activeRecord" class="clipboard-follow-panel" :class="{ 'is-listening': clipboardSession.status === 'listening' }">
             <div class="clipboard-follow-heading">
               <el-switch
                 :model-value="clipboardEnabled"
@@ -1341,10 +1266,10 @@ onBeforeUnmount(() => {
             <template v-if="clipboardEnabled">
               <div class="clipboard-progress" aria-live="polite">
                 <strong v-if="clipboardNextField">
-                  下一项：{{ clipboardNextField.label }}（{{ clipboardSession.index + 1 }}/{{ clipboardSession.fieldIds.length }}）
+                  当前项：{{ clipboardNextField.label }}（{{ clipboardSession.index + 1 }}/{{ clipboardSession.fieldIds.length }}）
                 </strong>
                 <strong v-else-if="clipboardSession.status === 'complete'">全部填完，请检查后 Ctrl+Enter 保存</strong>
-                <strong v-else>等待确认病理号</strong>
+                <strong v-else>等待确认本条</strong>
                 <span>{{ clipboardSession.message }}</span>
               </div>
               <div v-if="activeRecord" class="clipboard-toolbar">
@@ -1366,10 +1291,6 @@ onBeforeUnmount(() => {
                   size="small" :disabled="formReadonly || clipboardBusy || !clipboardSession.history.length"
                   @click="undoClipboardField"
                 >撤回上一步</el-button>
-                <el-button
-                  size="small" :disabled="formReadonly || clipboardBusy || clipboardSession.status === 'waiting' || clipboardSession.status === 'complete'"
-                  @click="acceptCurrentClipboard"
-                >接受当前剪贴板</el-button>
                 <el-button size="small" :disabled="formReadonly || clipboardBusy" @click="beginClipboardFollow(false)">重置本条顺序</el-button>
               </div>
             </template>
@@ -1408,7 +1329,7 @@ onBeforeUnmount(() => {
               <template #label>
                 <span class="entry-field-label">
                   <span>{{ field.label }}</span>
-                  <span v-if="clipboardEnabled && clipboardNextField?.id === field.id" class="clipboard-field-mark">下一项</span>
+                  <span v-if="clipboardEnabled && clipboardNextField?.id === field.id" class="clipboard-field-mark">当前项</span>
                   <span v-if="isMandatoryQuickEntryField(field)" class="required-mark">必填</span>
                   <span
                     v-if="!activeRecord && pinnedFieldIdSet.has(field.id)"
@@ -1447,7 +1368,7 @@ onBeforeUnmount(() => {
             </el-form-item>
           </el-form>
           <div v-else class="quick-create-form" :style="quickCreateFieldStyle()">
-            <label for="combined-pathology-number">{{ clipboardEnabled ? '病理号或病理号-蜡块号' : '病理号-蜡块号' }}</label>
+            <label for="combined-pathology-number">病理号-蜡块号</label>
             <el-input
               id="combined-pathology-number"
               ref="combinedPathologyInputRef"
@@ -1458,7 +1379,7 @@ onBeforeUnmount(() => {
               placeholder="例如 A-20260907-3"
               @keydown="handleCombinedPathologyKeydown"
             />
-            <p>{{ clipboardEnabled ? '按 Enter 查找并进入记录；有多个蜡块时先选择。创建新记录请填写完整“病理号-蜡块号”。' : '系统会按最后一个连接符拆分；前半部分写入病理号，最后一段写入蜡块号。' }}</p>
+            <p>系统会按最后一个连接符拆分；前半部分写入病理号，最后一段写入蜡块号。</p>
           </div>
         </el-scrollbar>
 
@@ -1474,7 +1395,7 @@ onBeforeUnmount(() => {
               :disabled="isLocked || activeRecordUnavailable"
               @click="saveEntry"
             >
-              {{ activeRecord ? '保存修改（Ctrl+Enter）' : clipboardEnabled ? '确认并进入（Enter）' : '创建并继续（Enter）' }}
+              {{ activeRecord ? '保存修改（Ctrl+Enter）' : '创建并继续（Enter）' }}
             </el-button>
           </div>
         </footer>
@@ -1624,19 +1545,6 @@ onBeforeUnmount(() => {
         </el-button>
       </template>
     </el-dialog>
-    <el-dialog v-model="matchDialogVisible" title="选择对应蜡块与记录" width="min(620px, 94vw)" append-to-body destroy-on-close>
-      <p>同一病理号匹配多条记录，请确认后开始跟随录入。</p>
-      <div class="clipboard-record-matches">
-        <el-button
-          v-for="record in matchingRecords" :key="record.id"
-          :disabled="record.locked || record.report_generated"
-          @click="bindClipboardRecord(record)"
-        >
-          {{ record.pathology_number }} / 蜡块 {{ record.block_number || '未填' }} / 第 {{ record.position }} 条
-          {{ record.locked ? '（已锁定）' : record.report_generated ? '（已生成报告）' : '' }}
-        </el-button>
-      </div>
-    </el-dialog>
   </div>
 </template>
 
@@ -1671,8 +1579,6 @@ onBeforeUnmount(() => {
 .clipboard-order-row { min-height: 38px; border-bottom: 1px solid var(--app-border-light); padding: 4px; }
 .clipboard-order-arrows { margin-left: auto; display: flex; gap: 4px; }
 .clipboard-order-arrows :deep(.el-button + .el-button) { margin-left: 0; }
-.clipboard-record-matches { display: grid; gap: 8px; }
-.clipboard-record-matches :deep(.el-button) { margin-left: 0; height: auto; min-height: 34px; white-space: normal; }
 .quick-entry-page {
   display: flex;
   height: 100vh;
@@ -1984,8 +1890,8 @@ onBeforeUnmount(() => {
 }
 
 .entry-form :deep(.el-form-item) {
-  width: min(var(--quick-field-width, 320px), 100%);
-  flex: 0 0 min(var(--quick-field-width, 320px), 100%);
+  width: min(var(--quick-field-width, 160px), 100%);
+  flex: 0 0 min(var(--quick-field-width, 160px), 100%);
   min-width: 0;
   margin-bottom: 0;
 }

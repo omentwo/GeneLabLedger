@@ -6,7 +6,6 @@ export interface GeneLedgerDesktopBridge {
   clipboardFollowAvailable: boolean;
   startClipboardFollow: (context: ClipboardFollowContext) => Promise<{ sequence: number }>;
   stopClipboardFollow: (sessionId: string) => Promise<void>;
-  acceptCurrentClipboard: (sessionId: string) => Promise<void>;
   writeInternalClipboard: (text: string) => Promise<void>;
   onClipboardFollowEvent: (listener: (event: ClipboardFollowEvent) => void) => () => void;
   saveWorkbook: (
@@ -61,7 +60,7 @@ export interface ClipboardFollowContext {
 }
 
 export type ClipboardFollowEvent = ClipboardFollowContext & (
-  { type: "clipboard"; sequence: number; eventId: number; text: string; manual: boolean }
+  { type: "clipboard"; sequence: number; eventId: number; text: string }
   | { type: "stopped"; reason: string }
 );
 

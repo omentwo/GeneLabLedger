@@ -393,8 +393,9 @@ function createQuickEntryWindow(context) {
   });
   quickEntryWindow.setAlwaysOnTop(true, "floating");
   configureRendererNavigation(quickEntryWindow);
-  quickEntryWindow.webContents.on("did-start-loading", () => {
-    pauseClipboardFollow("窗口正在重新加载，请重新确认病理号");
+  quickEntryWindow.webContents.on("did-start-navigation", (details) => {
+    if (!details.isMainFrame || details.isSameDocument) return;
+    pauseClipboardFollow("窗口正在重新加载，请重新确认本条");
     quickEntryRendererReady = false;
   });
   quickEntryWindow.webContents.on("render-process-gone", () => {
@@ -431,6 +432,11 @@ function showQuickEntryWindow(payload) {
     return;
   }
   quickEntryPendingContext = context;
+  if (quickEntryWindow.isMinimized()) quickEntryWindow.restore();
+  quickEntryWindow.setAlwaysOnTop(true, "floating");
+  quickEntryWindow.show();
+  quickEntryWindow.moveTop();
+  quickEntryWindow.focus();
   if (quickEntryRendererReady) {
     quickEntryWindow.webContents.send(
       "gene-ledger:quick-entry-open-requested",
@@ -438,11 +444,6 @@ function showQuickEntryWindow(payload) {
     );
     quickEntryPendingContext = null;
   }
-  if (quickEntryWindow.isMinimized()) quickEntryWindow.restore();
-  quickEntryWindow.setAlwaysOnTop(true, "floating");
-  quickEntryWindow.show();
-  quickEntryWindow.moveTop();
-  quickEntryWindow.focus();
 }
 
 function focusMainWindowFromQuickEntry() {
@@ -528,18 +529,15 @@ function registerDesktopHandlers() {
   ipcMain.handle("gene-ledger:clipboard-follow-start", (event, context) => {
     assertQuickEntryIpcSender(event);
     if (process.platform !== "win32") throw new Error("剪贴板跟随仅支持 Windows 桌面版");
-    if (!quickEntryRendererReady || !quickEntryWindow.isVisible() || quickEntryWindow.isMinimized()) {
+    if (!quickEntryWindow.isVisible() || quickEntryWindow.isMinimized()) {
       throw new Error("请先显示快速录入窗口");
     }
+    quickEntryRendererReady = true;
     return clipboardFollower.start(context);
   });
   ipcMain.handle("gene-ledger:clipboard-follow-stop", (event, sessionId) => {
     assertQuickEntryIpcSender(event);
     return clipboardFollower.stop(sessionId);
-  });
-  ipcMain.handle("gene-ledger:clipboard-follow-accept", (event, sessionId) => {
-    assertQuickEntryIpcSender(event);
-    return clipboardFollower.accept(sessionId);
   });
   ipcMain.handle("gene-ledger:clipboard-write-internal", (event, text) => {
     assertQuickEntryIpcSender(event);

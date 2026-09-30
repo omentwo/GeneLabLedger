@@ -72,17 +72,6 @@ test("internal writes do not arm a recording session", async () => {
   } finally { await f.follower.close(); }
 });
 
-test("manual accept is restricted to the active session", async () => {
-  const f = fixture();
-  try {
-    await f.follower.start(context);
-    await assert.rejects(f.follower.accept("old"), /已结束/);
-    await f.follower.accept("s1");
-    assert.equal(f.commands.at(-1).action, "accept");
-    assert.equal(f.commands.at(-1).sessionId, "s1");
-  } finally { await f.follower.close(); }
-});
-
 test("pause during startup prevents the old start from reaching the helper", async () => {
   const f = fixture({ autoReady: false });
   const start = assert.rejects(f.follower.start(context), /已变化/);

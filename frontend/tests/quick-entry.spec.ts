@@ -74,7 +74,7 @@ describe("quick entry field settings", () => {
         "project-1": {
           selectedFieldIds: ["pathology"],
           pinnedFieldIds: [],
-          fieldWidth: 320,
+          fieldWidth: 160,
           quickCreateFieldWidth: 320,
           fontSize: 14,
           inputHeight: 32,
@@ -122,7 +122,7 @@ describe("quick entry field settings", () => {
     })).toEqual({
       selectedFieldIds: ["pathology", "number"],
       pinnedFieldIds: ["number"],
-      fieldWidth: 320,
+      fieldWidth: 160,
       quickCreateFieldWidth: 320,
       fontSize: 14,
       inputHeight: 32,
@@ -141,7 +141,7 @@ describe("quick entry field settings", () => {
     })).toEqual({
       selectedFieldIds: ["pathology"],
       pinnedFieldIds: [],
-      fieldWidth: 320,
+      fieldWidth: 160,
       quickCreateFieldWidth: 320,
       fontSize: 14,
       inputHeight: 32,
