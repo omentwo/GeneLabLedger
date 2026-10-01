@@ -6430,11 +6430,6 @@ onBeforeUnmount(() => {
       role="toolbar"
       aria-label="批量操作"
     >
-      <div class="selection-summary" aria-live="polite">
-        <strong v-if="hasGridCellSelection">已选 {{ gridCellSelectionCount }} 个单元格</strong>
-        <strong v-else>已选 {{ selectedCount }} 条记录</strong>
-        <span>批量操作</span>
-      </div>
       <el-select
         v-model="recordSelectionScope"
         class="record-selection-scope"
@@ -8123,26 +8118,6 @@ onBeforeUnmount(() => {
 
 .selection-bar::-webkit-scrollbar {
   display: none;
-}
-
-.selection-summary {
-  display: grid;
-  min-width: 92px;
-  flex: 0 0 auto;
-  gap: var(--app-space-optical);
-  line-height: 1.15;
-}
-
-.selection-summary strong {
-  color: var(--app-primary-text);
-  font-size: 12px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-}
-
-.selection-summary span {
-  color: var(--app-muted);
-  font-size: 11px;
 }
 
 .record-selection-scope {

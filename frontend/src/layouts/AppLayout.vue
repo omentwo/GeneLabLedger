@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {
   ChartPie,
-  Database,
+  Cog,
   FlaskConical,
   PanelLeftOpen as Expand,
   PanelLeftClose as Fold,
@@ -45,7 +45,7 @@ const navigation = [
   { to: "/experiments", label: "实验编排", icon: FlaskConical },
   { to: "/reports", label: "报告打印", icon: Printer },
   { to: "/audit", label: "日志审计", icon: ShieldCheck },
-  { to: "/settings", label: "数据与设置", icon: Database },
+  { to: "/settings", label: "数据与设置", icon: Cog },
 ];
 
 async function syncWindowState(): Promise<void> {
@@ -418,7 +418,7 @@ onBeforeUnmount(() => {
   flex: 1 1 auto;
   grid-template-columns: var(--app-sidebar-current-width) minmax(0, 1fr);
   overflow: hidden;
-  transition: grid-template-columns 180ms ease;
+  /* 侧栏宽度直接切换，避免台账在动画期间逐帧重新布局。 */
 }
 
 .app-content > main {
@@ -453,7 +453,6 @@ onBeforeUnmount(() => {
   min-width: 0;
   overflow-x: hidden;
   overflow-y: auto;
-  transition: padding 180ms ease;
 }
 
 .sidebar-brand {
@@ -571,18 +570,6 @@ onBeforeUnmount(() => {
   border-color: var(--app-nav-active-border);
 }
 
-.sidebar-nav-link.router-link-active {
-  background: var(--app-nav-active);
-  border-color: var(--app-nav-active-border);
-  color: var(--app-nav-active-text);
-  font-weight: 650;
-}
-
-.sidebar-nav-link.router-link-active .sidebar-nav-icon {
-  background: var(--app-nav-hover);
-  border-color: var(--app-nav-active-border);
-}
-
 .sidebar-nav-link:focus-visible,
 .sidebar-toggle:focus-visible {
   outline: 2px solid var(--app-nav-focus);
@@ -651,8 +638,6 @@ onBeforeUnmount(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .app-content,
-  .app-sidebar,
   .sidebar-nav-link,
   .sidebar-toggle {
     transition: none;
