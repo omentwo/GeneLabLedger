@@ -157,6 +157,11 @@ const entryFields = computed(() =>
     return field ? [field] : [];
   }),
 );
+function clipboardFieldSequence(fieldId: string): string {
+  if (!clipboardEnabled.value) return "";
+  const index = fieldSettings.value.clipboardFieldIds.indexOf(fieldId);
+  return index >= 0 ? `(${index + 1}/${fieldSettings.value.clipboardFieldIds.length})` : "";
+}
 const clipboardNextField = computed(() => fieldById.value.get(clipboardSession.nextFieldId));
 const clipboardDialogFields = computed(() => {
   const eligible = selectedFieldDraft.value.flatMap((id) => {
@@ -284,13 +289,15 @@ async function skipClipboardField(): Promise<void> {
   if (clipboardSession.status === "listening") await beginClipboardFollow(true);
 }
 
-function undoClipboardField(): void {
+async function undoClipboardField(): Promise<void> {
   if (saving.value || clipboardBusy.value) return;
   resetNativeUndoShortcut();
   pauseClipboardFollow();
+  const historyLength = clipboardSession.history.length;
   const change = clipboardSession.undo(entryValues);
   const field = change && fieldById.value.get(change.fieldId);
   if (change && field) setEntryValue(field, change.value);
+  if (clipboardSession.history.length < historyLength) await beginClipboardFollow(true);
 }
 
 async function overwriteClipboardField(): Promise<void> {
@@ -1239,7 +1246,7 @@ function handleQuickEntryShortcut(event: KeyboardEvent): void {
     resetNativeUndoShortcut();
   }
   event.preventDefault();
-  undoClipboardField();
+  void undoClipboardField();
 }
 
 async function returnToMain(): Promise<void> {
@@ -1529,7 +1536,7 @@ onBeforeUnmount(() => {
             @submit.prevent
           >
             <el-form-item
-              v-for="(field, fieldIndex) in entryFields"
+              v-for="field in entryFields"
               :key="field.id"
               :style="entryFieldStyle()"
               :class="{ 'clipboard-next-field': clipboardEnabled && clipboardNextField?.id === field.id, 'clipboard-filled-field': clipboardEnabled && clipboardSession.lastFilledFieldId === field.id }"
@@ -1537,7 +1544,9 @@ onBeforeUnmount(() => {
               <template #label>
                 <span class="entry-field-label">
                   <span>{{ field.label }}</span>
-                  <span class="entry-field-sequence">({{ fieldIndex + 1 }}/{{ entryFields.length }})</span>
+                  <span v-if="clipboardFieldSequence(field.id)" class="entry-field-sequence">
+                    {{ clipboardFieldSequence(field.id) }}
+                  </span>
                   <span v-if="clipboardEnabled && clipboardNextField?.id === field.id" class="clipboard-field-mark">当前项</span>
                   <span v-if="isMandatoryQuickEntryField(field)" class="required-mark">必填</span>
                   <span

@@ -51,12 +51,13 @@ interface QuickState {
   activeRecord: ProjectRecord | null; activeRecordUnavailable: boolean; activeProjectId: string;
   entryValues: Record<string, string>; combinedPathologyInput: string;
   entryFields: FieldDefinition[];
+  clipboardFieldSequence: (fieldId: string) => string;
   clipboardSession: ClipboardFollowSession; clipboardEnabled: boolean;
   fieldSettings: QuickEntryProjectSettings; selectedFieldDraft: string[]; clipboardFieldDraft: string[];
   beginClipboardFollow: (resume?: boolean) => Promise<boolean>;
   saveEntry: () => Promise<void>; selectRecord: (record: ProjectRecord) => Promise<void>;
   acceptCurrentClipboard: () => Promise<void>;
-  overwriteClipboardField: () => Promise<void>; undoClipboardField: () => void;
+  overwriteClipboardField: () => Promise<void>; undoClipboardField: () => Promise<void>;
   moveSelectedFieldTo: (fieldId: string, targetIndex: number) => void;
   moveClipboardFieldTo: (fieldId: string, targetIndex: number) => void;
   openFieldSettings: () => void; saveFieldSettings: () => Promise<void>;
@@ -122,6 +123,13 @@ describe("quick-entry clipboard integration", () => {
     expect(container.querySelector(".clipboard-follow-panel")).not.toBeNull();
     expect(container.textContent).toContain("当前项：name");
     expect(state.entryFields.map((field) => field.id)).toEqual(["path", "block", "name", "unit"]);
+    expect(state.clipboardFieldSequence("path")).toBe("");
+    expect(state.clipboardFieldSequence("block")).toBe("");
+    expect(state.clipboardFieldSequence("name")).toBe("(1/2)");
+    expect(state.clipboardFieldSequence("unit")).toBe("(2/2)");
+    state.clipboardEnabled = false;
+    expect(state.clipboardFieldSequence("name")).toBe("");
+    state.clipboardEnabled = true;
     expect(container.textContent).toContain("粘贴");
     expect(container.textContent).toContain("撤回至上一项");
     expect(container.textContent).toContain("重新开始录入");
@@ -186,8 +194,9 @@ describe("quick-entry clipboard integration", () => {
     copy(state, "新姓名"); expect(state.clipboardSession.status).toBe("paused");
     expect(state.entryValues.name).toBe("原姓名");
     await state.overwriteClipboardField(); expect(state.entryValues.name).toBe("新姓名");
-    state.undoClipboardField(); expect(state.entryValues.name).toBe("原姓名");
+    await state.undoClipboardField(); expect(state.entryValues.name).toBe("原姓名");
     expect(state.clipboardSession.nextFieldId).toBe("name");
+    expect(state.clipboardSession.status).toBe("listening");
   });
 
   it("pastes the current clipboard into the active item on explicit request", async () => {
@@ -195,6 +204,30 @@ describe("quick-entry clipboard integration", () => {
     const sessionId = state.clipboardSession.context!.sessionId;
     await state.acceptCurrentClipboard();
     expect(mocks.bridge.acceptCurrentClipboard).toHaveBeenCalledWith(sessionId);
+  });
+
+  it("resumes listening immediately after a successful rollback and rejects the old session", async () => {
+    const state = await mount(); await selectAndBegin(state, rows[0]!);
+    const oldContext = { ...state.clipboardSession.context! };
+    copy(state, "姓名");
+    await state.undoClipboardField();
+    expect(state.clipboardSession.status).toBe("listening");
+    expect(state.clipboardSession.context?.sessionId).not.toBe(oldContext.sessionId);
+    expect(mocks.bridge.startClipboardFollow).toHaveBeenCalledTimes(2);
+    copy(state, "旧会话内容", 2, oldContext);
+    expect(state.entryValues.name).toBe("");
+    copy(state, "重新复制");
+    expect(state.entryValues.name).toBe("重新复制");
+  });
+
+  it("keeps listening paused when rollback protects a later manual edit", async () => {
+    const state = await mount(); await selectAndBegin(state, rows[0]!);
+    copy(state, "自动姓名");
+    state.entryValues.name = "手动姓名";
+    await state.undoClipboardField();
+    expect(state.entryValues.name).toBe("手动姓名");
+    expect(state.clipboardSession.status).toBe("paused");
+    expect(mocks.bridge.startClipboardFollow).toHaveBeenCalledTimes(1);
   });
 
   it("canceling a dirty record switch pauses the old session instead of consuming new copies", async () => {
@@ -249,18 +282,22 @@ describe("quick-entry clipboard integration", () => {
     input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "historyUndo" }));
     const followUndo = new KeyboardEvent("keydown", { key: "z", ctrlKey: true, bubbles: true, cancelable: true });
     input.dispatchEvent(followUndo);
+    await flush();
     expect(followUndo.defaultPrevented).toBe(true); expect(state.entryValues.name).toBe("");
     expect(state.clipboardSession.nextFieldId).toBe("name");
     expect(state.clipboardSession.history).toHaveLength(0);
+    expect(state.clipboardSession.status).toBe("listening");
   });
 
   it("uses one Ctrl+Z to roll back when focus is outside an input", async () => {
     const state = await mount(); await selectAndBegin(state, rows[0]!); copy(state, "姓名");
     const undo = new KeyboardEvent("keydown", { key: "z", ctrlKey: true, bubbles: true, cancelable: true });
     window.dispatchEvent(undo);
+    await flush();
     expect(undo.defaultPrevented).toBe(true);
     expect(state.entryValues.name).toBe("");
     expect(state.clipboardSession.nextFieldId).toBe("name");
+    expect(state.clipboardSession.status).toBe("listening");
   });
 
   it("stores a separate paste order using v5 and invalidates the previous session", async () => {

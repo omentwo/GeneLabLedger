@@ -142,7 +142,7 @@ export class ClipboardFollowSession {
     this.index = step.index;
     this.pending = null;
     this.lastFilledFieldId = "";
-    this.pause("已撤回至上一项，继续后重新复制");
+    this.pause("已撤回至上一项，请重新复制");
     return step.previous === undefined ? null : { fieldId: step.fieldId, value: step.previous };
   }
 }
