@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld("geneLedgerDesktop", {
   clipboardFollowAvailable: process.platform === "win32",
   startClipboardFollow: (context) => ipcRenderer.invoke("gene-ledger:clipboard-follow-start", context),
   stopClipboardFollow: (sessionId) => ipcRenderer.invoke("gene-ledger:clipboard-follow-stop", sessionId),
+  acceptCurrentClipboard: (sessionId) => ipcRenderer.invoke("gene-ledger:clipboard-follow-accept", sessionId),
   writeInternalClipboard: (text) => ipcRenderer.invoke("gene-ledger:clipboard-write-internal", text),
   onClipboardFollowEvent: (listener) => {
     const handler = (_event, payload) => listener(payload);

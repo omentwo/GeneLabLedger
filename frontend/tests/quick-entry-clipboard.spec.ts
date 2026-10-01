@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   bridge: { windowKind: "quick-entry", clipboardFollowAvailable: true,
     startClipboardFollow: vi.fn(async (_context: ClipboardFollowContext) => ({ sequence: 10 })),
     stopClipboardFollow: vi.fn(async () => undefined),
+    acceptCurrentClipboard: vi.fn(async () => undefined),
     writeInternalClipboard: vi.fn(async () => undefined),
     onClipboardFollowEvent: vi.fn((listener: (event: ClipboardFollowEvent) => void) => {
       mocks.listener = listener; return () => { mocks.listener = undefined; };
@@ -49,11 +50,15 @@ function record(id: string, pathology = id, block = "1"): ProjectRecord {
 interface QuickState {
   activeRecord: ProjectRecord | null; activeRecordUnavailable: boolean; activeProjectId: string;
   entryValues: Record<string, string>; combinedPathologyInput: string;
+  entryFields: FieldDefinition[];
   clipboardSession: ClipboardFollowSession; clipboardEnabled: boolean;
-  fieldSettings: QuickEntryProjectSettings; clipboardFieldDraft: string[];
+  fieldSettings: QuickEntryProjectSettings; selectedFieldDraft: string[]; clipboardFieldDraft: string[];
   beginClipboardFollow: (resume?: boolean) => Promise<boolean>;
   saveEntry: () => Promise<void>; selectRecord: (record: ProjectRecord) => Promise<void>;
+  acceptCurrentClipboard: () => Promise<void>;
   overwriteClipboardField: () => Promise<void>; undoClipboardField: () => void;
+  moveSelectedFieldTo: (fieldId: string, targetIndex: number) => void;
+  moveClipboardFieldTo: (fieldId: string, targetIndex: number) => void;
   openFieldSettings: () => void; saveFieldSettings: () => Promise<void>;
   handleCombinedPathologyKeydown: (event: KeyboardEvent) => void;
   loadUnreportedRecords: (projectId: string) => Promise<void>;
@@ -68,7 +73,7 @@ beforeEach(() => {
   changes = [];
   mocks.store.projects = [reactive({ id: "p", name: "p", sort_order: 0, fields: [
     field("path", { system_key: "pathology_number", is_core: true }),
-    field("block", { system_key: "block_number", is_core: true }), field("name"), field("unit"),
+    field("block", { system_key: "block_number", is_core: true }), field("name"), field("unit"), field("extra"),
   ] } as Project)];
   mocks.bridge.startClipboardFollow.mockResolvedValue({ sequence: 10 });
   mocks.confirm.mockResolvedValue(undefined);
@@ -101,7 +106,7 @@ async function mount(): Promise<QuickState> {
   return (app._instance as unknown as { setupState: QuickState }).setupState;
 }
 function copy(state: QuickState, text: string, eventId = 1, context = state.clipboardSession.context!) {
-  mocks.listener?.({ ...context, type: "clipboard", text, eventId, sequence: eventId + 10 });
+  mocks.listener?.({ ...context, type: "clipboard", text, eventId, sequence: eventId + 10, manual: false });
 }
 async function selectAndBegin(state: QuickState, selected: ProjectRecord): Promise<void> {
   await state.selectRecord(selected);
@@ -116,6 +121,10 @@ describe("quick-entry clipboard integration", () => {
     await nextTick();
     expect(container.querySelector(".clipboard-follow-panel")).not.toBeNull();
     expect(container.textContent).toContain("当前项：name");
+    expect(state.entryFields.map((field) => field.id)).toEqual(["path", "block", "name", "unit"]);
+    expect(container.textContent).toContain("粘贴");
+    expect(container.textContent).toContain("撤回至上一项");
+    expect(container.textContent).toContain("重新开始录入");
     expect(container.textContent).not.toContain("接受当前剪贴板");
     const focus = document.activeElement;
     copy(state, "姓名"); copy(state, "送检单位", 2);
@@ -181,6 +190,13 @@ describe("quick-entry clipboard integration", () => {
     expect(state.clipboardSession.nextFieldId).toBe("name");
   });
 
+  it("pastes the current clipboard into the active item on explicit request", async () => {
+    const state = await mount(); await selectAndBegin(state, rows[0]!);
+    const sessionId = state.clipboardSession.context!.sessionId;
+    await state.acceptCurrentClipboard();
+    expect(mocks.bridge.acceptCurrentClipboard).toHaveBeenCalledWith(sessionId);
+  });
+
   it("canceling a dirty record switch pauses the old session instead of consuming new copies", async () => {
     const state = await mount(); await selectAndBegin(state, rows[0]!); copy(state, "姓名");
     mocks.confirm.mockRejectedValueOnce(new Error("cancel"));
@@ -196,6 +212,7 @@ describe("quick-entry clipboard integration", () => {
     await state.saveEntry();
     expect(state.activeRecord?.id).toBe("r2"); expect(state.clipboardSession.status).toBe("waiting");
     expect(mocks.bridge.writeInternalClipboard).toHaveBeenCalledWith("P2");
+    expect(mocks.message.success).toHaveBeenCalledWith("已进入下一条记录，病理号 P2 已写入剪贴板");
     expect(mocks.bridge.startClipboardFollow).toHaveBeenCalledTimes(1);
     copy(state, "上一患者内容", 3, previous); expect(state.entryValues.name).toBe("");
   });
@@ -222,6 +239,30 @@ describe("quick-entry clipboard integration", () => {
     expect(event.defaultPrevented).toBe(true); expect(mocks.commitCellBatch).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the first input Ctrl+Z native and uses the second to roll back the previous item", async () => {
+    const state = await mount(); await selectAndBegin(state, rows[0]!); copy(state, "姓名");
+    const input = document.createElement("input"); container.append(input); input.focus();
+    const nativeUndo = new KeyboardEvent("keydown", { key: "z", ctrlKey: true, bubbles: true, cancelable: true });
+    input.dispatchEvent(nativeUndo);
+    expect(nativeUndo.defaultPrevented).toBe(false); expect(state.entryValues.name).toBe("姓名");
+    state.entryValues.name = "";
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "historyUndo" }));
+    const followUndo = new KeyboardEvent("keydown", { key: "z", ctrlKey: true, bubbles: true, cancelable: true });
+    input.dispatchEvent(followUndo);
+    expect(followUndo.defaultPrevented).toBe(true); expect(state.entryValues.name).toBe("");
+    expect(state.clipboardSession.nextFieldId).toBe("name");
+    expect(state.clipboardSession.history).toHaveLength(0);
+  });
+
+  it("uses one Ctrl+Z to roll back when focus is outside an input", async () => {
+    const state = await mount(); await selectAndBegin(state, rows[0]!); copy(state, "姓名");
+    const undo = new KeyboardEvent("keydown", { key: "z", ctrlKey: true, bubbles: true, cancelable: true });
+    window.dispatchEvent(undo);
+    expect(undo.defaultPrevented).toBe(true);
+    expect(state.entryValues.name).toBe("");
+    expect(state.clipboardSession.nextFieldId).toBe("name");
+  });
+
   it("stores a separate paste order using v5 and invalidates the previous session", async () => {
     const state = await mount(); await selectAndBegin(state, rows[0]!);
     state.openFieldSettings(); state.clipboardFieldDraft = ["unit", "name"]; await state.saveFieldSettings();
@@ -229,5 +270,64 @@ describe("quick-entry clipboard integration", () => {
     expect(state.fieldSettings.clipboardFieldIds).toEqual(["unit", "name"]);
     expect(state.fieldSettings.selectedFieldIds).toEqual(["path", "block", "name", "unit"]);
     expect(state.clipboardSession.context).toBeNull();
+  });
+
+  it("moves quick-entry and clipboard fields directly to either boundary", async () => {
+    const state = await mount(); state.openFieldSettings();
+    state.moveSelectedFieldTo("name", 0);
+    expect(state.selectedFieldDraft).toEqual(["name", "path", "block", "unit"]);
+    state.moveSelectedFieldTo("name", state.selectedFieldDraft.length - 1);
+    expect(state.selectedFieldDraft).toEqual(["path", "block", "unit", "name"]);
+    state.moveClipboardFieldTo("unit", 0);
+    expect(state.clipboardFieldDraft).toEqual(["unit", "name"]);
+    state.moveClipboardFieldTo("unit", state.clipboardFieldDraft.length - 1);
+    expect(state.clipboardFieldDraft).toEqual(["name", "unit"]);
+    await state.saveFieldSettings();
+    expect(mocks.putSetting.mock.calls.at(-1)?.[1].projects.p.selectedFieldIds)
+      .toEqual(["path", "block", "unit", "name"]);
+    expect(mocks.putSetting.mock.calls.at(-1)?.[1].projects.p.clipboardFieldIds)
+      .toEqual(["name", "unit"]);
+  });
+
+  it("drops both order lists directly at their top and bottom boundaries", async () => {
+    const state = await mount(); state.openFieldSettings(); await nextTick();
+    const fieldList = document.querySelector<HTMLElement>(".field-selector")!;
+    const extraFieldRow = fieldList.querySelector<HTMLElement>('[data-order-field-id="extra"]')!;
+    const nameFieldHandle = fieldList.querySelector<HTMLElement>(
+      '[data-order-field-id="name"] .field-drag-handle',
+    )!;
+    nameFieldHandle.dispatchEvent(new Event("dragstart", { bubbles: true, cancelable: true }));
+    extraFieldRow.dispatchEvent(new MouseEvent("drop", {
+      bubbles: true, cancelable: true, clientX: 1, clientY: 1,
+    }));
+    expect(state.selectedFieldDraft).toEqual(["path", "block", "unit", "name"]);
+
+    await nextTick();
+    fieldList.querySelector<HTMLElement>('[data-order-field-id="name"] .field-drag-handle')!
+      .dispatchEvent(new Event("dragstart", { bubbles: true, cancelable: true }));
+    fieldList.querySelector<HTMLElement>(".field-selector-head")!
+      .dispatchEvent(new MouseEvent("drop", {
+        bubbles: true, cancelable: true, clientX: 1, clientY: -1,
+      }));
+    expect(state.selectedFieldDraft).toEqual(["name", "path", "block", "unit"]);
+
+    state.selectedFieldDraft = ["path", "block", "name", "unit", "extra"];
+    await nextTick();
+    const clipboardList = document.querySelector<HTMLElement>(".clipboard-order-list")!;
+    clipboardList.querySelector<HTMLElement>('[data-order-field-id="name"] .field-drag-handle')!
+      .dispatchEvent(new Event("dragstart", { bubbles: true, cancelable: true }));
+    clipboardList.querySelector<HTMLElement>('[data-order-field-id="extra"]')!
+      .dispatchEvent(new MouseEvent("drop", {
+        bubbles: true, cancelable: true, clientX: 1, clientY: 1,
+      }));
+    expect(state.clipboardFieldDraft).toEqual(["unit", "name"]);
+
+    await nextTick();
+    clipboardList.querySelector<HTMLElement>('[data-order-field-id="name"] .field-drag-handle')!
+      .dispatchEvent(new Event("dragstart", { bubbles: true, cancelable: true }));
+    clipboardList.dispatchEvent(new MouseEvent("drop", {
+      bubbles: true, cancelable: true, clientX: 1, clientY: -1,
+    }));
+    expect(state.clipboardFieldDraft).toEqual(["name", "unit"]);
   });
 });

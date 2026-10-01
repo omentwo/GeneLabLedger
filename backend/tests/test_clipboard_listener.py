@@ -48,7 +48,8 @@ def test_start_ignores_old_contents_and_copies_are_bound_to_the_record(clipboard
     protocol.update()
     protocol.update()
     assert events == [{"type": "clipboard", "sessionId": "session-1", "projectId": "project-1",
-                       "recordId": "record-1", "sequence": 11, "eventId": 1, "text": "姓名"}]
+                       "recordId": "record-1", "sequence": 11, "eventId": 1, "text": "姓名",
+                       "manual": False}]
     assert read.call_count == 1
 
 
@@ -79,17 +80,29 @@ def test_internal_pathology_writes_and_restored_markers_are_ignored(clipboard):
     protocol.update()
     state.update(sequence=12)
     protocol.update()
+    protocol.command({"action": "accept", "sessionId": "session-1"})
     assert events == []
     state.update(sequence=13, text="外部手动复制", internal=False)
     protocol.update()
     assert events[0]["text"] == "外部手动复制"
 
 
-def test_stale_stop_cannot_affect_a_new_record(clipboard):
+def test_manual_accept_can_consume_an_unchanged_clipboard_once_per_request(clipboard):
+    protocol, _, _, events = clipboard
+    start(protocol)
+    for _ in range(2):
+        protocol.command({"action": "accept", "sessionId": "session-1"})
+    assert [event["eventId"] for event in events] == [1, 2]
+    assert all(event["manual"] for event in events)
+
+
+def test_stale_stop_or_accept_cannot_affect_a_new_record(clipboard):
     protocol, state, _, events = clipboard
     start(protocol)
     start(protocol, "session-2", "record-2")
     protocol.command({"action": "stop", "sessionId": "session-1"})
+    with pytest.raises(ValueError, match="已结束"):
+        protocol.command({"action": "accept", "sessionId": "session-1"})
     state.update(sequence=11, text="新记录信息")
     protocol.update()
     assert events[0]["recordId"] == "record-2"

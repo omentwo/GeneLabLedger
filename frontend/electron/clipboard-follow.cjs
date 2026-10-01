@@ -81,7 +81,7 @@ class ClipboardFollower {
             !Number.isSafeInteger(payload.sequence) || payload.sequence < 0
           ) return;
           this.onEvent({ ...context, type: "clipboard", text: payload.text,
-            eventId: payload.eventId, sequence: payload.sequence });
+            eventId: payload.eventId, sequence: payload.sequence, manual: payload.manual === true });
         } else if (payload.type === "error") {
           this.onEvent({ ...context, type: "stopped", reason: "剪贴板读取失败，已暂停；请继续后重新复制" });
           void this.stop(context.sessionId);
@@ -164,6 +164,13 @@ class ClipboardFollower {
       if (!this.ready) await this.starting;
       if (child === this.process && this.ready) await this.send(child, "stop", { sessionId });
     } catch { /* An exited helper cannot continue listening. */ }
+  }
+
+  async accept(sessionId) {
+    if (!this.session || this.session.sessionId !== sessionId) throw new Error("剪贴板接收会话已结束");
+    const child = await this.ensureProcess();
+    if (this.session?.sessionId !== sessionId) throw new Error("剪贴板接收会话已变化");
+    return this.send(child, "accept", { sessionId });
   }
 
   async writeInternal(text) {

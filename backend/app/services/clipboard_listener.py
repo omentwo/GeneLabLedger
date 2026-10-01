@@ -58,6 +58,11 @@ class ClipboardProtocol:
             if self.session and command.get("sessionId") == self.session["sessionId"]:
                 self.session = None
             return {}
+        if action == "accept":
+            if not self.session or command.get("sessionId") != self.session["sessionId"]:
+                raise ValueError("剪贴板接收会话已结束")
+            self.update(manual=True)
+            return {}
         if action == "write-internal":
             text = command.get("text")
             if not isinstance(text, str) or len(text) > MAX_CLIPBOARD_CHARACTERS:
@@ -67,14 +72,14 @@ class ClipboardProtocol:
             return {}
         raise ValueError("不支持的剪贴板命令")
 
-    def update(self) -> None:
+    def update(self, *, manual: bool = False) -> None:
         context = self.session
-        if not context or self.sequence() == self.last_sequence:
+        if not context or (not manual and self.sequence() == self.last_sequence):
             return
         snapshot = self.read()
         if self.session is not context:
             return
-        if snapshot.sequence == self.last_sequence:
+        if not manual and snapshot.sequence == self.last_sequence:
             return
         self.last_sequence = snapshot.sequence
         if snapshot.internal or not snapshot.text or not snapshot.text.strip():
@@ -89,6 +94,7 @@ class ClipboardProtocol:
             "sequence": snapshot.sequence,
             "eventId": self.event_id,
             "text": snapshot.text,
+            "manual": manual,
         })
 
     def fail(self, message: str) -> None:

@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import {
+  ArrowDown,
   ArrowLeft,
+  ArrowUp,
+  ChevronsDown,
+  ChevronsUp,
   Dna,
   GripVertical,
   Pencil as EditPen,
@@ -29,6 +33,8 @@ import type { FieldDefinition, ProjectRecord, RecordValidationIssue } from "@/ty
 import type { ClipboardFollowEvent, QuickEntryOpenContext } from "@/types/electron";
 import { ClipboardFollowSession } from "@/utils/clipboardFollow";
 import { desktopBridge } from "@/utils/desktop";
+import { fieldDropTargetIndex, moveArrayItem } from "@/utils/fieldOrder";
+import { gridAutoScrollVector, nextGridScrollOffset } from "@/utils/gridAutoScroll";
 import {
   QUICK_ENTRY_SETTINGS_KEY,
   QUICK_ENTRY_CREATE_FIELD_WIDTH_DEFAULT,
@@ -82,12 +88,15 @@ const fontSizeDraft = ref(QUICK_ENTRY_FONT_SIZE_DEFAULT);
 const inputHeightDraft = ref(QUICK_ENTRY_INPUT_HEIGHT_DEFAULT);
 const draggingFieldId = ref("");
 const dragOverFieldId = ref("");
+const dragFieldInsertAfter = ref(false);
 const autoAdvanceDraft = ref(true);
 const clipboardFieldDraft = ref<string[]>([]);
 const clipboardEnabledDraft = ref(false);
 const clipboardOverwriteDraft = ref(false);
 const clipboardAutoContinueDraft = ref(false);
 const draggingClipboardFieldId = ref("");
+const dragOverClipboardFieldId = ref("");
+const dragClipboardInsertAfter = ref(false);
 const clipboardEnabled = ref(false);
 const clipboardBusy = ref(false);
 const clipboardSession = reactive(new ClipboardFollowSession());
@@ -114,6 +123,7 @@ let refreshTimer: number | undefined;
 let removeOpenRequestListener: (() => void) | undefined;
 let removeFieldsChangedListener: (() => void) | undefined;
 let removeClipboardListener: (() => void) | undefined;
+let nativeUndoShortcutTarget: HTMLElement | null = null;
 const pendingProjectRefreshIds = new Set<string>();
 let projectRefreshPromise: Promise<void> | null = null;
 
@@ -191,6 +201,7 @@ function stopNativeClipboard(): void {
 }
 
 function resetClipboardFollow(message?: string): void {
+  resetNativeUndoShortcut();
   stopNativeClipboard();
   clipboardSession.reset(message);
 }
@@ -275,6 +286,7 @@ async function skipClipboardField(): Promise<void> {
 
 function undoClipboardField(): void {
   if (saving.value || clipboardBusy.value) return;
+  resetNativeUndoShortcut();
   pauseClipboardFollow();
   const change = clipboardSession.undo(entryValues);
   const field = change && fieldById.value.get(change.fieldId);
@@ -285,6 +297,19 @@ async function overwriteClipboardField(): Promise<void> {
   if (formReadonly.value || clipboardBusy.value) return;
   applyClipboardFill(clipboardSession.overwritePending(projectFields.value, entryValues));
   if (clipboardSession.status === "listening") await beginClipboardFollow(true);
+}
+
+async function acceptCurrentClipboard(): Promise<void> {
+  if (clipboardSession.status !== "listening" && !(await beginClipboardFollow(true))) return;
+  const context = clipboardSession.context;
+  if (!context) return;
+  try {
+    await bridge!.acceptCurrentClipboard(context.sessionId);
+  } catch (error) {
+    if (clipboardSession.matches(context)) {
+      pauseClipboardFollow(error instanceof Error ? error.message : "无法读取当前剪贴板");
+    }
+  }
 }
 
 async function toggleClipboardFollow(enabled: boolean): Promise<void> {
@@ -342,18 +367,20 @@ function focusPathology(): void {
   });
 }
 
-async function copyPathologyNumber(pathologyNumber: string): Promise<void> {
+async function copyPathologyNumber(pathologyNumber: string): Promise<boolean> {
   try {
     if (clipboardAvailable) {
       await bridge!.writeInternalClipboard(pathologyNumber);
-      return;
+      return true;
     }
     const clipboard = navigator.clipboard;
     if (!clipboard) throw new Error("clipboard-unavailable");
     await clipboard.writeText(pathologyNumber);
+    return true;
   } catch (error) {
     console.error("下一条病理号自动复制失败", error);
     ElMessage.warning("已进入下一条记录，但无法自动复制病理号，请手动复制");
+    return false;
   }
 }
 
@@ -684,23 +711,158 @@ function setClipboardFieldSelected(fieldId: string, selected: boolean): void {
   if (selected) clipboardFieldDraft.value.push(fieldId);
 }
 
-function moveClipboardField(fieldId: string, offset: number): void {
-  const next = [...clipboardFieldDraft.value];
-  const index = next.indexOf(fieldId);
-  const target = index + offset;
-  if (index < 0 || target < 0 || target >= next.length) return;
-  [next[index], next[target]] = [next[target]!, next[index]!];
-  clipboardFieldDraft.value = next;
+function moveDraftField(items: string[], fieldId: string, targetIndex: number): string[] {
+  const sourceIndex = items.indexOf(fieldId);
+  if (sourceIndex < 0 || targetIndex < 0 || targetIndex >= items.length) return items;
+  return moveArrayItem(items, sourceIndex, targetIndex);
 }
 
-function dropClipboardField(event: DragEvent, targetId: string): void {
+function moveSelectedFieldTo(fieldId: string, targetIndex: number): void {
+  selectedFieldDraft.value = moveDraftField(selectedFieldDraft.value, fieldId, targetIndex);
+}
+
+function moveSelectedField(fieldId: string, offset: -1 | 1): void {
+  moveSelectedFieldTo(fieldId, selectedFieldDraft.value.indexOf(fieldId) + offset);
+}
+
+function moveClipboardFieldTo(fieldId: string, targetIndex: number): void {
+  clipboardFieldDraft.value = moveDraftField(clipboardFieldDraft.value, fieldId, targetIndex);
+}
+
+function moveClipboardField(fieldId: string, offset: -1 | 1): void {
+  moveClipboardFieldTo(fieldId, clipboardFieldDraft.value.indexOf(fieldId) + offset);
+}
+
+function insertAfterPointer(event: DragEvent, row: HTMLElement): boolean {
+  const rect = row.getBoundingClientRect();
+  return event.clientY >= rect.top + rect.height / 2;
+}
+
+type QuickOrderKind = "field" | "clipboard";
+
+function orderDraft(kind: QuickOrderKind): string[] {
+  return kind === "field" ? selectedFieldDraft.value : clipboardFieldDraft.value;
+}
+
+function orderDraggingId(kind: QuickOrderKind): string {
+  return kind === "field" ? draggingFieldId.value : draggingClipboardFieldId.value;
+}
+
+function setOrderDropTarget(kind: QuickOrderKind, fieldId: string, insertAfter: boolean): void {
+  if (kind === "field") {
+    dragOverFieldId.value = fieldId;
+    dragFieldInsertAfter.value = insertAfter;
+  } else {
+    dragOverClipboardFieldId.value = fieldId;
+    dragClipboardInsertAfter.value = insertAfter;
+  }
+}
+
+function clearOrderDropTarget(kind: QuickOrderKind): void {
+  setOrderDropTarget(kind, "", false);
+}
+
+function updateOrderDropTarget(event: DragEvent, kind: QuickOrderKind): boolean {
+  const sourceId = orderDraggingId(kind);
+  const items = orderDraft(kind);
+  const sourceIndex = items.indexOf(sourceId);
+  const container = event.currentTarget;
+  if (!sourceId || sourceIndex < 0 || !(container instanceof HTMLElement)) return false;
+
   event.preventDefault();
-  const sourceId = draggingClipboardFieldId.value;
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+  const containerRect = container.getBoundingClientRect();
+  const maximumScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+  const scrollDirection = gridAutoScrollVector(
+    event.clientX,
+    event.clientY,
+    containerRect,
+    38,
+  ).vertical;
+  container.scrollTop = nextGridScrollOffset(container.scrollTop, maximumScroll, scrollDirection, 18);
+
+  const targetElement = event.target instanceof Element
+    ? event.target.closest<HTMLElement>("[data-order-field-id]")
+    : null;
+  const targetId = targetElement && container.contains(targetElement)
+    ? targetElement.dataset.orderFieldId ?? ""
+    : "";
+  const rowIndex = items.indexOf(targetId);
+  if (targetElement && rowIndex >= 0) {
+    const insertAfter = insertAfterPointer(event, targetElement);
+    const boundaryIndex = rowIndex + (insertAfter ? 1 : 0);
+    if (fieldDropTargetIndex(sourceIndex, boundaryIndex, items.length) < 0) return false;
+    setOrderDropTarget(kind, targetId, insertAfter);
+    return true;
+  }
+
+  const selectedRows = Array.from(
+    container.querySelectorAll<HTMLElement>("[data-order-field-id]"),
+  ).filter((row) => items.includes(row.dataset.orderFieldId ?? ""));
+  const firstRow = selectedRows[0];
+  const lastRow = selectedRows.at(-1);
+  if (!firstRow || !lastRow) {
+    clearOrderDropTarget(kind);
+    return false;
+  }
+  const firstRect = firstRow.getBoundingClientRect();
+  const lastRect = lastRow.getBoundingClientRect();
+  if (event.clientY <= firstRect.top) {
+    setOrderDropTarget(kind, items[0] ?? "", false);
+    return true;
+  }
+  if (event.clientY >= lastRect.bottom) {
+    setOrderDropTarget(kind, items.at(-1) ?? "", true);
+    return true;
+  }
+  clearOrderDropTarget(kind);
+  return false;
+}
+
+function leaveOrderList(event: DragEvent, kind: QuickOrderKind): void {
+  const container = event.currentTarget;
+  if (!(container instanceof HTMLElement)) return;
+  if (event.relatedTarget instanceof Node && container.contains(event.relatedTarget)) return;
+  clearOrderDropTarget(kind);
+}
+
+function applyOrderDrop(event: DragEvent, kind: QuickOrderKind): void {
+  updateOrderDropTarget(event, kind);
+  const items = orderDraft(kind);
+  const sourceIndex = items.indexOf(orderDraggingId(kind));
+  const targetId = kind === "field" ? dragOverFieldId.value : dragOverClipboardFieldId.value;
+  const insertAfter = kind === "field" ? dragFieldInsertAfter.value : dragClipboardInsertAfter.value;
+  const rowIndex = items.indexOf(targetId);
+  const boundaryIndex = rowIndex + (insertAfter ? 1 : 0);
+  const targetIndex = fieldDropTargetIndex(sourceIndex, boundaryIndex, items.length);
+  if (sourceIndex >= 0 && rowIndex >= 0 && targetIndex >= 0) {
+    const reordered = moveArrayItem(items, sourceIndex, targetIndex);
+    if (kind === "field") selectedFieldDraft.value = reordered;
+    else clipboardFieldDraft.value = reordered;
+  }
+  if (kind === "field") endFieldDrag();
+  else endClipboardFieldDrag();
+}
+
+function startClipboardFieldDrag(event: DragEvent, fieldId: string): void {
+  if (!clipboardFieldDraft.value.includes(fieldId)) return;
+  draggingClipboardFieldId.value = fieldId;
+  event.dataTransfer?.setData("text/plain", fieldId);
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+}
+
+function dragOverClipboardField(event: DragEvent): void {
+  updateOrderDropTarget(event, "clipboard");
+}
+
+function dropClipboardField(event: DragEvent): void {
+  applyOrderDrop(event, "clipboard");
+}
+
+function endClipboardFieldDrag(): void {
   draggingClipboardFieldId.value = "";
-  if (!sourceId || sourceId === targetId || !clipboardFieldDraft.value.includes(targetId)) return;
-  const next = clipboardFieldDraft.value.filter((id) => id !== sourceId);
-  next.splice(next.indexOf(targetId), 0, sourceId);
-  clipboardFieldDraft.value = next;
+  dragOverClipboardFieldId.value = "";
+  dragClipboardInsertAfter.value = false;
 }
 
 function entryFieldStyle(): Record<string, string> {
@@ -729,30 +891,18 @@ function startFieldDrag(event: DragEvent, fieldId: string): void {
   if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
 }
 
-function dragOverField(event: DragEvent, fieldId: string): void {
-  if (!draggingFieldId.value || !selectedFieldDraft.value.includes(fieldId)) return;
-  event.preventDefault();
-  dragOverFieldId.value = fieldId;
-  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+function dragOverField(event: DragEvent): void {
+  updateOrderDropTarget(event, "field");
 }
 
-function dropField(event: DragEvent, targetFieldId: string): void {
-  event.preventDefault();
-  const sourceFieldId = draggingFieldId.value || event.dataTransfer?.getData("text/plain") || "";
-  if (!sourceFieldId || sourceFieldId === targetFieldId) {
-    endFieldDrag();
-    return;
-  }
-  const next = selectedFieldDraft.value.filter((fieldId) => fieldId !== sourceFieldId);
-  const targetIndex = next.indexOf(targetFieldId);
-  if (targetIndex >= 0) next.splice(targetIndex, 0, sourceFieldId);
-  selectedFieldDraft.value = next;
-  endFieldDrag();
+function dropField(event: DragEvent): void {
+  applyOrderDrop(event, "field");
 }
 
 function endFieldDrag(): void {
   draggingFieldId.value = "";
   dragOverFieldId.value = "";
+  dragFieldInsertAfter.value = false;
 }
 
 function selectAllFields(): void {
@@ -970,7 +1120,10 @@ async function saveExistingRecord(): Promise<ProjectRecord | undefined> {
       loadRecordIntoForm(nextRecord);
       await scrollRecordIntoView(nextRecord.id);
       focusPathology();
-      await copyPathologyNumber(nextRecord.pathology_number);
+      const copied = await copyPathologyNumber(nextRecord.pathology_number);
+      if (copied) {
+        ElMessage.success(`已进入下一条记录，病理号 ${nextRecord.pathology_number} 已写入剪贴板`);
+      }
       if (clipboardEnabled.value && fieldSettings.value.clipboardAutoContinue) return nextRecord;
     }
   } else if (fieldSettings.value.autoAdvanceAfterUpdate && currentIndex >= 0) {
@@ -1035,12 +1188,58 @@ function handleEntryKeydown(event: KeyboardEvent, field: FieldDefinition): void 
     ?.focus();
 }
 
+function resetNativeUndoShortcut(): void {
+  nativeUndoShortcutTarget = null;
+}
+
+function shortcutEditingTarget(target: EventTarget | null): HTMLElement | null {
+  if (!(target instanceof HTMLElement)) return null;
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable) {
+    return target;
+  }
+  return target.closest<HTMLElement>("[contenteditable='true']");
+}
+
+function handleQuickEntryFocusIn(): void {
+  resetNativeUndoShortcut();
+}
+
+function handleQuickEntryInput(event: Event): void {
+  if (!nativeUndoShortcutTarget || event.target !== nativeUndoShortcutTarget) return;
+  if (event instanceof InputEvent && event.inputType === "historyUndo") return;
+  resetNativeUndoShortcut();
+}
+
 function handleQuickEntryShortcut(event: KeyboardEvent): void {
   if (event.defaultPrevented || event.isComposing || fieldDialogVisible.value) return;
   if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
     event.preventDefault();
     void saveEntry();
+    return;
   }
+  const isUndoShortcut = (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey &&
+    event.key.toLocaleLowerCase() === "z";
+  if (!isUndoShortcut) {
+    if (!["Alt", "Control", "Meta", "Shift"].includes(event.key)) resetNativeUndoShortcut();
+    return;
+  }
+  if (!activeRecord.value || !clipboardEnabled.value || !clipboardSession.history.length) {
+    resetNativeUndoShortcut();
+    return;
+  }
+
+  const editingTarget = shortcutEditingTarget(event.target);
+  if (editingTarget) {
+    if (nativeUndoShortcutTarget !== editingTarget || event.repeat) {
+      nativeUndoShortcutTarget = editingTarget;
+      return;
+    }
+    resetNativeUndoShortcut();
+  } else {
+    resetNativeUndoShortcut();
+  }
+  event.preventDefault();
+  undoClipboardField();
 }
 
 async function returnToMain(): Promise<void> {
@@ -1100,6 +1299,8 @@ onMounted(() => {
     if (clipboardAvailable) removeClipboardListener = bridge.onClipboardFollowEvent(handleClipboardEvent);
   }
   window.addEventListener("focus", refreshOnFocus);
+  window.addEventListener("focusin", handleQuickEntryFocusIn);
+  window.addEventListener("input", handleQuickEntryInput);
   window.addEventListener("keydown", handleQuickEntryShortcut);
   refreshTimer = window.setInterval(refreshRecordsPeriodically, 30_000);
   void initialize().finally(() => {
@@ -1120,6 +1321,8 @@ onBeforeUnmount(() => {
   removeFieldsChangedListener?.();
   removeFieldsChangedListener = undefined;
   window.removeEventListener("focus", refreshOnFocus);
+  window.removeEventListener("focusin", handleQuickEntryFocusIn);
+  window.removeEventListener("input", handleQuickEntryInput);
   window.removeEventListener("keydown", handleQuickEntryShortcut);
   if (refreshTimer !== undefined) window.clearInterval(refreshTimer);
 });
@@ -1280,6 +1483,11 @@ onBeforeUnmount(() => {
                 >{{ clipboardSession.status === 'paused' ? '继续接收' : '确认本条并开始' }}</el-button>
                 <el-button v-if="clipboardSession.status === 'listening'" size="small" @click="pauseClipboardFollow()">暂停</el-button>
                 <el-button
+                  size="small"
+                  :disabled="formReadonly || clipboardBusy || clipboardSession.status === 'waiting' || clipboardSession.status === 'complete'"
+                  @click="acceptCurrentClipboard"
+                >粘贴</el-button>
+                <el-button
                   size="small" :disabled="formReadonly || clipboardBusy || !clipboardSession.nextFieldId"
                   @click="skipClipboardField"
                 >跳过当前项</el-button>
@@ -1290,8 +1498,8 @@ onBeforeUnmount(() => {
                 <el-button
                   size="small" :disabled="formReadonly || clipboardBusy || !clipboardSession.history.length"
                   @click="undoClipboardField"
-                >撤回上一步</el-button>
-                <el-button size="small" :disabled="formReadonly || clipboardBusy" @click="beginClipboardFollow(false)">重置本条顺序</el-button>
+                >撤回至上一项</el-button>
+                <el-button size="small" :disabled="formReadonly || clipboardBusy" @click="beginClipboardFollow(false)">重新开始录入</el-button>
               </div>
             </template>
           </div>
@@ -1321,7 +1529,7 @@ onBeforeUnmount(() => {
             @submit.prevent
           >
             <el-form-item
-              v-for="field in entryFields"
+              v-for="(field, fieldIndex) in entryFields"
               :key="field.id"
               :style="entryFieldStyle()"
               :class="{ 'clipboard-next-field': clipboardEnabled && clipboardNextField?.id === field.id, 'clipboard-filled-field': clipboardEnabled && clipboardSession.lastFilledFieldId === field.id }"
@@ -1329,6 +1537,7 @@ onBeforeUnmount(() => {
               <template #label>
                 <span class="entry-field-label">
                   <span>{{ field.label }}</span>
+                  <span class="entry-field-sequence">({{ fieldIndex + 1 }}/{{ entryFields.length }})</span>
                   <span v-if="clipboardEnabled && clipboardNextField?.id === field.id" class="clipboard-field-mark">当前项</span>
                   <span v-if="isMandatoryQuickEntryField(field)" class="required-mark">必填</span>
                   <span
@@ -1384,7 +1593,7 @@ onBeforeUnmount(() => {
         </el-scrollbar>
 
         <footer class="entry-footer">
-          <span>Ctrl+Enter 快速保存</span>
+          <span>Ctrl+Enter 快速保存 · Ctrl+Z 撤回（输入框内连续按两次）</span>
           <div>
             <el-button :disabled="formReadonly" @click="restoreEntry">
               {{ activeRecord ? '还原修改' : '清空' }}
@@ -1410,7 +1619,7 @@ onBeforeUnmount(() => {
       destroy-on-close
     >
       <p class="field-dialog-note">
-        “快捷录入”决定修改表单中显示哪些表头；字体大小、输入框高度和宽度按项目保存。
+        “快捷录入”决定修改表单中显示哪些表头；拖到列表顶部或底部可直接移到首尾，靠近边缘时会自动滚动，字体和尺寸按项目保存。
       </p>
       <div class="field-dialog-toolbar">
         <el-button size="small" @click="selectAllFields">全部选择</el-button>
@@ -1471,7 +1680,12 @@ onBeforeUnmount(() => {
           <span>px</span>
         </span>
       </div>
-      <div class="field-selector">
+      <div
+        class="field-selector"
+        @dragover="dragOverField"
+        @dragleave="leaveOrderList($event, 'field')"
+        @drop="dropField"
+      >
         <div class="field-selector-head">
           <span>表头与顺序</span>
           <span>快捷录入</span>
@@ -1480,24 +1694,54 @@ onBeforeUnmount(() => {
           v-for="field in fieldDialogFields"
           :key="field.id"
           class="field-selector-row"
+          :data-order-field-id="field.id"
           :class="{
             'is-dragging': draggingFieldId === field.id,
-            'is-drag-over': dragOverFieldId === field.id,
+            'is-drag-before': dragOverFieldId === field.id && !dragFieldInsertAfter,
+            'is-drag-after': dragOverFieldId === field.id && dragFieldInsertAfter,
           }"
-          @dragover="dragOverField($event, field.id)"
-          @drop="dropField($event, field.id)"
         >
           <span class="field-selector-name">
+            <span v-if="draftIncludes(selectedFieldDraft, field.id)" class="quick-order-actions">
+              <button
+                type="button"
+                class="field-drag-handle"
+                draggable="true"
+                title="拖动调整顺序"
+                :aria-label="`拖动表头“${field.label}”调整顺序`"
+                @dragstart="startFieldDrag($event, field.id)"
+                @dragend="endFieldDrag"
+              ><GripVertical :size="16" aria-hidden="true" /></button>
+              <el-button
+                link :icon="ChevronsUp"
+                :disabled="selectedFieldDraft.indexOf(field.id) === 0"
+                :aria-label="`将表头“${field.label}”移到最前`" title="移到最前"
+                @click="moveSelectedFieldTo(field.id, 0)"
+              />
+              <el-button
+                link :icon="ArrowUp"
+                :disabled="selectedFieldDraft.indexOf(field.id) === 0"
+                :aria-label="`将表头“${field.label}”向前移动一位`" title="向前移动"
+                @click="moveSelectedField(field.id, -1)"
+              />
+              <el-button
+                link :icon="ArrowDown"
+                :disabled="selectedFieldDraft.indexOf(field.id) === selectedFieldDraft.length - 1"
+                :aria-label="`将表头“${field.label}”向后移动一位`" title="向后移动"
+                @click="moveSelectedField(field.id, 1)"
+              />
+              <el-button
+                link :icon="ChevronsDown"
+                :disabled="selectedFieldDraft.indexOf(field.id) === selectedFieldDraft.length - 1"
+                :aria-label="`将表头“${field.label}”移到最后`" title="移到最后"
+                @click="moveSelectedFieldTo(field.id, selectedFieldDraft.length - 1)"
+              />
+            </span>
             <span
               v-if="draftIncludes(selectedFieldDraft, field.id)"
-              class="field-drag-handle"
-              draggable="true"
-              title="拖动调整顺序"
-              aria-label="拖动调整表头顺序"
-              @dragstart="startFieldDrag($event, field.id)"
-              @dragend="endFieldDrag"
-            ><GripVertical :size="16" /></span>
-            {{ field.label }}
+              class="field-order-number"
+            >{{ selectedFieldDraft.indexOf(field.id) + 1 }}.</span>
+            <span>{{ field.label }}</span>
             <small v-if="isMandatoryQuickEntryField(field)">必选</small>
           </span>
           <el-checkbox
@@ -1510,31 +1754,62 @@ onBeforeUnmount(() => {
       </div>
       <section class="clipboard-order-settings">
         <h3>剪贴板粘贴顺序</h3>
-        <p class="field-dialog-note">只从上方已选的可见表头中选择，病理号和蜡块号用于确认记录。拖动或点击箭头调整顺序，不改变表单显示顺序。</p>
+        <p class="field-dialog-note">只从上方已选的可见表头中选择。拖到列表顶部或底部可直接移到首尾，靠近边缘时会自动滚动，也可使用首尾和上下按钮；不改变表单显示顺序。</p>
         <div class="clipboard-options">
           <el-checkbox v-model="clipboardEnabledDraft" :disabled="!clipboardAvailable">默认开启剪贴板跟随</el-checkbox>
           <el-checkbox v-model="clipboardOverwriteDraft">允许覆盖已有字段内容</el-checkbox>
           <el-checkbox v-model="clipboardAutoContinueDraft">保存进入下一条后自动开始接收</el-checkbox>
         </div>
         <div
-          v-for="field in clipboardDialogFields" :key="field.id" class="clipboard-order-row"
-          @dragover="draggingClipboardFieldId && clipboardFieldDraft.includes(field.id) && $event.preventDefault()"
-          @drop="dropClipboardField($event, field.id)"
+          class="clipboard-order-list"
+          @dragover="dragOverClipboardField"
+          @dragleave="leaveOrderList($event, 'clipboard')"
+          @drop="dropClipboardField"
         >
-          <span
-            v-if="clipboardFieldDraft.includes(field.id)" class="field-drag-handle" draggable="true"
-            aria-label="拖动调整粘贴顺序"
-            @dragstart="draggingClipboardFieldId = field.id; $event.dataTransfer?.setData('text/plain', field.id)"
-            @dragend="draggingClipboardFieldId = ''"
-          ><GripVertical :size="16" /></span>
-          <el-checkbox
-            :model-value="clipboardFieldDraft.includes(field.id)"
-            @change="setClipboardFieldSelected(field.id, Boolean($event))"
-          >{{ clipboardFieldDraft.includes(field.id) ? `${clipboardFieldDraft.indexOf(field.id) + 1}. ` : '' }}{{ field.label }}</el-checkbox>
-          <span v-if="clipboardFieldDraft.includes(field.id)" class="clipboard-order-arrows">
-            <el-button size="small" :disabled="clipboardFieldDraft.indexOf(field.id) === 0" :aria-label="`上移${field.label}`" @click="moveClipboardField(field.id, -1)">↑</el-button>
-            <el-button size="small" :disabled="clipboardFieldDraft.indexOf(field.id) === clipboardFieldDraft.length - 1" :aria-label="`下移${field.label}`" @click="moveClipboardField(field.id, 1)">↓</el-button>
-          </span>
+          <div
+            v-for="field in clipboardDialogFields" :key="field.id" class="clipboard-order-row"
+            :data-order-field-id="field.id"
+            :class="{
+              'is-dragging': draggingClipboardFieldId === field.id,
+              'is-drag-before': dragOverClipboardFieldId === field.id && !dragClipboardInsertAfter,
+              'is-drag-after': dragOverClipboardFieldId === field.id && dragClipboardInsertAfter,
+            }"
+          >
+            <button
+              v-if="clipboardFieldDraft.includes(field.id)" type="button"
+              class="field-drag-handle" draggable="true"
+              :aria-label="`拖动“${field.label}”调整粘贴顺序`"
+              title="拖动调整顺序"
+              @dragstart="startClipboardFieldDrag($event, field.id)"
+              @dragend="endClipboardFieldDrag"
+            ><GripVertical :size="16" aria-hidden="true" /></button>
+            <el-checkbox
+              :model-value="clipboardFieldDraft.includes(field.id)"
+              @change="setClipboardFieldSelected(field.id, Boolean($event))"
+            >{{ clipboardFieldDraft.includes(field.id) ? `${clipboardFieldDraft.indexOf(field.id) + 1}. ` : '' }}{{ field.label }}</el-checkbox>
+            <span v-if="clipboardFieldDraft.includes(field.id)" class="clipboard-order-arrows">
+              <el-button
+                link :icon="ChevronsUp" :disabled="clipboardFieldDraft.indexOf(field.id) === 0"
+                :aria-label="`将“${field.label}”移到最前`" title="移到最前"
+                @click="moveClipboardFieldTo(field.id, 0)"
+              />
+              <el-button
+                link :icon="ArrowUp" :disabled="clipboardFieldDraft.indexOf(field.id) === 0"
+                :aria-label="`将“${field.label}”向前移动一位`" title="向前移动"
+                @click="moveClipboardField(field.id, -1)"
+              />
+              <el-button
+                link :icon="ArrowDown" :disabled="clipboardFieldDraft.indexOf(field.id) === clipboardFieldDraft.length - 1"
+                :aria-label="`将“${field.label}”向后移动一位`" title="向后移动"
+                @click="moveClipboardField(field.id, 1)"
+              />
+              <el-button
+                link :icon="ChevronsDown" :disabled="clipboardFieldDraft.indexOf(field.id) === clipboardFieldDraft.length - 1"
+                :aria-label="`将“${field.label}”移到最后`" title="移到最后"
+                @click="moveClipboardFieldTo(field.id, clipboardFieldDraft.length - 1)"
+              />
+            </span>
+          </div>
         </div>
         <p v-if="!clipboardDialogFields.length" class="field-dialog-note">请先选择至少一个可见的业务表头。</p>
       </section>
@@ -1576,7 +1851,20 @@ onBeforeUnmount(() => {
 .clipboard-order-settings { margin-top: 18px; border-top: 1px solid var(--app-border); padding-top: 10px; }
 .clipboard-order-settings h3 { margin: 0 0 8px; font-size: 15px; }
 .clipboard-options { margin-bottom: 8px; }
-.clipboard-order-row { min-height: 38px; border-bottom: 1px solid var(--app-border-light); padding: 4px; }
+.clipboard-order-list {
+  max-height: min(360px, 45vh);
+  overflow: auto;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+}
+.clipboard-order-row {
+  min-height: 38px;
+  border-bottom: 1px solid var(--app-border-light);
+  padding: 4px;
+  transition: background-color 120ms ease, box-shadow 120ms ease;
+}
+.clipboard-order-row:last-child { border-bottom: 0; }
+.clipboard-order-row.is-dragging { opacity: 0.45; }
 .clipboard-order-arrows { margin-left: auto; display: flex; gap: 4px; }
 .clipboard-order-arrows :deep(.el-button + .el-button) { margin-left: 0; }
 .quick-entry-page {
@@ -1915,6 +2203,12 @@ onBeforeUnmount(() => {
   line-height: 1.35;
 }
 
+.entry-field-sequence {
+  color: var(--app-muted);
+  font-size: calc(var(--quick-entry-font-size, 14px) - 2px);
+  font-weight: 500;
+}
+
 .required-mark,
 .pinned-mark {
   border-radius: 999px;
@@ -2063,14 +2357,24 @@ onBeforeUnmount(() => {
   opacity: 0.45;
 }
 
-.field-selector-row.is-drag-over {
+.field-selector-row.is-drag-before,
+.clipboard-order-row.is-drag-before {
   background: var(--app-primary-soft);
-  box-shadow: inset 0 2px var(--app-primary);
+  box-shadow: inset 0 3px var(--app-primary);
+}
+
+.field-selector-row.is-drag-after,
+.clipboard-order-row.is-drag-after {
+  background: var(--app-primary-soft);
+  box-shadow: inset 0 -3px var(--app-primary);
 }
 
 .field-selector-name {
+  display: flex;
   min-width: 0;
   overflow: hidden;
+  align-items: center;
+  gap: 4px;
   font-size: var(--quick-entry-font-size, 14px);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2084,15 +2388,43 @@ onBeforeUnmount(() => {
 
 .field-drag-handle {
   display: inline-flex;
+  width: 26px;
+  height: 30px;
   align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 5px;
   color: var(--app-muted);
+  background: transparent;
   cursor: grab;
   margin-right: 4px;
+  padding: 0;
   vertical-align: middle;
+}
+
+.field-drag-handle:hover,
+.field-drag-handle:focus-visible {
+  color: var(--app-primary-text);
+  background: var(--app-primary-soft);
 }
 
 .field-drag-handle:active {
   cursor: grabbing;
+}
+
+.quick-order-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+}
+
+.quick-order-actions :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.field-order-number {
+  color: var(--app-muted);
+  font-size: calc(var(--quick-entry-font-size, 14px) - 1px);
 }
 
 .unified-size-controls {

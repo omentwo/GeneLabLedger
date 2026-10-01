@@ -13,7 +13,7 @@ const fields = [field("name"), field("unit"), field("date", { data_type: "date" 
   ] }), field("hidden", { hidden: true }), field("path", { system_key: "pathology_number" })];
 const context: ClipboardFollowContext = { sessionId: "s", projectId: "p", recordId: "r" };
 function event(text: string, eventId = 1, extra: Partial<ClipboardFollowContext> = {}): Extract<ClipboardFollowEvent, { type: "clipboard" }> {
-  return { ...context, ...extra, type: "clipboard", text, eventId, sequence: eventId + 10 };
+  return { ...context, ...extra, type: "clipboard", text, eventId, sequence: eventId + 10, manual: false };
 }
 function apply(session: ClipboardFollowSession, text: string, values: Record<string, string>, id = 1, overwrite = false) {
   const result = session.receive(event(text, id), fields, values, overwrite);
@@ -86,6 +86,17 @@ describe("clipboard follow record sessions", () => {
     expect(session.undo(values)).toBeNull();
     expect(values.name).toBe("手动值");
     expect(session.message).toContain("手动修改");
+  });
+
+  it("undo accepts a field already restored to its previous value by native input undo", () => {
+    const session = new ClipboardFollowSession();
+    const values = { name: "原姓名" };
+    session.start(context, ["name"]);
+    apply(session, "自动值", values, 1, true);
+    values.name = "原姓名";
+    expect(session.undo(values)).toEqual({ fieldId: "name", value: "原姓名" });
+    expect(session.nextFieldId).toBe("name");
+    expect(session.history).toEqual([]);
   });
 
   it("skip and undo skip preserve the original field contents", () => {

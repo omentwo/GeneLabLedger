@@ -539,6 +539,10 @@ function registerDesktopHandlers() {
     assertQuickEntryIpcSender(event);
     return clipboardFollower.stop(sessionId);
   });
+  ipcMain.handle("gene-ledger:clipboard-follow-accept", (event, sessionId) => {
+    assertQuickEntryIpcSender(event);
+    return clipboardFollower.accept(sessionId);
+  });
   ipcMain.handle("gene-ledger:clipboard-write-internal", (event, text) => {
     assertQuickEntryIpcSender(event);
     if (process.platform !== "win32") throw new Error("此剪贴板服务仅支持 Windows");

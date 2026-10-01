@@ -130,15 +130,19 @@ export class ClipboardFollowSession {
   undo(values: Record<string, string>): { fieldId: string; value: string } | null {
     const step = this.history[this.history.length - 1];
     if (!step) return null;
-    if (step.filled !== undefined && values[step.fieldId] !== step.filled) {
-      this.pause("上一项已手动修改，保留该修改；可重置顺序后重新录入");
+    if (
+      step.filled !== undefined &&
+      values[step.fieldId] !== step.filled &&
+      values[step.fieldId] !== step.previous
+    ) {
+      this.pause("上一项已手动修改，保留该修改；可重新开始录入");
       return null;
     }
     this.history.pop();
     this.index = step.index;
     this.pending = null;
     this.lastFilledFieldId = "";
-    this.pause("已撤回上一步，继续后重新复制");
+    this.pause("已撤回至上一项，继续后重新复制");
     return step.previous === undefined ? null : { fieldId: step.fieldId, value: step.previous };
   }
 }

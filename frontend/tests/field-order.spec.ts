@@ -12,6 +12,10 @@ describe("field ordering", () => {
   it("supports moving directly to the first or last position", () => {
     expect(moveArrayItem(["a", "b", "c", "d"], 1, 3)).toEqual(["a", "c", "d", "b"]);
     expect(moveArrayItem(["a", "b", "c", "d"], 2, 0)).toEqual(["c", "a", "b", "d"]);
+    expect(moveArrayItem(["a", "b", "c", "d"], 2, fieldDropTargetIndex(2, 0, 4)))
+      .toEqual(["c", "a", "b", "d"]);
+    expect(moveArrayItem(["a", "b", "c", "d"], 1, fieldDropTargetIndex(1, 4, 4)))
+      .toEqual(["a", "c", "d", "b"]);
   });
 
   it("rejects invalid drag boundaries without corrupting the order", () => {
