@@ -232,7 +232,6 @@ class ProjectForceDeleteResponse(BaseModel):
     deleted_report_templates: int
     deleted_report_versions: int
     deleted_report_mappings: int
-    updated_auto_export_tasks: int
     removed_template_directories: int
     cleanup_warnings: list[str] = Field(default_factory=list)
 
@@ -989,93 +988,3 @@ class WorkbookExportCreate(BaseModel):
         if cell_count > 2_000_000:
             raise ValueError("导出内容过大，请缩小项目或时间范围")
         return self
-
-
-class AutoExportTaskInput(BaseModel):
-    name: str = Field(min_length=1, max_length=160)
-    project_ids: list[str] = Field(min_length=1)
-    output_directory: str = Field(min_length=1, max_length=600)
-    file_format: Literal["xlsx"] = "xlsx"
-    schedule_type: Literal["preset", "cron"] = "preset"
-    preset: Literal["hourly", "daily", "weekly", "monthly"] = "daily"
-    run_time: str = "18:00"
-    hourly_minute: int = Field(default=0, ge=0, le=59)
-    weekday: int = Field(default=0, ge=0, le=6)
-    month_day: int = Field(default=1, ge=1, le=31)
-    cron_expression: str | None = Field(default=None, max_length=160)
-    failure_retries: int = Field(default=0, ge=0, le=10)
-    retention_count: int | None = Field(default=10, ge=1, le=10000)
-    enabled: bool = True
-
-    @field_validator("name", "output_directory")
-    @classmethod
-    def clean_required_text(cls, value: str) -> str:
-        return value.strip()
-
-    @field_validator("project_ids")
-    @classmethod
-    def unique_project_ids(cls, values: list[str]) -> list[str]:
-        return list(dict.fromkeys(values))
-
-    @field_validator("cron_expression")
-    @classmethod
-    def clean_cron_expression(cls, value: str | None) -> str | None:
-        return value.strip() if value and value.strip() else None
-
-    @field_validator("run_time")
-    @classmethod
-    def validate_run_time(cls, value: str) -> str:
-        try:
-            hour_text, minute_text = value.split(":", 1)
-            hour, minute = int(hour_text), int(minute_text)
-        except (TypeError, ValueError) as error:
-            raise ValueError("执行时间格式应为 HH:MM") from error
-        if not 0 <= hour <= 23 or not 0 <= minute <= 59:
-            raise ValueError("执行时间格式应为 HH:MM")
-        return f"{hour:02d}:{minute:02d}"
-
-    @model_validator(mode="after")
-    def validate_schedule(self) -> AutoExportTaskInput:
-        if self.schedule_type == "cron" and not self.cron_expression:
-            raise ValueError("使用 Cron 周期时必须填写 Cron 表达式")
-        return self
-
-
-class AutoExportRunRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: str
-    task_id: str
-    trigger: str
-    status: str
-    attempt_count: int
-    file_path: str | None
-    error_message: str | None
-    started_at: datetime
-    finished_at: datetime | None
-
-
-class AutoExportTaskRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: str
-    name: str
-    project_ids: list[str]
-    output_directory: str
-    file_format: str
-    schedule_type: str
-    preset: str
-    run_time: str
-    hourly_minute: int
-    weekday: int
-    month_day: int
-    cron_expression: str | None
-    failure_retries: int
-    retention_count: int | None
-    enabled: bool
-    next_run_at: datetime | None
-    last_run_at: datetime | None
-    last_status: str | None
-    last_message: str | None
-    created_at: datetime
-    updated_at: datetime

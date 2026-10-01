@@ -3,6 +3,8 @@ backend/.venv/
 backend/.uv-cache/
 backend/**/__pycache__/
 backend/.pytest_cache/
+backend/.pytest-*/
+backend/.codex-pytest-*/
 backend/.test-runtime/
 backend/.ruff_cache/
 backend/*.egg-info/
@@ -17,6 +19,7 @@ backend/tools/
 *.sqlite3
 
 # Frontend dependencies and build output
+node_modules/
 frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo

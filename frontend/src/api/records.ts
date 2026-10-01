@@ -62,13 +62,14 @@ export function queryRecords(
   });
 }
 
+/** Returns every ID in the query scope, independently of record pagination. */
 export function queryRecordIds(
-  query: RecordComplexQuery,
+  query: Omit<RecordComplexQuery, "limit" | "offset">,
   signal?: AbortSignal,
 ): Promise<RecordIdList> {
   return apiRequest<RecordIdList>("/records/query/ids", {
     method: "POST",
-    body: jsonBody(query),
+    body: jsonBody(Object.fromEntries(Object.entries(query).filter(([key]) => key !== "limit" && key !== "offset"))),
     signal,
   });
 }
@@ -106,6 +107,8 @@ export function commitCellBatch(
   });
 }
 
+export const FIND_REPLACE_RECORD_LIMIT = 20_000;
+
 export function previewReplace(payload: {
   project_id: string;
   field_id: string;
@@ -115,6 +118,9 @@ export function previewReplace(payload: {
   match_mode: "substring" | "whole";
   case_sensitive: boolean;
 }): Promise<RecordReplacePreview> {
+  if (payload.record_ids.length > FIND_REPLACE_RECORD_LIMIT) {
+    return Promise.reject(new Error(`当前范围有 ${payload.record_ids.length.toLocaleString("zh-CN")} 条记录，单次查找替换最多 ${FIND_REPLACE_RECORD_LIMIT.toLocaleString("zh-CN")} 条；请缩小筛选或选中范围后重试。`));
+  }
   return apiRequest<RecordReplacePreview>("/records/replace/preview", {
     method: "POST",
     body: jsonBody(payload),

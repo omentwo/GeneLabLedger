@@ -38,6 +38,7 @@ import type { FieldDefinition, ProjectRecord, RecordValidationIssue } from "@/ty
 import type { ClipboardFollowEvent, QuickEntryOpenContext } from "@/types/electron";
 import { ClipboardFollowSession } from "@/utils/clipboardFollow";
 import { desktopBridge } from "@/utils/desktop";
+import { registerWindowCloseGuard } from "@/utils/windowCloseGuard";
 import { fieldDropTargetIndex, moveArrayItem } from "@/utils/fieldOrder";
 import { gridAutoScrollVector, nextGridScrollOffset } from "@/utils/gridAutoScroll";
 import {
@@ -82,6 +83,7 @@ const recordPaneCollapsed = ref(false);
 const focusMode = ref(false);
 const initializing = ref(false);
 const saving = ref(false);
+const preparingClose = ref(false);
 const settingsSaving = ref(false);
 const initializationError = ref("");
 const entryValues = reactive<Record<string, string>>({});
@@ -1114,7 +1116,7 @@ async function saveNewRecord(): Promise<ProjectRecord | undefined> {
   return created;
 }
 
-async function saveExistingRecord(): Promise<ProjectRecord | undefined> {
+async function saveExistingRecord(advance = true): Promise<ProjectRecord | undefined> {
   const record = activeRecord.value;
   if (!record) return;
   if (activeRecordUnavailable.value || record.report_generated) {
@@ -1167,7 +1169,7 @@ async function saveExistingRecord(): Promise<ProjectRecord | undefined> {
   await notifyMain(record.id, "update");
   resetClipboardFollow("本条已保存，确认下一条后可再次接收");
   ElMessage.success(`病理号 ${updated?.pathology_number ?? record.pathology_number} 已更新`);
-  if (fieldSettings.value.autoAdvanceAfterUpdate && nextRecordId) {
+  if (advance && fieldSettings.value.autoAdvanceAfterUpdate && nextRecordId) {
     const nextRecord = unreportedRecords.value.find((item) => item.id === nextRecordId);
     if (nextRecord) {
       loadRecordIntoForm(nextRecord);
@@ -1179,7 +1181,7 @@ async function saveExistingRecord(): Promise<ProjectRecord | undefined> {
       }
       if (clipboardEnabled.value && fieldSettings.value.clipboardAutoContinue) return nextRecord;
     }
-  } else if (fieldSettings.value.autoAdvanceAfterUpdate && currentIndex >= 0) {
+  } else if (advance && fieldSettings.value.autoAdvanceAfterUpdate && currentIndex >= 0) {
     ElMessage.info("已到最后一条记录");
   }
 }
@@ -1191,7 +1193,7 @@ function handleCombinedPathologyKeydown(event: KeyboardEvent): void {
 }
 
 async function saveEntry(): Promise<void> {
-  if (saving.value) return;
+  if (saving.value || preparingClose.value) return;
   pauseClipboardFollow("正在保存，接收已暂停");
   saving.value = true;
   let nextClipboardRecord: ProjectRecord | undefined;
@@ -1240,6 +1242,35 @@ function handleEntryKeydown(event: KeyboardEvent, field: FieldDefinition): void 
     )
     ?.focus();
 }
+
+let resumeClipboardAfterCloseCancel = false;
+const removeCloseGuard = registerWindowCloseGuard({
+  state: () => ({ dirty: isDirty.value, busy: saving.value || settingsSaving.value || initializing.value || clipboardBusy.value || recordsLoading.value || Boolean(projectRefreshPromise) }),
+  prepare: () => {
+    preparingClose.value = true;
+    resumeClipboardAfterCloseCancel = clipboardSession.status === "listening";
+    pauseClipboardFollow("正在确认关闭，接收已暂停");
+  },
+  release: () => {
+    preparingClose.value = false;
+    if (resumeClipboardAfterCloseCancel && clipboardSession.status === "paused") void beginClipboardFollow(true);
+    resumeClipboardAfterCloseCancel = false;
+  },
+  save: async () => {
+    if (saving.value) return false;
+    saving.value = true;
+    try {
+      if (activeRecord.value) await saveExistingRecord(false);
+      else await saveNewRecord();
+      return !isDirty.value;
+    } catch (error) {
+      ElMessage.error(error instanceof Error ? error.message : "保存失败，草稿已保留");
+      return false;
+    } finally {
+      saving.value = false;
+    }
+  },
+});
 
 function resetNativeUndoShortcut(): void {
   nativeUndoShortcutTarget = null;
@@ -1334,10 +1365,12 @@ async function initialize(): Promise<void> {
 }
 
 function refreshOnFocus(): void {
+  if (preparingClose.value) return;
   if (activeProjectId.value) void refreshProjectData(activeProjectId.value);
 }
 
 function refreshRecordsPeriodically(): void {
+  if (preparingClose.value) return;
   if (activeProjectId.value) void loadUnreportedRecords(activeProjectId.value);
 }
 
@@ -1367,6 +1400,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  removeCloseGuard();
   resetClipboardFollow();
   removeClipboardListener?.();
   recordsLoadSequence += 1;
@@ -1924,18 +1958,18 @@ onBeforeUnmount(() => {
   flex: 0 0 auto;
   min-width: 0;
   align-items: center;
-  gap: 8px;
-  margin: 6px 8px 0;
-  padding: 5px 7px;
+  gap: var(--app-space-2);
+  margin: var(--app-space-2) var(--app-space-2) 0;
+  padding: var(--app-space-1) var(--app-space-2);
   border: 1px solid var(--app-border);
-  border-radius: 8px;
+  border-radius: var(--app-radius-control);
 }
 .clipboard-follow-panel.is-listening { border-color: var(--app-primary); }
 .clipboard-follow-heading, .clipboard-toolbar, .clipboard-options, .clipboard-order-row {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--app-space-2);
 }
 .clipboard-follow-heading { flex: 0 0 auto; flex-wrap: nowrap; }
 .clipboard-toolbar {
@@ -1943,9 +1977,9 @@ onBeforeUnmount(() => {
   max-width: 62%;
   flex: 0 1 auto;
   flex-wrap: nowrap;
-  gap: 5px;
+  gap: var(--app-space-1);
   overflow-x: auto;
-  padding-bottom: 2px;
+  padding-bottom: var(--app-space-optical);
 }
 .clipboard-toolbar :deep(.el-button) { flex: 0 0 auto; }
 .clipboard-toolbar :deep(.el-button + .el-button) { margin-left: 0; }
@@ -1955,7 +1989,7 @@ onBeforeUnmount(() => {
   min-width: 120px;
   flex: 1 1 220px;
   align-items: center;
-  gap: 7px;
+  gap: var(--app-space-2);
 }
 .clipboard-progress strong {
   flex: 0 0 auto;
@@ -1970,26 +2004,26 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 .clipboard-field-mark { color: var(--app-primary-text); font-size: 11px; }
-.clipboard-next-field .entry-field { outline: 2px solid var(--app-primary-border); border-radius: 5px; }
-.clipboard-filled-field .entry-field { background: var(--app-primary-soft); border-radius: 5px; }
-.clipboard-order-settings { margin-top: 18px; border-top: 1px solid var(--app-border); padding-top: 10px; }
-.clipboard-order-settings h3 { margin: 0 0 8px; font-size: 15px; }
-.clipboard-options { margin-bottom: 8px; }
+.clipboard-next-field .entry-field { outline: 2px solid var(--app-primary-border); border-radius: var(--app-radius-control); }
+.clipboard-filled-field .entry-field { background: var(--app-primary-soft); border-radius: var(--app-radius-control); }
+.clipboard-order-settings { margin-top: var(--app-space-4); border-top: 1px solid var(--app-border); padding-top: var(--app-space-2); }
+.clipboard-order-settings h3 { margin: 0 0 var(--app-space-2); font-size: 15px; }
+.clipboard-options { margin-bottom: var(--app-space-2); }
 .clipboard-order-list {
   max-height: min(360px, 45vh);
   overflow: auto;
   border: 1px solid var(--app-border);
-  border-radius: 8px;
+  border-radius: var(--app-radius-control);
 }
 .clipboard-order-row {
   min-height: 38px;
   border-bottom: 1px solid var(--app-border-light);
-  padding: 4px;
+  padding: var(--app-space-1);
   transition: background-color 120ms ease, box-shadow 120ms ease;
 }
 .clipboard-order-row:last-child { border-bottom: 0; }
 .clipboard-order-row.is-dragging { opacity: 0.45; }
-.clipboard-order-arrows { margin-left: auto; display: flex; gap: 4px; }
+.clipboard-order-arrows { margin-left: auto; display: flex; gap: var(--app-space-1); }
 .clipboard-order-arrows :deep(.el-button + .el-button) { margin-left: 0; }
 .quick-entry-page {
   display: flex;
@@ -2026,10 +2060,10 @@ onBeforeUnmount(() => {
   min-height: 52px;
   flex: 0 0 auto;
   align-items: center;
-  gap: 10px;
+  gap: var(--app-space-2);
   border-bottom: 1px solid var(--app-border);
   background: var(--app-bg);
-  padding: 6px 10px;
+  padding: var(--app-space-2) var(--app-space-2);
   box-shadow: 0 1px 3px rgb(16 24 40 / 5%);
 }
 
@@ -2037,15 +2071,15 @@ onBeforeUnmount(() => {
   display: flex;
   min-width: 142px;
   align-items: center;
-  gap: 7px;
+  gap: var(--app-space-2);
 }
 
 .quick-entry-brand svg {
-  padding: 6px;
+  padding: var(--app-space-2);
   color: var(--app-primary-text);
   background: var(--app-primary-soft);
   border: 1px solid var(--app-primary-border);
-  border-radius: 9px;
+  border-radius: var(--app-radius-control);
   width: 32px;
   height: 32px;
   flex: 0 0 32px;
@@ -2053,7 +2087,7 @@ onBeforeUnmount(() => {
 
 .quick-entry-brand div {
   display: grid;
-  gap: 1px;
+  gap: var(--app-space-optical);
 }
 
 .quick-entry-brand strong {
@@ -2072,13 +2106,13 @@ onBeforeUnmount(() => {
   display: flex;
   margin-left: auto;
   align-items: center;
-  gap: 10px;
+  gap: var(--app-space-2);
 }
 
 .always-on-top-badge {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--app-space-2);
   color: var(--app-primary-text);
   font-size: calc(var(--quick-entry-font-size, 14px) - 1px);
   font-weight: 600;
@@ -2088,7 +2122,7 @@ onBeforeUnmount(() => {
 .always-on-top-badge > span {
   width: 7px;
   height: 7px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   background: var(--app-primary);
   box-shadow: 0 0 0 4px var(--app-primary-soft);
 }
@@ -2104,8 +2138,8 @@ onBeforeUnmount(() => {
   min-height: 0;
   flex: 1;
   grid-template-columns: minmax(100px, 110px) minmax(0, 1fr);
-  gap: 8px;
-  padding: 8px;
+  gap: var(--app-space-2);
+  padding: var(--app-space-2);
 }
 
 .quick-entry-page.records-collapsed .quick-entry-layout {
@@ -2114,7 +2148,7 @@ onBeforeUnmount(() => {
 
 .quick-entry-page.is-focus-mode .quick-entry-layout {
   grid-template-columns: minmax(0, 1fr);
-  padding: 6px;
+  padding: var(--app-space-2);
 }
 
 .record-pane,
@@ -2122,7 +2156,7 @@ onBeforeUnmount(() => {
   min-height: 0;
   overflow: hidden;
   border: 1px solid var(--app-border);
-  border-radius: 12px;
+  border-radius: var(--app-radius-card);
   background: var(--app-bg);
   box-shadow: 0 1px 3px rgb(16 24 40 / 4%);
 }
@@ -2136,7 +2170,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 6px 7px;
+  padding: var(--app-space-2) var(--app-space-2) var(--app-space-2);
 }
 
 .record-pane-actions {
@@ -2151,7 +2185,7 @@ onBeforeUnmount(() => {
 
 .record-pane.is-collapsed .record-pane-header {
   justify-content: center;
-  padding: 6px 3px;
+  padding: var(--app-space-2) var(--app-space-1);
 }
 
 .record-pane-rail {
@@ -2161,7 +2195,7 @@ onBeforeUnmount(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 5px;
+  gap: var(--app-space-1);
   border-top: 1px solid var(--app-border-light);
   color: var(--app-muted);
   font-size: calc(var(--quick-entry-font-size, 14px) - 2px);
@@ -2186,7 +2220,7 @@ onBeforeUnmount(() => {
 }
 
 .record-search {
-  padding: 0 5px;
+  padding: 0 var(--app-space-1);
 }
 
 .record-pane-note {
@@ -2202,19 +2236,19 @@ onBeforeUnmount(() => {
 .record-list :deep(.el-scrollbar__view) {
   display: grid;
   align-content: start;
-  padding: 6px;
+  padding: var(--app-space-2);
 }
 
 .record-list-item {
   display: grid;
   width: 100%;
-  gap: 3px;
+  gap: var(--app-space-1);
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--app-radius-control);
   background: transparent;
   color: inherit;
   cursor: pointer;
-  padding: 7px 5px;
+  padding: var(--app-space-2) var(--app-space-1);
   text-align: left;
 }
 
@@ -2255,11 +2289,11 @@ onBeforeUnmount(() => {
 }
 
 .record-meta .el-icon {
-  color: var(--app-danger);
+  color: var(--app-danger-text);
 }
 
 .record-list-empty {
-  padding: 28px 10px;
+  padding: var(--app-space-6) var(--app-space-2);
   color: var(--app-subtle);
   font-size: calc(var(--quick-entry-font-size, 14px) - 1px);
   text-align: center;
@@ -2276,9 +2310,9 @@ onBeforeUnmount(() => {
   flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--app-space-2);
   border-bottom: 1px solid var(--app-border-light);
-  padding: 7px 10px;
+  padding: var(--app-space-2) var(--app-space-2);
 }
 
 .entry-heading {
@@ -2290,7 +2324,7 @@ onBeforeUnmount(() => {
   min-width: 0;
   flex-wrap: wrap;
   align-items: center;
-  gap: 5px;
+  gap: var(--app-space-1);
 }
 
 .entry-title-row h1 {
@@ -2303,14 +2337,14 @@ onBeforeUnmount(() => {
 }
 
 .entry-title-row .el-tag {
-  gap: 3px;
+  gap: var(--app-space-1);
 }
 
 .entry-block-chip {
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   background: var(--app-surface-soft);
   color: var(--app-muted);
-  padding: 2px 7px;
+  padding: var(--app-space-optical) var(--app-space-2);
   font-size: calc(var(--quick-entry-font-size, 14px) - 2px);
   white-space: nowrap;
 }
@@ -2321,7 +2355,7 @@ onBeforeUnmount(() => {
   height: 24px;
   flex: 0 0 24px;
   place-items: center;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   color: var(--app-muted);
   cursor: help;
 }
@@ -2338,7 +2372,7 @@ onBeforeUnmount(() => {
   flex: 0 0 auto;
   flex-wrap: nowrap;
   justify-content: flex-end;
-  gap: 7px;
+  gap: var(--app-space-2);
 }
 
 .entry-toolbar .el-button + .el-button {
@@ -2346,7 +2380,7 @@ onBeforeUnmount(() => {
 }
 
 .locked-alert {
-  margin: 10px 14px 0;
+  margin: var(--app-space-2) var(--app-space-3) 0;
   width: auto;
 }
 
@@ -2362,9 +2396,9 @@ onBeforeUnmount(() => {
   max-width: min(var(--quick-form-max-width, 706px), 100%);
   grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--quick-field-width, 160px)), 1fr));
   align-items: start;
-  gap: 8px 14px;
+  gap: var(--app-space-2) var(--app-space-3);
   margin-inline: auto;
-  padding: 10px 12px 16px;
+  padding: var(--app-space-2) var(--app-space-3) var(--app-space-4);
 }
 
 .entry-form :deep(.el-form-item) {
@@ -2376,7 +2410,7 @@ onBeforeUnmount(() => {
 .entry-form :deep(.el-form-item__label) {
   height: auto;
   min-width: 0;
-  padding-bottom: 4px;
+  padding-bottom: var(--app-space-1);
   line-height: 1.35;
 }
 
@@ -2385,7 +2419,7 @@ onBeforeUnmount(() => {
   min-width: 0;
   flex-wrap: wrap;
   align-items: center;
-  gap: 3px 6px;
+  gap: var(--app-space-1) var(--app-space-2);
   color: var(--app-text);
   font-size: var(--quick-entry-font-size, 14px);
   font-weight: 600;
@@ -2400,15 +2434,15 @@ onBeforeUnmount(() => {
 
 .required-mark,
 .pinned-mark {
-  border-radius: 999px;
-  padding: 1px 6px;
+  border-radius: var(--app-radius-pill);
+  padding: var(--app-space-optical) var(--app-space-2);
   font-size: calc(var(--quick-entry-font-size, 14px) - 2px);
   font-weight: 500;
 }
 
 .required-mark {
   background: var(--app-danger-soft);
-  color: var(--app-danger);
+  color: var(--app-danger-text);
 }
 
 .pinned-mark {
@@ -2437,13 +2471,13 @@ onBeforeUnmount(() => {
 
 .quick-create-form label {
   display: block;
-  margin-bottom: 10px;
+  margin-bottom: var(--app-space-2);
   font-size: calc(var(--quick-entry-font-size, 14px) + 2px);
   font-weight: 700;
 }
 
 .quick-create-form p {
-  margin: 10px 0 0;
+  margin: var(--app-space-2) 0 0;
   color: var(--app-muted);
   font-size: calc(var(--quick-entry-font-size, 14px) - 1px);
   line-height: 1.6;
@@ -2455,10 +2489,10 @@ onBeforeUnmount(() => {
   flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--app-space-3);
   border-top: 1px solid var(--app-border);
   background: var(--app-bg);
-  padding: 6px 10px;
+  padding: var(--app-space-2) var(--app-space-2);
 }
 
 .entry-footer > span {
@@ -2468,7 +2502,7 @@ onBeforeUnmount(() => {
 
 .entry-footer > div {
   display: flex;
-  gap: 8px;
+  gap: var(--app-space-2);
 }
 
 .entry-footer .el-button + .el-button {
@@ -2485,7 +2519,7 @@ onBeforeUnmount(() => {
 }
 
 .field-dialog-note {
-  margin: -2px 0 12px;
+  margin: -2px 0 var(--app-space-3);
   color: var(--app-muted);
   font-size: calc(var(--quick-entry-font-size, 14px) - 1px);
   line-height: 1.6;
@@ -2495,8 +2529,8 @@ onBeforeUnmount(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 7px;
-  margin-bottom: 10px;
+  gap: var(--app-space-2);
+  margin-bottom: var(--app-space-2);
 }
 
 .field-dialog-toolbar .el-button + .el-button {
@@ -2506,19 +2540,19 @@ onBeforeUnmount(() => {
 .display-size-controls {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 14px;
-  margin-bottom: 12px;
+  gap: var(--app-space-2) var(--app-space-3);
+  margin-bottom: var(--app-space-3);
   border: 1px solid var(--app-border-light);
-  border-radius: 9px;
+  border-radius: var(--app-radius-control);
   background: var(--app-surface-soft);
-  padding: 10px 12px;
+  padding: var(--app-space-2) var(--app-space-3);
 }
 
 .field-selector {
   max-height: min(520px, 60vh);
   overflow: auto;
   border: 1px solid var(--app-border);
-  border-radius: 9px;
+  border-radius: var(--app-radius-control);
 }
 
 .field-selector-head,
@@ -2526,9 +2560,9 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-columns: minmax(150px, 1fr) 78px;
   align-items: center;
-  gap: 8px;
+  gap: var(--app-space-2);
   min-height: 42px;
-  padding: 6px 12px;
+  padding: var(--app-space-2) var(--app-space-3);
 }
 
 .field-selector-head {
@@ -2572,15 +2606,15 @@ onBeforeUnmount(() => {
   min-width: 0;
   overflow: hidden;
   align-items: center;
-  gap: 4px;
+  gap: var(--app-space-1);
   font-size: var(--quick-entry-font-size, 14px);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .field-selector-name small {
-  margin-left: 5px;
-  color: var(--app-danger);
+  margin-left: var(--app-space-1);
+  color: var(--app-danger-text);
   font-size: calc(var(--quick-entry-font-size, 14px) - 2px);
 }
 
@@ -2591,11 +2625,11 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--app-radius-control);
   color: var(--app-muted);
   background: transparent;
   cursor: grab;
-  margin-right: 4px;
+  margin-right: var(--app-space-1);
   padding: 0;
   vertical-align: middle;
 }
@@ -2629,7 +2663,7 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 125px auto;
   align-items: center;
-  gap: 5px;
+  gap: var(--app-space-1);
   color: var(--app-muted);
   font-size: calc(var(--quick-entry-font-size, 14px) - 1px);
 }
@@ -2661,7 +2695,7 @@ onBeforeUnmount(() => {
 
 @media (max-width: 820px) {
   .quick-entry-header {
-    gap: 9px;
+    gap: var(--app-space-2);
     padding-inline: 10px;
   }
 
@@ -2676,8 +2710,8 @@ onBeforeUnmount(() => {
 
   .quick-entry-layout {
     grid-template-columns: 100px minmax(0, 1fr);
-    gap: 8px;
-    padding: 8px;
+    gap: var(--app-space-2);
+    padding: var(--app-space-2);
   }
 
   .entry-pane-header {
@@ -2699,13 +2733,13 @@ onBeforeUnmount(() => {
 
 @media (max-height: 560px) {
   .entry-pane-header {
-    gap: 7px;
-    padding: 8px 12px;
+    gap: var(--app-space-2);
+    padding: var(--app-space-2) var(--app-space-3);
   }
 
   .clipboard-follow-panel {
-    margin: 5px 8px 0;
-    padding: 5px 8px;
+    margin: var(--app-space-1) var(--app-space-2) 0;
+    padding: var(--app-space-1) var(--app-space-2);
   }
 
   .entry-footer {
@@ -2725,7 +2759,7 @@ onBeforeUnmount(() => {
   }
 
   .entry-form {
-    gap: 8px 14px;
+    gap: var(--app-space-2) var(--app-space-3);
     padding-block: 8px 14px;
   }
 }

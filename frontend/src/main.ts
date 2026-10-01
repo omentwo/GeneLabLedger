@@ -9,9 +9,11 @@ import { createApp } from "vue";
 import App from "@/App.vue";
 import router from "@/router";
 import { initializeTheme } from "@/utils/themePreference";
+import { initializeWindowCloseGuard } from "@/utils/windowCloseGuard";
 
 const disposeTheme = initializeTheme();
-if (import.meta.hot) import.meta.hot.dispose(disposeTheme);
+const disposeCloseGuard = initializeWindowCloseGuard();
+if (import.meta.hot) import.meta.hot.dispose(() => { disposeTheme(); disposeCloseGuard(); });
 
 const app = createApp(App);
 

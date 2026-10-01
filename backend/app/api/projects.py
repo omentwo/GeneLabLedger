@@ -39,7 +39,6 @@ from app.schemas import (
     ProjectUpdate,
 )
 from app.seed import add_core_fields
-from app.services.auto_exports import disable_tasks_for_deleted_project
 from app.services.field_names import RESERVED_WORKBOOK_HEADERS, field_import_identifiers
 from app.services.field_validation import validate_default_value
 from app.services.records import require_project
@@ -348,7 +347,6 @@ def delete_project(
             status_code=status.HTTP_409_CONFLICT,
             detail="项目已有台账记录或报告模板，不能直接删除",
         )
-    disable_tasks_for_deleted_project(session, project.id)
     audit(session, "project.delete", "project", project.id, {"name": project.name})
     session.delete(project)
     session.commit()
@@ -449,8 +447,6 @@ def force_delete_project(
             else:
                 template_directories.append(candidate)
 
-    updated_auto_export_tasks = disable_tasks_for_deleted_project(session, project.id)
-
     deleted_record_values = 0
     deleted_records = 0
     deleted_field_options = 0
@@ -543,7 +539,6 @@ def force_delete_project(
         deleted_report_templates=deleted_report_templates,
         deleted_report_versions=deleted_report_versions,
         deleted_report_mappings=deleted_report_mappings,
-        updated_auto_export_tasks=updated_auto_export_tasks,
         removed_template_directories=removed_template_directories,
         cleanup_warnings=cleanup_warnings,
     )

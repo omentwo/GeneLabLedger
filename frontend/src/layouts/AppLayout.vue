@@ -1,14 +1,13 @@
 <script setup lang="ts">
 import {
-  CalendarDays as Calendar,
-  Clock3 as Clock,
-  ChartNoAxesCombined as DataAnalysis,
-  FileText as Document,
+  ChartPie,
+  Database,
+  FlaskConical,
   PanelLeftOpen as Expand,
   PanelLeftClose as Fold,
-  ClipboardList as List,
-  NotebookTabs as Notebook,
-  Settings2 as Setting,
+  Printer,
+  ShieldCheck,
+  TableProperties,
   Dna,
   Server,
 } from "@lucide/vue";
@@ -41,13 +40,12 @@ function syncNarrowViewport(event: MediaQueryList | MediaQueryListEvent): void {
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "gene-lab-ledger.sidebar-collapsed";
 
 const navigation = [
-  { to: "/dashboard", label: "统计面板", icon: DataAnalysis },
-  { to: "/ledger", label: "台账", icon: Notebook },
-  { to: "/experiments", label: "实验编排", icon: Calendar },
-  { to: "/auto-export", label: "自动导出", icon: Clock },
-  { to: "/reports", label: "报告模板", icon: Document },
-  { to: "/audit", label: "日志审计", icon: List },
-  { to: "/settings", label: "数据与设置", icon: Setting },
+  { to: "/dashboard", label: "统计面板", icon: ChartPie },
+  { to: "/ledger", label: "台账", icon: TableProperties },
+  { to: "/experiments", label: "实验编排", icon: FlaskConical },
+  { to: "/reports", label: "报告打印", icon: Printer },
+  { to: "/audit", label: "日志审计", icon: ShieldCheck },
+  { to: "/settings", label: "数据与设置", icon: Database },
 ];
 
 async function syncWindowState(): Promise<void> {
@@ -161,11 +159,9 @@ onBeforeUnmount(() => {
   >
     <header class="window-titlebar" aria-label="窗口标题栏">
       <div class="window-titlebar-drag" @dblclick="toggleMaximize">
-        <svg class="window-titlebar-mark" viewBox="0 0 64 64" aria-hidden="true">
-          <rect x="2" y="2" width="60" height="60" rx="18" fill="var(--app-primary-soft)" stroke="var(--app-primary-border)" stroke-width="2" />
-          <path d="M22 16c14 4 14 28 28 32M42 16c-14 4-14 28-28 32" fill="none" stroke="var(--app-primary)" stroke-width="4" stroke-linecap="round" />
-          <path d="M24 22h16M22 32h20M24 42h16" stroke="var(--app-brand)" stroke-width="3" stroke-linecap="round" />
-        </svg>
+        <span class="window-titlebar-mark" aria-hidden="true">
+          <Dna :size="14" :stroke-width="1.9" />
+        </span>
         <span>基因检测台账</span>
       </div>
 
@@ -225,7 +221,7 @@ onBeforeUnmount(() => {
       >
         <div class="sidebar-brand">
           <span v-if="!effectiveSidebarCollapsed" class="sidebar-brand-mark" aria-hidden="true">
-            <Dna :size="24" :stroke-width="1.7" />
+            <Dna :size="22" :stroke-width="1.9" />
           </span>
           <div v-if="!effectiveSidebarCollapsed" class="sidebar-brand-title">
             <strong>基因检测台账</strong>
@@ -256,7 +252,9 @@ onBeforeUnmount(() => {
             :aria-label="item.label"
             :title="effectiveSidebarCollapsed ? item.label : undefined"
           >
-            <component :is="item.icon" :size="20" :stroke-width="1.7" aria-hidden="true" />
+            <span class="sidebar-nav-icon" aria-hidden="true">
+              <component :is="item.icon" :size="20" :stroke-width="1.9" />
+            </span>
             <span v-if="!effectiveSidebarCollapsed">{{ item.label }}</span>
           </RouterLink>
         </nav>
@@ -344,9 +342,15 @@ onBeforeUnmount(() => {
 }
 
 .window-titlebar-mark {
-  width: 20px;
-  height: 20px;
-  flex: 0 0 20px;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  place-items: center;
+  border: 1px solid var(--app-primary-border);
+  border-radius: 7px;
+  background: var(--app-primary-soft);
+  color: var(--app-primary-text);
 }
 
 .window-controls {
@@ -529,7 +533,7 @@ onBeforeUnmount(() => {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   min-height: 46px;
   min-width: 0;
   border: 1px solid transparent;
@@ -542,8 +546,19 @@ onBeforeUnmount(() => {
   transition: background-color 180ms ease, color 180ms ease, border-color 180ms ease;
 }
 
-.sidebar-nav-link > svg {
-  flex: 0 0 auto;
+.sidebar-nav-icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  place-items: center;
+  border: 1px solid var(--app-nav-line);
+  border-radius: 9px;
+  background: var(--app-nav-hover);
+}
+
+.sidebar-nav-icon > svg {
+  display: block;
 }
 
 .sidebar-nav-link:hover {
@@ -551,11 +566,21 @@ onBeforeUnmount(() => {
   color: var(--app-nav-active-text);
 }
 
+.sidebar-nav-link:hover .sidebar-nav-icon {
+  background: var(--app-nav-active);
+  border-color: var(--app-nav-active-border);
+}
+
 .sidebar-nav-link.router-link-active {
   background: var(--app-nav-active);
   border-color: var(--app-nav-active-border);
   color: var(--app-nav-active-text);
   font-weight: 650;
+}
+
+.sidebar-nav-link.router-link-active .sidebar-nav-icon {
+  background: var(--app-nav-hover);
+  border-color: var(--app-nav-active-border);
 }
 
 .sidebar-nav-link:focus-visible,

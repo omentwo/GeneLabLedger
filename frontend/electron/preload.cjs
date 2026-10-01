@@ -60,6 +60,13 @@ contextBridge.exposeInMainWorld("geneLedgerDesktop", {
   minimizeWindow: () => ipcRenderer.invoke("gene-ledger:minimize-window"),
   toggleWindowMaximize: () => ipcRenderer.invoke("gene-ledger:toggle-window-maximize"),
   closeWindow: () => ipcRenderer.invoke("gene-ledger:close-window"),
+  closeGuardReady: () => ipcRenderer.invoke("gene-ledger:close-guard-ready"),
+  respondToCloseRequest: (response) => ipcRenderer.invoke("gene-ledger:close-response", response),
+  onCloseRequested: (listener) => {
+    const handler = (_event, request) => listener(request);
+    ipcRenderer.on("gene-ledger:close-request", handler);
+    return () => ipcRenderer.removeListener("gene-ledger:close-request", handler);
+  },
   onWindowStateChanged: (listener) => {
     const handler = (_event, state) => listener(state);
     ipcRenderer.on("gene-ledger:window-state-changed", handler);

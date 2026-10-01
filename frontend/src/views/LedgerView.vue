@@ -66,6 +66,7 @@ import {
   commitReplace,
   previewCellBatch,
   previewReplace,
+  FIND_REPLACE_RECORD_LIMIT,
   previewReorderByDate,
   applyReorderByDate,
   queryRecordIds,
@@ -130,6 +131,7 @@ import {
 } from "@/utils/ledgerColumnWidth";
 import { shanghaiDateKey } from "@/utils/datetime";
 import { desktopBridge } from "@/utils/desktop";
+import { registerWindowCloseGuard } from "@/utils/windowCloseGuard";
 import {
   LEDGER_GRID_CLIPBOARD_MIME,
   buildLedgerGridClipboardData,
@@ -315,6 +317,9 @@ let bottomScrollTimers: number[] = [];
 const loading = ref(false);
 const historyReplayLoading = ref(false);
 const savingIds = ref(new Set<string>());
+const closeSaving = ref(false);
+const preparingClose = ref(false);
+const quickEntryRefreshInProgress = ref(false);
 type CellSaveStatus = "dirty" | "saving" | "saved" | "error";
 type CellSaveState = { status: CellSaveStatus; message?: string };
 type ValidationCellRollbackSnapshot = {
@@ -347,6 +352,8 @@ const columnWidthSaveQueues = new Map<string, LatestValuePersistence<number>>();
 const findReplaceVisible = ref(false);
 const findReplaceLoading = ref(false);
 const findReplacePreview = ref<RecordReplacePreview | null>(null);
+const findReplaceScopeCount = ref<number | null>(null);
+const findReplaceScopeLabel = ref("");
 const findReplaceForm = reactive({
   fieldId: "",
   find: "",
@@ -582,7 +589,7 @@ async function acknowledgeQuickEntryChanges(changes: QuickEntryProjectChange[]):
 }
 
 async function refreshQuickEntryChanges(changes: QuickEntryProjectChange[]): Promise<void> {
-  if (ledgerDisposed) return;
+  if (ledgerDisposed || preparingClose.value) return;
   const latestByProject = new Map<string, QuickEntryProjectChange>();
   changes.forEach((change) => {
     const normalized = normalizeQuickEntryProjectChange(change);
@@ -615,13 +622,18 @@ function queueQuickEntryChanges(changes: QuickEntryProjectChange[]): void {
   if (!changes.length) return;
   const task = quickEntryRefreshPromise
     .catch(() => undefined)
-    .then(() => refreshQuickEntryChanges(changes));
+    .then(async () => {
+      quickEntryRefreshInProgress.value = true;
+      try { await refreshQuickEntryChanges(changes); }
+      finally { quickEntryRefreshInProgress.value = false; }
+    });
   quickEntryRefreshPromise = task.catch((error) => {
     console.error("快速录入变更刷新失败", error);
   });
 }
 
 function handleQuickEntryChanged(payload: QuickEntryChangedPayload): void {
+  if (preparingClose.value) return; // Main keeps unacknowledged revisions for the next refresh.
   const change = normalizeQuickEntryProjectChange(payload);
   if (change) queueQuickEntryChanges([change]);
 }
@@ -639,6 +651,7 @@ async function requestPendingQuickEntryChanges(): Promise<void> {
 }
 
 function handleLedgerWindowFocus(): void {
+  if (preparingClose.value) return;
   void requestPendingQuickEntryChanges();
 }
 
@@ -3641,6 +3654,111 @@ function replaceRecordPreservingPending(
   invalidateProjectRecordCache(updated.project_id);
 }
 
+function dirtyLedgerChanges(): RecordCellChange[] {
+  return records.value.flatMap((record) => fields.value.flatMap((field) => {
+    const key = persistedKey(record.id, field.id);
+    const before = persistedValues.get(key);
+    const value = valueFor(record, field);
+    return before !== undefined && value !== before
+      ? [{ record_id: record.id, field_id: field.id, value, expected_value: before }]
+      : [];
+  }));
+}
+
+function dirtyLedgerDrafts(): LedgerRow[] {
+  return draftRows.value.filter((record) =>
+    Boolean(record.pathology_number.trim() || record.block_number || record.experiment_date || record.experiment_number) ||
+    record.status !== "待实验" || fields.value.some((field) =>
+      !field.is_core && (record.values[field.id] ?? "") !== (field.default_value ?? "")));
+}
+
+function ledgerCloseState(): { dirty: boolean; busy: boolean } {
+  return {
+    dirty: Boolean(dirtyLedgerChanges().length || dirtyLedgerDrafts().length),
+    busy: Boolean(closeSaving.value || savingIds.value.size || cellSaveInFlightCounts.size ||
+      gridCellEditFinishPromise || gridCutInProgress.value || historyReplayLoading.value ||
+      validationCommitLoading.value || findReplaceLoading.value || reorderLoading.value ||
+      highlightLoading.value || loading.value || quickEntryRefreshInProgress.value || projectLoadPromise),
+  };
+}
+
+async function saveLedgerBeforeClose(): Promise<boolean> {
+  const projectId = activeProjectId.value;
+  const changes = dirtyLedgerChanges();
+  const drafts = dirtyLedgerDrafts().map((record) => ({
+    record,
+    rowNumber: (tableRowIndexById.value.get(record.id) ?? 0) + 2,
+    snapshot: snapshotRecord(record),
+  }));
+  if (!changes.length && !drafts.length) return true;
+  closeSaving.value = true;
+  try {
+    if (drafts.some(({ record }) => !record.pathology_number.trim())) {
+      ElMessage.warning("新增记录仍有未填写的病理号，请补全后再保存关闭");
+      return false;
+    }
+    const newRecords: RecordBatchNewRecord[] = drafts.map(({ record }) => ({
+      client_id: record.id,
+      pathology_number: record.pathology_number.trim(),
+      block_number: record.block_number?.trim() || null,
+      status: record.status,
+      experiment_date: record.experiment_date ? normalizeDate(record.experiment_date) : null,
+      experiment_number: record.experiment_number?.trim() || null,
+      values: { ...record.values },
+      ...(record._insertAnchorId && record._insertPlacement === "before" ? { insert_before_record_id: record._insertAnchorId } : {}),
+      ...(record._insertAnchorId && record._insertPlacement === "after" ? { insert_after_record_id: record._insertAnchorId } : {}),
+    }));
+    const preview = await previewCellBatch(projectId, changes, newRecords);
+    const errors = preview.issues.filter((issue) => issue.severity === "error");
+    if (preview.skipped_locked || errors.length) {
+      ElMessage.error(errors[0]?.message ?? "修改中有锁定记录，未保存内容已保留");
+      return false;
+    }
+    const warnings = preview.issues.filter((issue) => issue.severity === "warning");
+    if (warnings.length) {
+      try {
+        await ElMessageBox.confirm([...new Set(warnings.map((issue) => issue.message))].join("；"), "保存前确认", {
+          confirmButtonText: "继续保存", cancelButtonText: "返回修改", type: "warning", closeOnClickModal: false,
+        });
+      } catch {
+        return false;
+      }
+    }
+    const result = await commitCellBatch(preview.token, warnings.length > 0, drafts.length > 0);
+    const completed = new Set(changes.map((change) => persistedKey(change.record_id, change.field_id)));
+    result.records.filter((record) => !result.created_record_ids.includes(record.id))
+      .forEach((record) => replaceRecordPreservingPending(record, completed));
+    completed.forEach((key) => {
+      const [recordId = "", fieldId = ""] = key.split(":");
+      clearCellSaveState(key);
+      const record = records.value.find((item) => item.id === recordId);
+      const field = fields.value.find((item) => item.id === fieldId);
+      if (record && field) clearFieldError(record, field);
+    });
+    if (drafts.length) {
+      reconcileCommittedPaste(drafts, result.created_record_ids, result.records);
+      pushHistory("关闭前保存台账", result.before, result.after, projectId);
+    } else {
+      pushCellHistory("关闭前保存台账", result.changes, projectId);
+    }
+    dismissValidationPanel();
+    clearGridCellEdit();
+    return !ledgerCloseState().dirty;
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "保存失败，未保存内容已保留");
+    return false;
+  } finally {
+    closeSaving.value = false;
+  }
+}
+
+const removeCloseGuard = registerWindowCloseGuard({
+  state: ledgerCloseState,
+  save: saveLedgerBeforeClose,
+  prepare: () => { preparingClose.value = true; },
+  release: () => { preparingClose.value = false; },
+});
+
 function reconcileCellAfterCompletedSave(
   recordId: string,
   fieldId: string,
@@ -5266,25 +5384,31 @@ function openFindReplace(): void {
   findReplaceForm.matchMode = "substring";
   findReplaceForm.caseSensitive = false;
   findReplacePreview.value = null;
+  findReplaceScopeCount.value = null;
+  findReplaceScopeLabel.value = selectedGridCellPositions().length ? "选中单元格所在记录" : "当前筛选范围全部记录";
   findReplaceVisible.value = true;
 }
 
 async function runFindReplacePreview(): Promise<void> {
+  if (findReplaceLoading.value) return;
   if (!findReplaceForm.fieldId) {
     ElMessage.warning("请选择要处理的表头");
     return;
   }
-  let recordIds = selectedRecordIdsForReplace();
-  if (!selectedGridCellPositions().length) {
-    const result = await queryRecordIds({ ...buildRecordQuery(), limit: 1000, offset: 0 });
-    recordIds = result.record_ids;
-  }
-  if (!recordIds.length) {
-    ElMessage.warning("当前范围没有记录");
-    return;
-  }
   findReplaceLoading.value = true;
+  findReplacePreview.value = null;
+  findReplaceScopeCount.value = null;
   try {
+    let recordIds = selectedRecordIdsForReplace();
+    const selected = Boolean(selectedGridCellPositions().length);
+    findReplaceScopeLabel.value = selected ? "选中单元格所在记录" : "当前筛选范围全部记录";
+    if (!selected) recordIds = (await queryRecordIds(buildRecordQuery())).record_ids;
+    recordIds = [...new Set(recordIds)];
+    findReplaceScopeCount.value = recordIds.length;
+    if (!recordIds.length) {
+      ElMessage.warning("当前范围没有记录");
+      return;
+    }
     findReplacePreview.value = await previewReplace({
       project_id: activeProjectId.value,
       field_id: findReplaceForm.fieldId,
@@ -5338,6 +5462,8 @@ function applyFieldWidth(fieldId: string, width: number): void {
   const field = fieldDefinitionById(fieldId);
   if (field) field.width = width;
 }
+
+watch(findReplaceForm, () => { findReplacePreview.value = null; }, { flush: "sync" });
 
 function bestFitColumn(field: FieldDefinition): void {
   const canvas = document.createElement("canvas");
@@ -6085,6 +6211,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  removeCloseGuard();
   ledgerDisposed = true;
   ledgerHistory.clear();
   document.removeEventListener("click", handleRecordSelectionClickCapture, true);
@@ -6979,8 +7106,9 @@ onBeforeUnmount(() => {
     </template>
   </el-dialog>
 
-  <el-dialog class="ledger-dialog" v-model="findReplaceVisible" title="查找替换" width="660px">
-    <el-form label-position="top">
+  <el-dialog class="ledger-dialog" v-model="findReplaceVisible" title="查找替换" width="660px" :close-on-click-modal="!findReplaceLoading" :close-on-press-escape="!findReplaceLoading" :show-close="!findReplaceLoading">
+    <p class="muted">{{ findReplaceScopeLabel }}；单次最多 {{ FIND_REPLACE_RECORD_LIMIT.toLocaleString('zh-CN') }} 条记录。</p>
+    <el-form label-position="top" :disabled="findReplaceLoading">
       <el-form-item label="指定表头">
         <el-select v-model="findReplaceForm.fieldId" filterable>
           <el-option v-for="field in fields" :key="field.id" :label="field.label" :value="field.id" />
@@ -7006,17 +7134,21 @@ onBeforeUnmount(() => {
         </el-form-item>
       </div>
     </el-form>
-    <div v-if="findReplacePreview" class="replace-preview-panel">
-      <strong>匹配 {{ findReplacePreview.matched_count }} 个单元格</strong>
-      <span v-if="findReplacePreview.skipped_locked">，跳过锁定 {{ findReplacePreview.skipped_locked }} 个</span>
-      <ul v-if="findReplacePreview.issues.length">
+    <div v-if="findReplaceScopeCount !== null" class="replace-preview-panel" aria-live="polite">
+      <strong>范围 {{ findReplaceScopeCount.toLocaleString('zh-CN') }} 条记录</strong>
+      <template v-if="findReplacePreview">
+        <span>，可替换 {{ findReplacePreview.matched_count }} 个单元格</span>
+        <span>，锁定跳过 {{ findReplacePreview.skipped_locked }} 个单元格</span>
+      </template>
+      <p v-if="findReplaceScopeCount > FIND_REPLACE_RECORD_LIMIT" role="alert">范围超过单次上限，请缩小筛选或选中范围后重试；本次未执行替换。</p>
+      <ul v-if="findReplacePreview?.issues.length">
         <li v-for="(issue, index) in findReplacePreview.issues.slice(0, 20)" :key="index">
           {{ issue.message }}
         </li>
       </ul>
     </div>
     <template #footer>
-      <el-button @click="findReplaceVisible = false">取消</el-button>
+      <el-button :disabled="findReplaceLoading" @click="findReplaceVisible = false">取消</el-button>
       <el-button :loading="findReplaceLoading" @click="runFindReplacePreview">预览</el-button>
       <el-button
         type="primary"
@@ -7182,9 +7314,9 @@ onBeforeUnmount(() => {
   min-width: 0;
   min-height: 52px;
   align-items: center;
-  gap: 8px;
+  gap: var(--app-space-2);
   overflow-x: auto;
-  padding: 6px 10px;
+  padding: var(--app-space-2) var(--app-space-2);
   scrollbar-width: thin;
 }
 
@@ -7196,7 +7328,7 @@ onBeforeUnmount(() => {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 6px;
+  gap: var(--app-space-2);
 }
 
 .ledger-workspace-mark {
@@ -7205,7 +7337,7 @@ onBeforeUnmount(() => {
   width: 28px;
   height: 28px;
   flex: 0 0 auto;
-  border-radius: 8px;
+  border-radius: var(--app-radius-control);
   background: var(--app-primary-soft);
   color: var(--app-primary-text);
 }
@@ -7226,7 +7358,7 @@ onBeforeUnmount(() => {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 5px;
+  gap: var(--app-space-1);
   white-space: nowrap;
 }
 
@@ -7251,7 +7383,7 @@ onBeforeUnmount(() => {
 .ledger-page > .page-card {
   min-width: 0;
   border-color: var(--app-border);
-  border-radius: 14px;
+  border-radius: var(--app-radius-card);
   box-shadow: 0 3px 14px rgb(45 42 38 / 3%);
 }
 
@@ -7285,25 +7417,25 @@ onBeforeUnmount(() => {
 
 /* Dialogs are teleported; scope the palette by the explicit page-specific class. */
 :global(.ledger-dialog) {
-  --el-border-radius-base: 8px;
+  --el-border-radius-base: var(--app-radius-control);
   max-width: calc(100vw - 32px);
   border: 1px solid var(--app-border);
-  border-radius: 18px;
+  border-radius: var(--app-radius-dialog);
   background: var(--app-bg);
   box-shadow: 0 20px 60px rgb(45 42 38 / 14%);
-  padding: 22px;
+  padding: var(--app-space-6);
 }
 
 :global(.ledger-dialog .el-dialog__header) {
-  margin-bottom: 18px;
-  padding-bottom: 14px;
+  margin-bottom: var(--app-space-4);
+  padding-bottom: var(--app-space-3);
   border-bottom: 1px solid var(--app-border-light);
 }
 
 :global(.ledger-dialog .el-dialog__footer) {
-  margin-top: 16px;
+  margin-top: var(--app-space-4);
   border-top: 1px solid var(--app-border-light);
-  padding-top: 16px;
+  padding-top: var(--app-space-4);
 }
 
 .readonly-cell {
@@ -7315,17 +7447,17 @@ onBeforeUnmount(() => {
 }
 
 .highlight-dialog-body {
-  padding: 2px 0 8px;
+  padding: var(--app-space-optical) 0 var(--app-space-2);
 }
 
 .highlight-palette-section {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--app-space-2);
 }
 
 .highlight-palette-section + .highlight-palette-section {
-  margin-top: 14px;
+  margin-top: var(--app-space-3);
 }
 
 .highlight-palette-title {
@@ -7337,7 +7469,7 @@ onBeforeUnmount(() => {
 .highlight-palette-grid {
   display: grid;
   grid-template-columns: repeat(10, minmax(0, 1fr));
-  gap: 4px;
+  gap: var(--app-space-1);
 }
 
 .highlight-color-swatch {
@@ -7379,8 +7511,8 @@ onBeforeUnmount(() => {
 .highlight-picker-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-top: 14px;
+  gap: var(--app-space-3);
+  margin-top: var(--app-space-3);
 }
 
 .highlight-picker-row .field-label {
@@ -7391,7 +7523,7 @@ onBeforeUnmount(() => {
   width: 44px;
   height: 28px;
   border: 1px solid var(--app-border-strong);
-  border-radius: 6px;
+  border-radius: var(--app-radius-control);
   box-shadow: inset 0 0 0 1px rgb(255 255 255 / 60%);
 }
 
@@ -7401,13 +7533,13 @@ onBeforeUnmount(() => {
 }
 
 .ledger-page {
-  --el-border-radius-base: 8px;
+  --el-border-radius-base: var(--app-radius-control);
   color: var(--app-text);
   display: flex;
   height: calc(100dvh - 68px);
   min-height: 0;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--app-space-1);
   overflow: hidden;
 }
 
@@ -7422,7 +7554,7 @@ onBeforeUnmount(() => {
   flex: 1 1 auto;
   align-self: stretch;
   align-items: flex-end;
-  gap: 2px;
+  gap: var(--app-space-optical);
   border: 0;
   background: transparent;
   overflow-x: auto;
@@ -7445,10 +7577,10 @@ onBeforeUnmount(() => {
   justify-content: center;
   overflow: hidden;
   border: 1px solid var(--app-border);
-  border-radius: 8px 8px 0 0;
+  border-radius: var(--app-radius-control) var(--app-radius-control) 0 0;
   color: var(--app-muted);
   background: var(--app-bg);
-  padding: 5px 10px;
+  padding: var(--app-space-1) var(--app-space-2);
   text-align: center;
   cursor: pointer;
   transition:
@@ -7470,7 +7602,7 @@ onBeforeUnmount(() => {
   right: 12px;
   left: 12px;
   height: 2px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   background: var(--app-primary);
   content: "";
   opacity: 0;
@@ -7520,8 +7652,8 @@ onBeforeUnmount(() => {
   flex: 1 1 320px;
   align-items: stretch;
   overflow: hidden;
-  border: 1px solid var(--app-border-strong);
-  border-radius: 8px;
+  border: 1px solid var(--app-control-border);
+  border-radius: var(--app-radius-control);
   background: var(--app-bg);
   transition: height 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
 }
@@ -7553,7 +7685,7 @@ onBeforeUnmount(() => {
 
 .ledger-cell-editor-bar.is-expanded .ledger-cell-editor-address {
   align-items: flex-start;
-  padding-top: 8px;
+  padding-top: var(--app-space-2);
 }
 
 .ledger-cell-editor-address {
@@ -7574,7 +7706,7 @@ onBeforeUnmount(() => {
   box-sizing: border-box;
   height: 100% !important;
   min-height: 30px;
-  padding: 5px 10px;
+  padding: var(--app-space-1) var(--app-space-2);
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -7629,18 +7761,18 @@ onBeforeUnmount(() => {
 }
 
 :global(.ledger-toolbar-popover) {
-  padding: 10px !important;
+  padding: var(--app-space-2) !important;
 }
 
 :global(.ledger-toolbar-popover .ledger-popover-section) {
   display: grid;
-  gap: 8px;
+  gap: var(--app-space-2);
 }
 
 :global(.ledger-toolbar-popover .ledger-popover-section + .ledger-popover-section) {
-  margin-top: 10px;
+  margin-top: var(--app-space-2);
   border-top: 1px solid var(--app-border-light);
-  padding-top: 10px;
+  padding-top: var(--app-space-2);
 }
 
 :global(.ledger-toolbar-popover .ledger-popover-title) {
@@ -7652,7 +7784,7 @@ onBeforeUnmount(() => {
 :global(.ledger-toolbar-popover .ledger-popover-action-grid) {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
+  gap: var(--app-space-2);
 }
 
 :global(.ledger-toolbar-popover .ledger-popover-action-grid .el-button) {
@@ -7668,13 +7800,13 @@ onBeforeUnmount(() => {
 :global(.ledger-toolbar-popover .ledger-native-open-options) {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  gap: var(--app-space-2);
 }
 
 :global(.ledger-toolbar-popover .ledger-native-open-options label) {
   display: grid;
   min-width: 0;
-  gap: 4px;
+  gap: var(--app-space-1);
   color: var(--app-muted);
   font-size: 12px;
 }
@@ -7690,7 +7822,7 @@ onBeforeUnmount(() => {
   min-width: 0;
   align-items: center;
   justify-content: center;
-  gap: 4px;
+  gap: var(--app-space-1);
 }
 
 .ledger-column-tools-trigger {
@@ -7731,7 +7863,7 @@ onBeforeUnmount(() => {
   height: 5px;
   margin-left: -1px;
   border-radius: 50%;
-  background: #f59e0b;
+  background: var(--app-warning);
 }
 
 .ledger-column-tools-popover,
@@ -7746,29 +7878,29 @@ onBeforeUnmount(() => {
 .grid-fill-preview-popover {
   display: grid;
   max-width: 340px;
-  gap: 3px;
+  gap: var(--app-space-1);
   border: 1px solid var(--app-primary-mid);
-  border-radius: 8px;
+  border-radius: var(--app-radius-control);
   background: var(--app-hover);
   box-shadow: 0 8px 24px rgb(45 42 38 / 10%);
   color: var(--app-primary-hover);
   font-size: 12px;
   line-height: 1.35;
-  padding: 8px 10px;
+  padding: var(--app-space-2) var(--app-space-2);
   pointer-events: none;
 }
 
 .ledger-column-tools-popover {
   width: 330px;
   border: 1px solid var(--app-border-strong);
-  border-radius: 12px;
+  border-radius: var(--app-radius-card);
   background: var(--app-bg);
   box-shadow: 0 8px 26px rgb(45 42 38 / 10%);
-  padding: 12px;
+  padding: var(--app-space-3);
 }
 
 .ledger-column-tools-title {
-  margin-bottom: 10px;
+  margin-bottom: var(--app-space-2);
   color: var(--app-text);
   font-size: 14px;
   font-weight: 600;
@@ -7778,7 +7910,7 @@ onBeforeUnmount(() => {
 .ledger-column-tools-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--app-space-2);
 }
 
 .ledger-column-tools-sort :deep(.el-button + .el-button),
@@ -7787,7 +7919,7 @@ onBeforeUnmount(() => {
 }
 
 .ledger-column-tools-filter-label {
-  margin: 14px 0 6px;
+  margin: var(--app-space-3) 0 var(--app-space-2);
   color: var(--app-muted);
   font-size: 12px;
 }
@@ -7797,13 +7929,13 @@ onBeforeUnmount(() => {
 }
 
 .ledger-column-tools-empty-filter {
-  margin-top: 8px;
+  margin-top: var(--app-space-2);
 }
 
 .ledger-column-tools-date-range {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 6px;
+  gap: var(--app-space-2);
 }
 
 .ledger-column-tools-date-range :deep(.el-date-editor) {
@@ -7812,29 +7944,29 @@ onBeforeUnmount(() => {
 
 .ledger-column-tools-actions {
   justify-content: flex-end;
-  margin-top: 12px;
+  margin-top: var(--app-space-3);
 }
 
 .ledger-context-menu {
   width: 160px;
   overflow: visible;
   border: 1px solid var(--app-border-strong);
-  border-radius: 12px;
+  border-radius: var(--app-radius-card);
   background: var(--app-bg);
   box-shadow: 0 8px 26px rgb(45 42 38 / 10%);
-  padding: 5px;
+  padding: var(--app-space-1);
 }
 
 .ledger-context-menu button {
   display: block;
   width: 100%;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--app-radius-control);
   background: transparent;
   color: var(--app-text);
   cursor: pointer;
   font: inherit;
-  padding: 8px 10px;
+  padding: var(--app-space-2) var(--app-space-2);
   text-align: left;
 }
 
@@ -7844,7 +7976,7 @@ onBeforeUnmount(() => {
 }
 
 .ledger-context-menu button:disabled {
-  color: #b8c0cc;
+  color: var(--app-disabled);
   cursor: not-allowed;
 }
 
@@ -7855,14 +7987,14 @@ onBeforeUnmount(() => {
 }
 
 .ledger-context-menu-shortcut-item kbd {
-  color: var(--app-text-muted);
+  color: var(--app-muted);
   font-family: inherit;
   font-size: 11px;
 }
 
 .ledger-context-menu-separator {
   height: 1px;
-  margin: 5px 4px;
+  margin: var(--app-space-1) var(--app-space-1);
   background: var(--app-border);
 }
 
@@ -7894,10 +8026,10 @@ onBeforeUnmount(() => {
   width: 200px;
   box-sizing: border-box;
   border: 1px solid var(--app-border-strong);
-  border-radius: 12px;
+  border-radius: var(--app-radius-card);
   background: var(--app-bg);
   box-shadow: 0 8px 26px rgb(45 42 38 / 10%);
-  padding: 5px;
+  padding: var(--app-space-1);
 }
 
 .ledger-context-menu-submenu-panel.opens-left {
@@ -7909,10 +8041,10 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--app-space-2);
   color: var(--app-muted);
   font-size: 13px;
-  padding: 5px 8px 7px;
+  padding: var(--app-space-1) var(--app-space-2) var(--app-space-2);
   white-space: nowrap;
 }
 
@@ -7921,13 +8053,13 @@ onBeforeUnmount(() => {
   width: 72px;
   height: 28px;
   border: 1px solid var(--app-border-strong);
-  border-radius: 6px;
+  border-radius: var(--app-radius-control);
   outline: 0;
   background: var(--app-bg);
   color: var(--app-text);
   font: inherit;
   font-variant-numeric: tabular-nums;
-  padding: 0 5px;
+  padding: 0 var(--app-space-1);
   text-align: center;
 }
 
@@ -7952,7 +8084,7 @@ onBeforeUnmount(() => {
 }
 
 .ledger-locked-visibility :deep(.el-checkbox__label) {
-  padding-left: 5px;
+  padding-left: var(--app-space-1);
   font-size: 14px;
 }
 
@@ -7980,12 +8112,12 @@ onBeforeUnmount(() => {
   min-height: 46px;
   align-items: center;
   flex-wrap: nowrap;
-  gap: 6px;
+  gap: var(--app-space-2);
   overflow-x: auto;
   border: 1px solid var(--app-primary-border);
-  border-radius: 12px;
+  border-radius: var(--app-radius-card);
   background: var(--app-hover);
-  padding: 5px 8px;
+  padding: var(--app-space-1) var(--app-space-2);
   scrollbar-width: none;
 }
 
@@ -7995,9 +8127,9 @@ onBeforeUnmount(() => {
 
 .selection-summary {
   display: grid;
-  min-width: 112px;
+  min-width: 92px;
   flex: 0 0 auto;
-  gap: 1px;
+  gap: var(--app-space-optical);
   line-height: 1.15;
 }
 
@@ -8026,7 +8158,7 @@ onBeforeUnmount(() => {
 .selection-quick-actions {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--app-space-1);
 }
 
 .selection-quick-actions > :deep(.el-button + .el-button) {
@@ -8044,7 +8176,7 @@ onBeforeUnmount(() => {
 }
 
 .selection-bar :deep(.el-button > svg) {
-  margin-left: 3px;
+  margin-left: var(--app-space-1);
 }
 
 .ledger-table-card {
@@ -8073,17 +8205,17 @@ onBeforeUnmount(() => {
   min-height: 38px;
   flex: 0 0 38px;
   align-items: flex-end;
-  gap: 4px;
+  gap: var(--app-space-1);
   border-top: 1px solid var(--app-border);
   background: var(--app-bg);
-  padding: 5px 6px 0;
+  padding: var(--app-space-1) var(--app-space-2) 0;
 }
 
 .project-tab-navigation {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
-  padding-bottom: 2px;
+  padding-bottom: var(--app-space-optical);
 }
 
 .project-tab-navigation > :deep(.el-button) {
@@ -8099,8 +8231,8 @@ onBeforeUnmount(() => {
   flex: 0 0 auto;
   align-items: center;
   justify-content: flex-end;
-  gap: 8px;
-  padding-bottom: 2px;
+  gap: var(--app-space-2);
+  padding-bottom: var(--app-space-optical);
 }
 
 .ledger-record-total {
@@ -8114,7 +8246,7 @@ onBeforeUnmount(() => {
   display: inline-flex;
   min-width: 260px;
   align-items: center;
-  gap: 4px;
+  gap: var(--app-space-1);
 }
 
 .ledger-zoom-slider {
@@ -8136,7 +8268,7 @@ onBeforeUnmount(() => {
 }
 
 .row-lock {
-  color: var(--app-warning);
+  color: var(--app-warning-text);
   font-size: 17px;
 }
 
@@ -8145,7 +8277,7 @@ onBeforeUnmount(() => {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--app-space-optical);
 }
 
 .grid-fill-handle {
@@ -8195,7 +8327,7 @@ onBeforeUnmount(() => {
   color: var(--app-primary-hover);
   font-size: 12px;
   line-height: 1.2;
-  padding: 0 4px;
+  padding: 0 var(--app-space-1);
   pointer-events: none;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -8255,7 +8387,7 @@ onBeforeUnmount(() => {
 }
 
 .cell-field-error {
-  color: var(--app-danger);
+  color: var(--app-danger-text);
   font-size: 11px;
   line-height: 1.3;
   text-align: left;
@@ -8268,7 +8400,7 @@ onBeforeUnmount(() => {
 }
 
 .dialog-note {
-  margin: 0 0 16px;
+  margin: 0 0 var(--app-space-4);
   color: var(--app-muted);
   font-size: 13px;
   line-height: 1.6;
@@ -8290,7 +8422,7 @@ onBeforeUnmount(() => {
 }
 
 .cell-save-state.is-dirty {
-  color: var(--app-warning);
+  color: var(--app-warning-text);
   font-weight: 700;
 }
 
@@ -8299,7 +8431,7 @@ onBeforeUnmount(() => {
 }
 
 .cell-save-state.is-error {
-  color: var(--app-danger);
+  color: var(--app-danger-text);
   font-weight: 700;
 }
 
@@ -8307,7 +8439,7 @@ onBeforeUnmount(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: var(--app-space-2);
   color: var(--app-muted);
   font-size: 12px;
 }
@@ -8315,27 +8447,27 @@ onBeforeUnmount(() => {
 .two-column-dialog-form {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
+  gap: var(--app-space-4);
 }
 
 .replace-preview-panel {
   border: 1px solid var(--app-border-strong);
-  border-radius: 8px;
-  padding: 12px;
+  border-radius: var(--app-radius-control);
+  padding: var(--app-space-3);
   background: var(--app-surface-soft);
 }
 
 .reorder-preview-panel {
   display: grid;
-  gap: 10px;
+  gap: var(--app-space-2);
 }
 
 .reorder-project-preview {
   display: grid;
-  gap: 4px;
+  gap: var(--app-space-1);
   border: 1px solid var(--app-border-light);
-  border-radius: 8px;
-  padding: 9px 11px;
+  border-radius: var(--app-radius-control);
+  padding: var(--app-space-2) var(--app-space-3);
   font-size: 12px;
 }
 
@@ -8346,8 +8478,8 @@ onBeforeUnmount(() => {
 .replace-preview-panel ul {
   max-height: 150px;
   overflow: auto;
-  margin: 8px 0 0;
-  padding-left: 20px;
+  margin: var(--app-space-2) 0 0;
+  padding-left: var(--app-space-6);
 }
 
 :deep(.ledger-validation-dialog) {
@@ -8356,13 +8488,13 @@ onBeforeUnmount(() => {
 
 .validation-dialog-content {
   display: grid;
-  gap: 14px;
+  gap: var(--app-space-3);
 }
 
 .validation-dialog-summary {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 12px;
+  gap: var(--app-space-2) var(--app-space-3);
   align-items: baseline;
 }
 
@@ -8380,18 +8512,18 @@ onBeforeUnmount(() => {
   max-height: 220px;
   overflow: auto;
   margin: 0;
-  border: 1px solid #f0b849;
-  border-radius: 8px;
-  padding: 12px 12px 12px 32px;
+  border: 1px solid var(--app-warning);
+  border-radius: var(--app-radius-control);
+  padding: var(--app-space-3) var(--app-space-3) var(--app-space-3) var(--app-space-8);
   background: var(--app-warning-soft);
 }
 
 .validation-dialog-issues li.is-error {
-  color: var(--app-danger);
+  color: var(--app-danger-text);
 }
 
 .validation-dialog-issues li.is-warning {
-  color: var(--app-warning);
+  color: var(--app-warning-text);
   font-weight: 600;
 }
 
@@ -8402,7 +8534,7 @@ onBeforeUnmount(() => {
 .validation-dialog-outcome {
   margin: 0;
   border-left: 3px solid var(--app-warning);
-  padding: 8px 10px;
+  padding: var(--app-space-2) var(--app-space-2);
   background: var(--app-warning-soft);
   color: var(--app-text);
   line-height: 1.6;
@@ -8454,13 +8586,13 @@ onBeforeUnmount(() => {
 }
 
 .ledger-table-horizontal-scrollbar::-webkit-scrollbar-track {
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   background: var(--app-surface-soft);
 }
 
 .ledger-table-horizontal-scrollbar::-webkit-scrollbar-thumb {
   border: 2px solid var(--app-surface-soft);
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   background: var(--app-muted);
 }
 
@@ -8499,7 +8631,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  background: var(--app-surface);
+  background: var(--app-card);
 }
 
 .ledger-table-surface :deep(.el-table-v2__left) {
@@ -8649,7 +8781,7 @@ onBeforeUnmount(() => {
     flex: 1 0 100%;
     overflow-x: auto;
     justify-content: flex-start;
-    padding: 4px 2px;
+    padding: var(--app-space-1) var(--app-space-optical);
   }
 
   .ledger-zoom-footer > * {

@@ -1,0 +1,46 @@
+/* Primitive values → --app-* semantic tokens → Element Plus/page components. */
+:root {
+  --palette-white: #ffffff;
+  --palette-black: #111111;
+  --palette-blue: #2563a6;
+  --palette-violet: #7660a5;
+  --palette-teal: #2d8279;
+  --palette-ochre: #9b6b27;
+  --palette-rose: #a44f70;
+  --palette-slate: #4f719e;
+  --palette-olive: #6a6c38;
+  --palette-brown: #806656;
+
+  --app-space-1: 4px;
+  --app-space-2: 8px;
+  --app-space-3: 12px;
+  --app-space-4: 16px;
+  --app-space-6: 24px;
+  --app-space-8: 32px;
+  --app-space-optical: 2px;
+  --app-radius-control: 8px;
+  --app-radius-card: 12px;
+  --app-radius-dialog: 16px;
+  --app-radius-pill: 999px;
+  --app-shadow-card: 0 1px 3px rgb(16 24 40 / 5%);
+
+  --app-chart-category-1: var(--palette-blue);
+  --app-chart-category-2: var(--palette-violet);
+  --app-chart-category-3: var(--palette-teal);
+  --app-chart-category-4: var(--palette-ochre);
+  --app-chart-category-5: var(--palette-rose);
+  --app-chart-category-6: var(--palette-slate);
+  --app-chart-category-7: var(--palette-olive);
+  --app-chart-category-8: var(--palette-brown);
+}
+
+:root[data-theme="noir"], :root[data-theme="biolum"] {
+  --palette-blue: #60a5fa;
+  --palette-violet: #a78bfa;
+  --palette-teal: #5eead4;
+  --palette-ochre: #fbbf24;
+  --palette-rose: #f9a8d4;
+  --palette-slate: #93c5fd;
+  --palette-olive: #bef264;
+  --palette-brown: #fdba74;
+}

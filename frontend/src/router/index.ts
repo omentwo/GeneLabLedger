@@ -36,12 +36,6 @@ const routes: RouteRecordRaw[] = [
         meta: { title: "实验编排" },
       },
       {
-        path: "auto-export",
-        name: "auto-export",
-        component: () => import("@/views/AutoExportView.vue"),
-        meta: { title: "自动导出" },
-      },
-      {
         path: "reports",
         name: "reports",
         component: () => import("@/views/ReportsView.vue"),

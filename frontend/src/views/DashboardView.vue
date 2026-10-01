@@ -18,6 +18,7 @@ import { getDashboardSummary } from "@/api/dashboard";
 import DashboardChart from "@/components/dashboard/DashboardChart.vue";
 import { useAppStore } from "@/stores/app";
 import type { DashboardSummary } from "@/types/api";
+import { chartLabelColor, projectColorSlot, useChartPalette } from "@/utils/chartPalette";
 
 const appStore = useAppStore();
 const router = useRouter();
@@ -28,14 +29,14 @@ const selectedProjectId = ref("");
 const trendMonths = ref<6 | 12>(12);
 const countFormatter = new Intl.NumberFormat("zh-CN");
 let requestController: AbortController | null = null;
+const chartPalette = useChartPalette();
 
 function formatCount(value: number): string {
   return countFormatter.format(value);
 }
 
 function cssColor(name: string, fallback: string): string {
-  if (typeof window === "undefined") return fallback;
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+  return chartPalette.value[name] || fallback;
 }
 
 function escapeHtml(value: string): string {
@@ -150,17 +151,8 @@ const projectComposition = computed(() =>
 );
 const workloadChartHeight = computed(() => `${Math.max(330, allProjects.value.length * 46 + 88)}px`);
 
-function projectColor(index: number): string {
-  const themeColors = [
-    cssColor("--app-chart-primary", "#5968ca"),
-    cssColor("--app-chart-secondary", "#9180c7"),
-    "#3f8f83",
-    "#c7833f",
-    "#b86278",
-    "#5b7db8",
-    "#7b68ad",
-  ];
-  return themeColors[index] ?? `hsl(${(index * 53 + 198) % 360} 56% 52%)`;
+function projectColor(projectId: string): string {
+  return chartPalette.value[`--app-chart-category-${projectColorSlot(projectId)}`]!;
 }
 
 const structureChartOption = computed<EChartsCoreOption>(() => ({
@@ -203,13 +195,13 @@ const structureChartOption = computed<EChartsCoreOption>(() => ({
     axisLabel: { color: cssColor("--app-muted", "#606b80") },
     splitLine: { lineStyle: { color: cssColor("--app-border", "#e0e4ee"), type: "dashed" } },
   },
-  series: projectComposition.value.map((project, index) => ({
+  series: projectComposition.value.map((project) => ({
     name: project.name,
     type: "bar",
     stack: "current-month-total",
     barMaxWidth: 42,
     emphasis: { focus: "series" },
-    itemStyle: { color: projectColor(index) },
+    itemStyle: { color: projectColor(project.id) },
     label: {
       show: true,
       position: "inside",
@@ -219,7 +211,7 @@ const structureChartOption = computed<EChartsCoreOption>(() => ({
         const monthlyTotal = compositionMonthly.value[item.dataIndex ?? -1]?.total ?? 0;
         return value > Math.max(1, monthlyTotal * 0.12) ? String(value) : "";
       },
-      color: "#ffffff",
+      color: chartLabelColor(projectColor(project.id)),
       fontWeight: 700,
     },
     data: compositionMonthly.value.map((month) => {
@@ -433,66 +425,66 @@ onBeforeUnmount(() => requestController?.abort());
 </template>
 
 <style scoped>
-.dashboard { display: grid; gap: 18px; color: var(--app-text); }
-.dashboard-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; padding: 6px 2px 2px; }
-.dashboard-eyebrow, .panel-eyebrow { display: block; margin-bottom: 5px; color: var(--app-primary-text); font-size: 11px; font-weight: 750; letter-spacing: 0.13em; text-transform: uppercase; }
+.dashboard { display: grid; gap: var(--app-space-4); color: var(--app-text); }
+.dashboard-header { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--app-space-6); padding: var(--app-space-2) var(--app-space-optical) var(--app-space-optical); }
+.dashboard-eyebrow, .panel-eyebrow { display: block; margin-bottom: var(--app-space-1); color: var(--app-primary-text); font-size: 11px; font-weight: 750; letter-spacing: 0.13em; text-transform: uppercase; }
 .dashboard-header h1 { margin: 0; font-size: clamp(25px, 3vw, 34px); line-height: 1.2; letter-spacing: -0.035em; }
-.dashboard-header p, .panel-header p { margin: 6px 0 0; color: var(--app-muted); font-size: 13px; }
-.dashboard-actions { display: flex; align-items: center; gap: 10px; }
+.dashboard-header p, .panel-header p { margin: var(--app-space-2) 0 0; color: var(--app-muted); font-size: 13px; }
+.dashboard-actions { display: flex; align-items: center; gap: var(--app-space-2); }
 .project-filter { width: 220px; }
-.refresh-button { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 13px; border: 1px solid var(--app-border-strong); border-radius: 8px; color: var(--app-text); background: var(--app-card); font: inherit; font-size: 13px; cursor: pointer; }
+.refresh-button { display: inline-flex; align-items: center; gap: var(--app-space-2); height: 32px; padding: 0 var(--app-space-3); border: 1px solid var(--app-border-strong); border-radius: var(--app-radius-control); color: var(--app-text); background: var(--app-card); font: inherit; font-size: 13px; cursor: pointer; }
 .refresh-button:hover:not(:disabled) { border-color: var(--app-primary); color: var(--app-primary-text); }
 .refresh-button:disabled { cursor: wait; opacity: 0.65; }
 .spinning { animation: spin 0.9s linear infinite; }
-.dashboard-alert { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border: 1px solid var(--app-danger); border-radius: 10px; color: var(--app-danger); background: var(--app-danger-soft); font-size: 13px; }
+.dashboard-alert { display: flex; align-items: center; gap: var(--app-space-2); padding: var(--app-space-3) var(--app-space-3); border: 1px solid var(--app-danger); border-radius: var(--app-radius-control); color: var(--app-danger-text); background: var(--app-danger-soft); font-size: 13px; }
 .dashboard-alert span { flex: 1; }
 .dashboard-alert button { border: 0; color: inherit; background: transparent; font: inherit; font-weight: 700; cursor: pointer; }
-.kpi-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
-.kpi-card, .panel, .loading-panel { border: 1px solid var(--app-border); border-radius: 14px; background: var(--app-card); box-shadow: 0 1px 2px rgb(15 23 42 / 4%); }
-.kpi-card { display: flex; align-items: flex-start; gap: 13px; min-width: 0; padding: 18px; }
+.kpi-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--app-space-3); }
+.kpi-card, .panel, .loading-panel { border: 1px solid var(--app-border); border-radius: var(--app-radius-card); background: var(--app-card); box-shadow: 0 1px 2px rgb(15 23 42 / 4%); }
+.kpi-card { display: flex; align-items: flex-start; gap: var(--app-space-3); min-width: 0; padding: var(--app-space-4); }
 .kpi-card-primary { border-color: var(--app-primary-border); background: linear-gradient(145deg, var(--app-card), var(--app-primary-soft)); }
-.kpi-icon { display: grid; flex: 0 0 38px; width: 38px; height: 38px; place-items: center; border-radius: 10px; color: var(--app-primary-text); background: var(--app-primary-soft); }
-.kpi-content { display: grid; min-width: 0; gap: 3px; }
+.kpi-icon { display: grid; flex: 0 0 38px; width: 38px; height: 38px; place-items: center; border-radius: var(--app-radius-control); color: var(--app-primary-text); background: var(--app-primary-soft); }
+.kpi-content { display: grid; min-width: 0; gap: var(--app-space-1); }
 .kpi-label { color: var(--app-muted); font-size: 12px; font-weight: 650; }
 .kpi-content strong { font-size: clamp(25px, 3vw, 34px); line-height: 1.15; letter-spacing: -0.035em; }
-.kpi-content strong em { margin-left: 2px; font-size: 15px; font-style: normal; color: var(--app-muted); }
-.kpi-content small { display: flex; align-items: center; gap: 4px; min-height: 18px; color: var(--app-subtle); font-size: 11px; }
+.kpi-content strong em { margin-left: var(--app-space-optical); font-size: 15px; font-style: normal; color: var(--app-muted); }
+.kpi-content small { display: flex; align-items: center; gap: var(--app-space-1); min-height: 18px; color: var(--app-subtle); font-size: 11px; }
 .kpi-content small.change-up { color: var(--app-success-text); }
-.kpi-content small.change-down { color: var(--app-danger); }
-.analytics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-.panel { min-width: 0; padding: 18px; }
-.panel-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.kpi-content small.change-down { color: var(--app-danger-text); }
+.analytics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--app-space-3); }
+.panel { min-width: 0; padding: var(--app-space-4); }
+.panel-header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--app-space-4); }
 .panel-header h2 { margin: 0; font-size: 17px; line-height: 1.3; }
-.range-switch { display: inline-flex; flex: 0 0 auto; padding: 3px; border: 1px solid var(--app-border); border-radius: 9px; background: var(--app-surface-soft); }
-.range-switch button { padding: 5px 9px; border: 0; border-radius: 6px; color: var(--app-muted); background: transparent; font: inherit; font-size: 11px; cursor: pointer; }
+.range-switch { display: inline-flex; flex: 0 0 auto; padding: var(--app-space-1); border: 1px solid var(--app-border); border-radius: var(--app-radius-control); background: var(--app-surface-soft); }
+.range-switch button { padding: var(--app-space-1) var(--app-space-2); border: 0; border-radius: var(--app-radius-control); color: var(--app-muted); background: transparent; font: inherit; font-size: 11px; cursor: pointer; }
 .range-switch button.active { color: var(--app-primary-text); background: var(--app-card); box-shadow: 0 1px 3px rgb(15 23 42 / 10%); }
-.trend-chart { height: 300px; min-height: 300px; margin-top: 8px; }
-.structure-chart { height: 300px; min-height: 300px; margin-top: 8px; cursor: pointer; }
-.workload-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; align-items: start; gap: 14px; }
+.trend-chart { height: 300px; min-height: 300px; margin-top: var(--app-space-2); }
+.structure-chart { height: 300px; min-height: 300px; margin-top: var(--app-space-2); cursor: pointer; }
+.workload-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; align-items: start; gap: var(--app-space-3); }
 .workload-heading { align-items: center; }
 .panel-note, .project-count { color: var(--app-muted); font-size: 11px; }
-.workload-chart { height: 330px; min-height: 330px; margin-top: 10px; cursor: pointer; }
-.ranking-list { display: grid; gap: 3px; margin: 15px 0 0; padding: 0; list-style: none; }
-.ranking-link { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 9px; min-width: 0; padding: 10px 4px; border-bottom: 1px solid var(--app-border-light); color: var(--app-text); text-decoration: none; }
+.workload-chart { height: 330px; min-height: 330px; margin-top: var(--app-space-2); cursor: pointer; }
+.ranking-list { display: grid; gap: var(--app-space-1); margin: var(--app-space-4) 0 0; padding: 0; list-style: none; }
+.ranking-link { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: var(--app-space-2); min-width: 0; padding: var(--app-space-2) var(--app-space-1); border-bottom: 1px solid var(--app-border-light); color: var(--app-text); text-decoration: none; }
 .ranking-list li:last-child .ranking-link { border-bottom: 0; }
 .ranking-link:hover .ranking-main strong { color: var(--app-primary-text); }
-.ranking-index { display: grid; width: 25px; height: 25px; place-items: center; border-radius: 8px; color: var(--app-muted); background: var(--app-surface-soft); font-size: 11px; font-weight: 750; }
+.ranking-index { display: grid; width: 25px; height: 25px; place-items: center; border-radius: var(--app-radius-control); color: var(--app-muted); background: var(--app-surface-soft); font-size: 11px; font-weight: 750; }
 .ranking-index.leading { color: var(--app-on-primary); background: var(--app-primary); }
-.ranking-main { display: grid; min-width: 0; gap: 7px; }
+.ranking-main { display: grid; min-width: 0; gap: var(--app-space-2); }
 .ranking-main strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; transition: color 0.15s ease; }
-.ranking-main i { display: block; height: 4px; overflow: hidden; border-radius: 99px; background: var(--app-border-light); }
+.ranking-main i { display: block; height: 4px; overflow: hidden; border-radius: var(--app-radius-pill); background: var(--app-border-light); }
 .ranking-main i b { display: block; height: 100%; min-width: 3px; border-radius: inherit; background: var(--app-chart-primary); }
-.ranking-value { display: flex; align-items: baseline; gap: 2px; }
+.ranking-value { display: flex; align-items: baseline; gap: var(--app-space-optical); }
 .ranking-value strong { font-size: 15px; }
 .ranking-value small { color: var(--app-muted); font-size: 10px; }
-.project-links { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; margin-top: 16px; }
-.project-link { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; padding: 11px 12px; border: 1px solid var(--app-border); border-radius: 9px; color: var(--app-text); background: var(--app-surface-soft); text-decoration: none; transition: border-color 0.16s ease, transform 0.16s ease, background 0.16s ease; }
-.project-link span { display: flex; align-items: center; gap: 7px; min-width: 0; overflow: hidden; font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.project-links { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--app-space-2); margin-top: var(--app-space-4); }
+.project-link { display: flex; align-items: center; justify-content: space-between; gap: var(--app-space-2); min-width: 0; padding: var(--app-space-3) var(--app-space-3); border: 1px solid var(--app-border); border-radius: var(--app-radius-control); color: var(--app-text); background: var(--app-surface-soft); text-decoration: none; transition: border-color 0.16s ease, transform 0.16s ease, background 0.16s ease; }
+.project-link span { display: flex; align-items: center; gap: var(--app-space-2); min-width: 0; overflow: hidden; font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .project-link span svg { flex: 0 0 auto; color: var(--app-primary-text); }
 .project-link > svg { flex: 0 0 auto; color: var(--app-muted); }
 .project-link:hover { transform: translateY(-1px); border-color: var(--app-primary); background: var(--app-primary-soft); }
 .panel-empty { display: grid; min-height: 220px; place-items: center; color: var(--app-muted); font-size: 13px; }
-.loading-panel { min-height: 420px; padding: 24px; }
+.loading-panel { min-height: 420px; padding: var(--app-space-6); }
 .skeleton-card { min-height: 118px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (max-width: 1120px) {
@@ -505,13 +497,13 @@ onBeforeUnmount(() => requestController?.abort());
   .project-links { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 @media (max-width: 720px) {
-  .dashboard { gap: 12px; }
-  .dashboard-header { align-items: stretch; flex-direction: column; gap: 14px; }
+  .dashboard { gap: var(--app-space-3); }
+  .dashboard-header { align-items: stretch; flex-direction: column; gap: var(--app-space-3); }
   .dashboard-actions { align-items: stretch; }
   .project-filter { flex: 1; width: auto; }
-  .kpi-grid { grid-template-columns: minmax(0, 1fr); gap: 10px; }
-  .kpi-card { padding: 15px; }
-  .panel { padding: 15px; }
+  .kpi-grid { grid-template-columns: minmax(0, 1fr); gap: var(--app-space-2); }
+  .kpi-card { padding: var(--app-space-4); }
+  .panel { padding: var(--app-space-4); }
   .trend-chart { height: 270px; min-height: 270px; }
   .workload-heading { align-items: flex-start; }
   .panel-note { display: none; }

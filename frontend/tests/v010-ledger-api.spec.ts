@@ -5,6 +5,8 @@ import {
   commitReplace,
   createRecord,
   previewCellBatch,
+  previewReplace,
+  FIND_REPLACE_RECORD_LIMIT,
   queryRecordIds,
   queryRecords,
 } from "@/api/records";
@@ -38,11 +40,23 @@ describe("v0.10 ledger APIs", () => {
     };
 
     await queryRecords(query);
-    await queryRecordIds({ ...query, limit: 1, offset: 0 });
+    await queryRecordIds(query);
 
     expect(fetchMock.mock.calls[0]![0]).toBe("/api/records/query");
     expect(JSON.parse(String((fetchMock.mock.calls[0]![1] as RequestInit).body))).toEqual(query);
     expect(fetchMock.mock.calls[1]![0]).toBe("/api/records/query/ids");
+    const { limit, offset, ...scope } = query;
+    expect(JSON.parse(String((fetchMock.mock.calls[1]![1] as RequestInit).body))).toEqual(scope);
+  });
+
+  it("rejects oversized replacement scopes explicitly before sending a request", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(previewReplace({
+      project_id: "p1", field_id: "f1", record_ids: Array.from({ length: FIND_REPLACE_RECORD_LIMIT + 1 }, (_, i) => `r${i}`),
+      find: "旧", replacement: "新", match_mode: "substring", case_sensitive: false,
+    })).rejects.toThrow("20,000");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("previews and atomically commits existing cells plus new records", async () => {

@@ -1,18 +1,11 @@
 from __future__ import annotations
 
-import asyncio
-import threading
-from pathlib import Path
-
 import pytest
-from sqlalchemy import select
-from test_auto_exports import task_payload
 from test_docx_template import split_placeholder_docx
 
 from app.api.ledger_templates import _clean_fields
-from app.models import AutoExportRun, ProjectRecord
+from app.models import ProjectRecord
 from app.schemas import LedgerTemplateField
-from app.services.auto_exports import AutoExportScheduler
 from app.services.docx_template import InvalidDocxTemplate, render_docx
 
 
@@ -20,6 +13,11 @@ def test_excel_import_routes_are_removed(client):
     for route in ("preview", "commit"):
         assert client.post(f"/api/imports/workbook/{route}").status_code == 404
     assert not any("/imports/" in path for path in client.get("/openapi.json").json()["paths"])
+
+
+def test_auto_export_routes_are_removed(client):
+    assert client.get("/api/auto-export/tasks").status_code == 404
+    assert not any("/auto-export" in path for path in client.get("/openapi.json").json()["paths"])
 
 
 def test_numeric_filters_exclude_partial_and_invalid_numbers(client, seeded_projects):
@@ -90,85 +88,6 @@ def test_cross_page_highlight_snapshots_undo_without_deleting(client, seeded_pro
     assert len(undo.json()["records"]) == 2
     assert all(row["highlight_color"] is None for row in undo.json()["records"])
     assert client.post("/api/records/query", json={"project_id": project_id}).json()["total"] == 201
-
-
-def test_retention_locked_file_does_not_fail_or_duplicate_export(
-    client, seeded_projects, tmp_path, monkeypatch
-):
-    task = client.post(
-        "/api/auto-export/tasks",
-        json=task_payload(
-            seeded_projects["TB"]["id"],
-            tmp_path / "exports",
-        ),
-    ).json()
-    url = f"/api/auto-export/tasks/{task['id']}/run"
-    first = Path(client.post(url).json()["file_path"])
-    unlink = Path.unlink
-
-    def locked(path, *args, **kwargs):
-        if path == first:
-            raise PermissionError("Excel holds this file")
-        return unlink(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "unlink", locked)
-    second = client.post(url)
-    assert second.status_code == 200, second.text
-    assert second.json()["attempt_count"] == 1
-    assert len(list(first.parent.glob("*.xlsx"))) == 2
-    history = client.get(f"/api/auto-export/tasks/{task['id']}/runs").json()
-    assert history[1]["file_path"] == str(first)
-    monkeypatch.setattr(Path, "unlink", unlink)
-    assert client.post(url).status_code == 200
-    assert not first.exists()
-
-
-def test_export_is_committed_before_retention(client, seeded_projects, tmp_path, monkeypatch):
-    task = client.post(
-        "/api/auto-export/tasks",
-        json=task_payload(
-            seeded_projects["TB"]["id"],
-            tmp_path / "exports",
-        ),
-    ).json()
-
-    def cleanup_failure(session, task):
-        with client.app.state.database.session_factory() as other:
-            run = other.scalar(select(AutoExportRun).where(AutoExportRun.task_id == task.id))
-            assert run.status == "success"
-            assert Path(run.file_path).is_file()
-        raise RuntimeError("cleanup transaction failed")
-
-    monkeypatch.setattr("app.services.auto_exports.apply_retention_policy", cleanup_failure)
-    result = client.post(f"/api/auto-export/tasks/{task['id']}/run")
-    assert result.status_code == 200, result.text
-    assert result.json()["attempt_count"] == 1
-    assert len(list((tmp_path / "exports").glob("*.xlsx"))) == 1
-
-
-def test_scheduler_stop_waits_for_manual_export(client, monkeypatch):
-    entered, release = threading.Event(), threading.Event()
-
-    def execute(*args):
-        entered.set()
-        assert release.wait(5)
-        return "done"
-
-    monkeypatch.setattr("app.services.auto_exports.execute_auto_export_task", execute)
-
-    async def scenario():
-        scheduler = AutoExportScheduler(client.app.state.database)
-        job = asyncio.create_task(scheduler.run_task("task"))
-        await asyncio.to_thread(entered.wait, 5)
-        stopped = asyncio.create_task(scheduler.stop())
-        await asyncio.sleep(0)
-        assert not stopped.done()
-        release.set()
-        assert await job == "done"
-        await stopped
-        assert not scheduler._jobs
-
-    asyncio.run(scenario())
 
 
 def test_layout_compare_and_swap_preserves_other_window(client):

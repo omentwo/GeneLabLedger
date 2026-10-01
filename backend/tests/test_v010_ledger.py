@@ -4,6 +4,7 @@ import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.api import records as records_api
 from app.database import Database, begin_immediate_write
-from app.models import ProjectRecord
+from app.models import ProjectRecord, RecordValue
 from app.services import cell_batches
 
 
@@ -668,6 +669,49 @@ def test_dynamic_query_pagination_sort_filters_and_all_ids(
     assert client.post("/api/records/query", json={**payload, "limit": 10_001}).status_code == 422
 
 
+def test_find_replace_covers_records_beyond_1000_and_keeps_locked_and_outside_scope(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    project_id = seeded_projects["TB"]["id"]
+    field = create_custom_field(client, project_id, label="全范围替换")
+    record_ids = [str(uuid4()) for _ in range(1005)]
+    outside_id = str(uuid4())
+    database = client.app.state.database
+    with database.session_factory() as session:
+        for index, record_id in enumerate([*record_ids, outside_id]):
+            session.add(ProjectRecord(
+                id=record_id,
+                project_id=project_id,
+                position=index + 1,
+                pathology_number=f"FULL-REPLACE-{index}" if index < 1005 else "OUTSIDE-SCOPE",
+                locked=index == 0,
+                values=[RecordValue(field_id=field["id"], value_text="旧内容")],
+            ))
+        session.commit()
+    ids = client.post("/api/records/query/ids", json={
+        "project_id": project_id, "include_locked": True, "search": "FULL-REPLACE-",
+        "field_filters": [], "limit": 1, "offset": 1000,
+    })
+    assert ids.status_code == 200, ids.text
+    assert ids.json()["record_ids"] == record_ids
+    preview = client.post("/api/records/replace/preview", json={
+        "project_id": project_id, "field_id": field["id"], "record_ids": ids.json()["record_ids"],
+        "find": "旧", "replacement": "新", "match_mode": "substring", "case_sensitive": False,
+    })
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["matched_count"] == 1004
+    assert preview.json()["skipped_locked"] == 1
+    assert len(preview.json()["samples"]) == 50
+    committed = client.post("/api/records/replace/commit", json={"token": preview.json()["token"]})
+    assert committed.status_code == 200, committed.text
+    assert len(committed.json()["changes"]) == 1004
+    for record_id, expected in [
+        (record_ids[-1], "新内容"), (record_ids[0], "旧内容"), (outside_id, "旧内容"),
+    ]:
+        assert client.get(f"/api/records/{record_id}").json()["values"][field["id"]] == expected
+
+
 def test_record_queries_can_exclude_locked_records(
     client: TestClient,
     seeded_projects: dict[str, dict],
@@ -1150,3 +1194,53 @@ def test_experiment_number_upgrade_removes_uniqueness_and_preserves_foreign_keys
             "SELECT project_id, experiment_number FROM project_records "
             "WHERE experiment_number = 'EXP-1' ORDER BY id"
         ).fetchall() == [("p1", "EXP-1"), ("p2", "EXP-1"), ("p1", "EXP-1")]
+
+
+def test_desktop_schema_upgrade_backs_up_and_removes_retired_auto_export_tables(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "legacy-auto-export.db"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "CREATE TABLE auto_export_tasks (id VARCHAR(36) PRIMARY KEY, name VARCHAR(160) NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE auto_export_runs ("
+            "id VARCHAR(36) PRIMARY KEY, task_id VARCHAR(36) NOT NULL, "
+            "FOREIGN KEY (task_id) REFERENCES auto_export_tasks (id) ON DELETE CASCADE)"
+        )
+        connection.execute(
+            "INSERT INTO auto_export_tasks (id, name) VALUES ('task-1', '夜间导出')"
+        )
+        connection.execute(
+            "INSERT INTO auto_export_runs (id, task_id) VALUES ('run-1', 'task-1')"
+        )
+        connection.commit()
+
+    database = Database(f"sqlite:///{database_path.as_posix()}")
+    try:
+        database.create_all()
+    finally:
+        database.dispose()
+
+    backups = list((tmp_path / "backups").glob("ledger-before-auto-export-removal-*.db"))
+    assert len(backups) == 1
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='auto_export_tasks'"
+        ).fetchone() is None
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='auto_export_runs'"
+        ).fetchone() is None
+    with sqlite3.connect(backups[0]) as connection:
+        preserved_tasks = connection.execute("SELECT id, name FROM auto_export_tasks").fetchall()
+        preserved_runs = connection.execute("SELECT id, task_id FROM auto_export_runs").fetchall()
+    assert preserved_tasks == [("task-1", "夜间导出")]
+    assert preserved_runs == [("run-1", "task-1")]
+
+    second_start = Database(f"sqlite:///{database_path.as_posix()}")
+    try:
+        second_start.create_all()
+    finally:
+        second_start.dispose()
+    assert len(list((tmp_path / "backups").glob("ledger-before-auto-export-removal-*.db"))) == 1

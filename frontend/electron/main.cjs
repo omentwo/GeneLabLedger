@@ -8,6 +8,7 @@ const net = require("node:net");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { ClipboardFollower } = require("./clipboard-follow.cjs");
+const { WindowCloseCoordinator } = require("./window-close.cjs");
 
 const APP_TITLE = "基因检测台账";
 const CONFIG_FILENAME = "desktop-settings.json";
@@ -32,6 +33,136 @@ let alwaysOnTop = false;
 let quickEntryBounds = null;
 let quickEntryBoundsTimer = null;
 let quitting = false;
+const closeGuardReady = new Set();
+const approvedWindowCloses = new Set();
+const pendingCloseRequests = new Map();
+const closeCoordinator = new WindowCloseCoordinator({
+  inspect: (window) => requestRendererCloseState(window, "inspect"),
+  save: (window) => requestRendererCloseState(window, "save"),
+  release: (window) => {
+    if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+      window.webContents.send("gene-ledger:close-request", { requestId: crypto.randomUUID(), action: "release" });
+    }
+  },
+  confirm: async (window) => {
+    if (window.isMinimized()) window.restore();
+    window.show();
+    window.focus();
+    const result = await dialog.showMessageBox(window, {
+      type: "warning",
+      title: "关闭前保存修改",
+      message: window === quickEntryWindow ? "快速录入中有未保存的草稿。" : "台账中有未保存的修改。",
+      detail: "选择保存后关闭，或放弃未保存内容。取消会保留窗口和草稿。",
+      buttons: ["保存后关闭", "放弃修改", "取消"],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+    });
+    return ["save", "discard", "cancel"][result.response];
+  },
+  blocked: (message) => {
+    const options = { type: "warning", title: "暂未关闭", message, buttons: ["返回修改"] };
+    const owner = BrowserWindow.getFocusedWindow?.() ?? [quickEntryWindow, mainWindow]
+      .find((window) => window && !window.isDestroyed() && window.isVisible());
+    return owner ? dialog.showMessageBox(owner, options) : dialog.showMessageBox(options);
+  },
+});
+
+function closeIpcWindow(event) {
+  const window = [mainWindow, quickEntryWindow].find((candidate) =>
+    candidate && !candidate.isDestroyed() && candidate.webContents.id === event.sender.id);
+  if (!window || (event.senderFrame && event.senderFrame !== event.sender.mainFrame)) {
+    throw new Error("拒绝来自非业务窗口的关闭调用");
+  }
+  return window;
+}
+
+function requestRendererCloseState(window, action) {
+  if (window.isDestroyed()) return Promise.resolve({ dirty: false, busy: false, saved: true });
+  // A window that has not mounted yet cannot contain a user draft.
+  if (!closeGuardReady.has(window.webContents.id)) {
+    return Promise.resolve({ dirty: false, busy: false, saved: true });
+  }
+  return new Promise((resolve, reject) => {
+    const requestId = crypto.randomUUID();
+    const timer = setTimeout(() => {
+      pendingCloseRequests.delete(requestId);
+      reject(new Error("窗口未能及时确认保存状态，已保留窗口，请稍后重试。"));
+    }, action === "save" ? 120_000 : 10_000);
+    pendingCloseRequests.set(requestId, { senderId: window.webContents.id, resolve, reject, timer });
+    window.webContents.send("gene-ledger:close-request", { requestId, action });
+  });
+}
+
+function registerWindowCloseProtection(window, main = false) {
+  const windowId = window.id;
+  const senderId = window.webContents.id;
+  window.on("close", (event) => {
+    if (approvedWindowCloses.has(window.id)) return;
+    event.preventDefault();
+    if (main) void requestApplicationClose();
+    else void closeCoordinator.request([window], () => closeApprovedWindow(window));
+  });
+  window.on("closed", () => {
+    closeGuardReady.delete(senderId);
+    approvedWindowCloses.delete(windowId);
+  });
+  window.webContents.on("render-process-gone", () => {
+    for (const [requestId, request] of pendingCloseRequests) {
+      if (request.senderId !== senderId) continue;
+      clearTimeout(request.timer);
+      pendingCloseRequests.delete(requestId);
+      request.reject(new Error("窗口进程异常，无法确认草稿状态，已取消关闭。"));
+    }
+  });
+}
+
+function closeApprovedWindow(window) {
+  if (window.isDestroyed()) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const windowId = window.id;
+    const finish = (error) => {
+      clearTimeout(timer);
+      window.removeListener("closed", closed);
+      contents.removeListener("will-prevent-unload", prevented);
+      if (error) {
+        approvedWindowCloses.delete(windowId);
+        reject(error);
+      } else resolve();
+    };
+    const contents = window.webContents;
+    const closed = () => {
+      clearTimeout(timer);
+      contents.removeListener("will-prevent-unload", prevented);
+      resolve();
+    };
+    const prevented = () => finish(new Error("窗口取消了关闭，未保存内容仍保留。"));
+    const timer = setTimeout(() => finish(new Error("窗口尚未完成关闭，后台服务已保留，请稍后重试。")), 15_000);
+    window.once("closed", closed);
+    contents.once("will-prevent-unload", prevented);
+    approvedWindowCloses.add(windowId);
+    window.close();
+  });
+}
+
+function requestApplicationClose(restart = false) {
+  if (quitting) return Promise.resolve(false);
+  const windows = [mainWindow, quickEntryWindow].filter((window) => window && !window.isDestroyed());
+  return closeCoordinator.request(windows, async () => {
+    // Backend shutdown and relaunch happen only after every window approved.
+    quitting = true;
+    try {
+      // Complete native unload/closed events before stopping HTTP services.
+      for (const window of [...windows].reverse()) await closeApprovedWindow(window);
+    } catch (error) {
+      quitting = false;
+      throw error;
+    }
+    if (restart) app.relaunch();
+    await Promise.allSettled([clipboardFollower.close(), stopBackend()]);
+    app.exit(0);
+  });
+}
 const clipboardFollower = new ClipboardFollower({
   command: () => app.isPackaged ? packagedBackendCommand() : developmentBackendCommand(),
   onEvent: (payload) => {
@@ -392,6 +523,13 @@ function createQuickEntryWindow(context) {
     },
   });
   quickEntryWindow.setAlwaysOnTop(true, "floating");
+  registerWindowCloseProtection(quickEntryWindow);
+  quickEntryWindow.webContents.on("before-input-event", (event, input) => {
+    if ((input.control || input.meta) && String(input.key).toLowerCase() === "w") {
+      event.preventDefault();
+      quickEntryWindow?.close();
+    }
+  });
   configureRendererNavigation(quickEntryWindow);
   quickEntryWindow.webContents.on("did-start-navigation", (details) => {
     if (!details.isMainFrame || details.isSameDocument) return;
@@ -493,6 +631,7 @@ function createMainWindow() {
     },
   });
   mainWindow.setAlwaysOnTop(alwaysOnTop);
+  registerWindowCloseProtection(mainWindow, true);
   mainWindow.on("maximize", notifyWindowState);
   mainWindow.on("unmaximize", notifyWindowState);
   mainWindow.once("ready-to-show", () => mainWindow?.show());
@@ -508,13 +647,12 @@ function createMainWindow() {
     }
     if ((input.control || input.meta) && String(input.key).toLowerCase() === "w") {
       event.preventDefault();
-      app.quit();
+      mainWindow.close();
     }
   });
   configureRendererNavigation(mainWindow);
   mainWindow.on("closed", () => {
     mainWindow = null;
-    if (quickEntryWindow && !quickEntryWindow.isDestroyed()) quickEntryWindow.close();
   });
   void loadRendererWindow(mainWindow);
 }
@@ -526,6 +664,21 @@ function normalizeExportData(data) {
 }
 
 function registerDesktopHandlers() {
+  ipcMain.handle("gene-ledger:close-guard-ready", (event) => {
+    closeIpcWindow(event);
+    closeGuardReady.add(event.sender.id);
+  });
+  ipcMain.handle("gene-ledger:close-response", (event, response) => {
+    closeIpcWindow(event);
+    const request = pendingCloseRequests.get(response?.requestId);
+    if (!request || request.senderId !== event.sender.id) return;
+    if (typeof response.dirty !== "boolean" || typeof response.busy !== "boolean" || typeof response.saved !== "boolean") {
+      throw new Error("关闭状态无效");
+    }
+    clearTimeout(request.timer);
+    pendingCloseRequests.delete(response.requestId);
+    request.resolve({ dirty: response.dirty, busy: response.busy, saved: response.saved });
+  });
   ipcMain.handle("gene-ledger:clipboard-follow-start", (event, context) => {
     assertQuickEntryIpcSender(event);
     if (process.platform !== "win32") throw new Error("剪贴板跟随仅支持 Windows 桌面版");
@@ -572,7 +725,7 @@ function registerDesktopHandlers() {
     assertTrustedIpcSender(event);
     const selected = await showDirectoryPicker(
       typeof initialDirectory === "string" ? initialDirectory : "",
-      "选择自动导出目录",
+      "选择文件夹",
     );
     return { selected: Boolean(selected), directory: selected || "" };
   });
@@ -628,6 +781,7 @@ function registerDesktopHandlers() {
 
   ipcMain.handle("gene-ledger:open-quick-entry", (event, payload) => {
     assertTrustedIpcSender(event);
+    if (closeCoordinator.pending || quitting) throw new Error("请先完成当前关闭操作");
     showQuickEntryWindow(payload);
   });
 
@@ -729,8 +883,7 @@ function registerDesktopHandlers() {
 
   ipcMain.handle("gene-ledger:restart", (event) => {
     assertTrustedIpcSender(event);
-    app.relaunch();
-    app.quit();
+    return requestApplicationClose(true);
   });
 }
 
@@ -872,13 +1025,8 @@ if (!singleInstance) {
 }
 
 app.on("before-quit", (event) => {
-  if (quitting) {
-    event.preventDefault();
-    return;
-  }
   event.preventDefault();
-  quitting = true;
-  void Promise.all([clipboardFollower.close(), stopBackend()]).finally(() => app.exit(0));
+  if (!quitting) void requestApplicationClose();
 });
 
 app.on("window-all-closed", () => {

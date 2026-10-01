@@ -13,7 +13,6 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import (
-    auto_exports,
     dashboard,
     database_backups,
     exports,
@@ -28,7 +27,6 @@ from app.audit import prune_audit_logs
 from app.config import Settings
 from app.database import Database
 from app.seed import seed_initial_data
-from app.services.auto_exports import AutoExportScheduler
 from app.services.database_backups import DatabaseBackupScheduler, apply_pending_restore
 from app.services.office_preview import OfficePreviewService
 from app.services.office_printing import OfficePrintService
@@ -45,7 +43,6 @@ def create_app(
     database = Database(app_settings.database_url or "")
     office_printer = printer_service or OfficePrintService()
     office_preview = preview_service or OfficePreviewService()
-    auto_export_scheduler = AutoExportScheduler(database)
     database_backup_scheduler = DatabaseBackupScheduler(database, app_settings)
 
     @asynccontextmanager
@@ -63,12 +60,10 @@ def create_app(
                 retention_days=app_settings.audit_log_retention_days,
             )
             session.commit()
-        await auto_export_scheduler.start()
         await database_backup_scheduler.start()
         try:
             yield
         finally:
-            await auto_export_scheduler.stop()
             await database_backup_scheduler.stop(
                 create_shutdown_backup=os.environ.get("GENE_LEDGER_DESKTOP_MODE") == "1"
             )
@@ -80,7 +75,7 @@ def create_app(
 
     app = FastAPI(
         title=app_settings.app_name,
-        version="1.8.0",
+        version="1.9.0",
         lifespan=lifespan,
     )
     app.add_middleware(
@@ -94,7 +89,6 @@ def create_app(
     app.state.database = database
     app.state.printer_service = office_printer
     app.state.preview_service = office_preview
-    app.state.auto_export_scheduler = auto_export_scheduler
     app.state.database_backup_scheduler = database_backup_scheduler
 
     app.include_router(system.router, prefix="/api")
@@ -104,7 +98,6 @@ def create_app(
     app.include_router(preview.router, prefix="/api")
     app.include_router(records.router, prefix="/api")
     app.include_router(reports.router, prefix="/api")
-    app.include_router(auto_exports.router, prefix="/api")
     app.include_router(database_backups.router, prefix="/api")
     app.include_router(exports.router, prefix="/api")
 

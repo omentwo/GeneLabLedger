@@ -54,7 +54,6 @@ export interface ProjectForceDeleteResult {
   deleted_report_templates: number;
   deleted_report_versions: number;
   deleted_report_mappings: number;
-  updated_auto_export_tasks: number;
   removed_template_directories: number;
   cleanup_warnings: string[];
 }
@@ -400,53 +399,4 @@ export interface HealthStatus {
   status: string;
   database: string;
   print_engines: PrintEngineStatus[];
-}
-
-export type AutoExportScheduleType = "preset" | "cron";
-export type AutoExportPreset = "hourly" | "daily" | "weekly" | "monthly";
-export type AutoExportFormat = "xlsx";
-
-export interface AutoExportTaskInput {
-  name: string;
-  project_ids: string[];
-  output_directory: string;
-  file_format: AutoExportFormat;
-  schedule_type: AutoExportScheduleType;
-  preset: AutoExportPreset;
-  run_time: string;
-  hourly_minute: number;
-  weekday: number;
-  month_day: number;
-  cron_expression: string | null;
-  failure_retries: number;
-  retention_count: number | null;
-  enabled: boolean;
-}
-
-export interface AutoExportTask extends AutoExportTaskInput {
-  id: string;
-  next_run_at: string | null;
-  last_run_at: string | null;
-  last_status: string | null;
-  last_message: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface AutoExportRun {
-  id: string;
-  task_id: string;
-  trigger: string;
-  status: string;
-  attempt_count: number;
-  file_path: string | null;
-  error_message: string | null;
-  started_at: string;
-  finished_at: string | null;
-}
-
-export interface AutoExportConfig {
-  default_output_directory: string;
-  timezone: string;
-  cron_format: string;
 }

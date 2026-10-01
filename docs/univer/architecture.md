@@ -8,10 +8,9 @@ flowchart LR
   B --> C[(SQLite 数据库)]
   A --> D[Excel 导出 API]
   A --> E[报告模板与打印 API]
-  A --> F[自动导出调度器]
 ```
 
-当前台账由 Vue + Element Plus 渲染，后端使用 FastAPI、SQLAlchemy 和 SQLite。记录、字段、报告模板、导出任务都按 `project_id` 关联。
+当前台账由 Vue + Element Plus 渲染，后端使用 FastAPI、SQLAlchemy 和 SQLite。记录、字段和报告模板都按 `project_id` 关联。
 
 ## Univer 的目标位置
 
@@ -22,7 +21,7 @@ flowchart LR
   W --> R[记录更新/批量单元格 API]
   R --> DB[(SQLite)]
   T[工具栏与业务页面] --> R
-  T --> X[实验编排、报告、导出、自动导出]
+  T --> X[实验编排、报告、手动导出]
 ```
 
 Univer 不应成为业务数据库，也不应直接决定记录是否删除、是否锁定或字段值是否合法。表格中的行只保存到记录 ID 的映射，保存时使用记录 ID 和字段 ID。
@@ -41,7 +40,6 @@ Univer 不应成为业务数据库，也不应直接决定记录是否删除、�
 
 - `ExperimentsView.vue`：保留实验候选筛选、排序、上下移动和编号编排。
 - `ReportsView.vue`：保留模板字段映射、DOCX 生成和 WPS/Word 打印。
-- `AutoExportView.vue`：保留自动导出任务和项目选择。
 - `LedgerView.vue` 工具栏：保留底色、锁定、删除、状态和报告入口。
 
 ### 后端
@@ -49,7 +47,7 @@ Univer 不应成为业务数据库，也不应直接决定记录是否删除、�
 - 记录更新和锁定校验继续由后端执行。
 - `/records/cell-batches/preview` 和 `/records/cell-batches/commit` 处理批量粘贴；Excel 导入已移除。
 - `/exports/workbook` 继续生成手动 Excel 文件。
-- 自动导出调度器和报告打印服务不因表格组件更换而改变。
+- 报告打印服务不因表格组件更换而改变。
 
 ## 不建议的做法
 

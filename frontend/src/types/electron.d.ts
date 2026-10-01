@@ -42,10 +42,23 @@ export interface GeneLedgerDesktopBridge {
   minimizeWindow: () => Promise<void>;
   toggleWindowMaximize: () => Promise<boolean>;
   closeWindow: () => Promise<void>;
+  closeGuardReady: () => Promise<void>;
+  onCloseRequested: (listener: (request: WindowCloseRequest) => void) => () => void;
+  respondToCloseRequest: (response: WindowCloseState & { requestId: string; saved: boolean }) => Promise<void>;
   onWindowStateChanged: (
     listener: (state: { isMaximized: boolean; alwaysOnTop: boolean }) => void,
   ) => () => void;
   restart: () => Promise<void>;
+}
+
+export interface WindowCloseState {
+  dirty: boolean;
+  busy: boolean;
+}
+
+export interface WindowCloseRequest {
+  requestId: string;
+  action: "inspect" | "save" | "release";
 }
 
 export interface QuickEntryOpenContext {

@@ -109,6 +109,7 @@ class Database:
         from app import models  # noqa: F401
 
         self.backup_sqlite_before_schema_upgrade()
+        self._remove_auto_export_tables()
         self._remove_ledger_view_presets()
         self._remove_field_validation_columns()
         self._migrate_record_experiment_number_uniqueness()
@@ -151,6 +152,11 @@ class Database:
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ledger_view_presets'"
                 ).scalar()
             )
+            auto_export_exists = bool(
+                connection.exec_driver_sql(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='auto_export_tasks'"
+                ).scalar()
+            )
             record_columns = {
                 str(row[1]) for row in connection.exec_driver_sql("PRAGMA table_info(project_records)")
             }
@@ -163,6 +169,7 @@ class Database:
         )
         needs_default_upgrade = bool(field_columns) and "default_value" not in field_columns
         needs_view_removal = view_exists
+        needs_auto_export_removal = auto_export_exists
         needs_position_upgrade = bool(record_columns) and "position" not in record_columns
         needs_block_upgrade = bool(record_columns) and "block_number" not in record_columns
         needs_number_upgrade = any("experiment_number" in columns for columns in record_unique_columns)
@@ -170,7 +177,8 @@ class Database:
             "duplicate_pathology_warning_enabled" not in project_columns
         )
         needs_upgrade = (
-            needs_validation_removal
+            needs_auto_export_removal
+            or needs_validation_removal
             or needs_view_removal
             or needs_default_upgrade
             or needs_position_upgrade
@@ -183,7 +191,9 @@ class Database:
         backup_dir = database_path.parent / "backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-        if needs_validation_removal:
+        if needs_auto_export_removal:
+            version = "auto-export-removal"
+        elif needs_validation_removal:
             version = "field-validation-removal"
         elif needs_view_removal:
             version = "view-removal"
@@ -225,6 +235,14 @@ class Database:
                     "CREATE INDEX IF NOT EXISTS ix_record_project_pathology "
                     "ON project_records (project_id, pathology_number)"
                 )
+
+    def _remove_auto_export_tables(self) -> None:
+        """Drop the retired auto-export scheduler tables in desktop databases."""
+        if self.engine.dialect.name != "sqlite":
+            return
+        with self.engine.begin() as connection:
+            connection.exec_driver_sql("DROP TABLE IF EXISTS auto_export_runs")
+            connection.exec_driver_sql("DROP TABLE IF EXISTS auto_export_tasks")
 
     def _remove_ledger_view_presets(self) -> None:
         """Drop the retired named-view table in packaged desktop databases."""
