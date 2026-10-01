@@ -63,6 +63,7 @@ interface LedgerState {
   draftRows: LedgerRow[];
   fields: FieldDefinition[];
   loading: boolean;
+  showLockedRecords: boolean;
   recordTotal: number;
   validationPanel: unknown;
   cellSaveStates: Map<string, { status: string }>;
@@ -71,18 +72,22 @@ interface LedgerState {
   activeGridCell: Position | null;
   gridCellRange: { anchor: Position; focus: Position } | null;
   selectedGridCellKeys: Set<string>;
+  batchSelectionActive: boolean;
   gridCutInProgress: boolean;
   ledgerContextMenu: {
     x: number; y: number; submenuLeft: boolean;
     target: { kind: "cell"; rowId: string; fieldId: string };
   } | null;
   appendDraftRow: (scroll?: boolean) => void;
+  selectVisibleRecords: () => void;
   selectProject: (id: string) => void;
   setValue: (record: ProjectRecord, field: FieldDefinition, value: string) => void;
   saveField: (record: LedgerRow, field: FieldDefinition) => Promise<boolean>;
   finishGridCellEdit: (commit?: boolean, focusAfter?: boolean) => Promise<boolean>;
   selectGridCell: (position: Position) => void;
   replaceGridCellSelection: (positions: Position[], active: Position, anchor?: Position, range?: { anchor: Position; focus: Position }) => void;
+  clearBatchSelection: () => void;
+  handleLockedVisibilityChange: () => Promise<void>;
   handleGridKeydown: (event: KeyboardEvent) => void;
   handleGridCopy: (event: ClipboardEvent) => void;
   handleGridCut: (event: ClipboardEvent) => void;
@@ -665,6 +670,61 @@ describe("ledger cut", () => {
     expect(database.get("A")![0]!.values["A-note"]).toBe("source note");
     expect(state.gridCutInProgress).toBe(false);
     expect(mocks.message.error).toHaveBeenCalledWith("save failed");
+  });
+});
+
+describe("ledger batch selection", () => {
+  it("tracks selected records or cells and clears the selection", async () => {
+    database.set("A", [record("A", "toolbar-row")]);
+    const state = await mountLedger();
+    const position = { rowIndex: 0, columnIndex: 2 };
+
+    expect(state.batchSelectionActive).toBe(false);
+    state.selectVisibleRecords();
+    await vi.waitFor(() => expect(state.batchSelectionActive).toBe(true));
+    state.clearBatchSelection();
+    expect(state.batchSelectionActive).toBe(false);
+
+    state.replaceGridCellSelection([position], position);
+    expect(state.batchSelectionActive).toBe(true);
+
+    state.clearBatchSelection();
+    expect(state.batchSelectionActive).toBe(false);
+    expect(state.selectedGridCellKeys.size).toBe(0);
+    expect(state.gridCellRange).toBeNull();
+  });
+
+  it("reloads only the current project when showing locked records and clears both selections", async () => {
+    const unlocked = record("A", "unlocked-row");
+    const locked = { ...record("A", "locked-row"), locked: true };
+    database.set("A", [unlocked, locked]);
+    mocks.queryRecords.mockImplementation(async (query: RecordComplexQuery) => {
+      const items = (database.get(query.project_id) ?? [])
+        .filter((row) => query.include_locked || !row.locked)
+        .map(clone);
+      return { items, total: items.length, limit: query.limit, offset: 0 };
+    });
+    const state = await mountLedger();
+    expect(state.records.map((row) => row.id)).toEqual([unlocked.id]);
+    state.selectVisibleRecords();
+    await vi.waitFor(() => expect(state.batchSelectionActive).toBe(true));
+    const position = { rowIndex: 0, columnIndex: 2 };
+    state.replaceGridCellSelection([position], position);
+
+    state.showLockedRecords = true;
+    await state.handleLockedVisibilityChange();
+    expect(mocks.queryRecords).toHaveBeenLastCalledWith(
+      expect.objectContaining({ project_id: "A", include_locked: true }),
+      expect.any(AbortSignal),
+    );
+    expect(state.records.map((row) => row.id)).toEqual([unlocked.id, locked.id]);
+    expect(state.batchSelectionActive).toBe(false);
+    expect(state.activeGridCell).toBeNull();
+
+    state.showLockedRecords = false;
+    await state.handleLockedVisibilityChange();
+    expect(state.records.map((row) => row.id)).toEqual([unlocked.id]);
+    expect(mocks.queryRecords.mock.calls.every(([query]) => query.project_id === "A")).toBe(true);
   });
 });
 

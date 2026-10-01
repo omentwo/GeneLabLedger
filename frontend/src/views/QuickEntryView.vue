@@ -7,8 +7,13 @@ import {
   ChevronsUp,
   Dna,
   GripVertical,
+  Info,
   Pencil as EditPen,
   Lock,
+  Maximize2,
+  Minimize2,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   RefreshCw as Refresh,
   Search,
@@ -73,6 +78,8 @@ const activeRecord = ref<ProjectRecord | null>(null);
 const activeRecordUnavailable = ref(false);
 const recordSearch = ref("");
 const recordsLoading = ref(false);
+const recordPaneCollapsed = ref(false);
+const focusMode = ref(false);
 const initializing = ref(false);
 const saving = ref(false);
 const settingsSaving = ref(false);
@@ -126,6 +133,8 @@ let removeClipboardListener: (() => void) | undefined;
 let nativeUndoShortcutTarget: HTMLElement | null = null;
 const pendingProjectRefreshIds = new Set<string>();
 let projectRefreshPromise: Promise<void> | null = null;
+const QUICK_ENTRY_RECORD_PANE_STORAGE_KEY = "gene-lab-ledger.quick-entry-record-pane-collapsed";
+const QUICK_ENTRY_FOCUS_MODE_STORAGE_KEY = "gene-lab-ledger.quick-entry-focus-mode";
 
 function queryIdList(value: unknown): string[] {
   const joined = Array.isArray(value) ? value.join(",") : typeof value === "string" ? value : "";
@@ -199,6 +208,41 @@ const isDirty = computed(() =>
     (field) => (entryValues[field.id] ?? "") !== (baselineValues[field.id] ?? ""),
   ),
 );
+const effectiveRecordPaneCollapsed = computed(() => recordPaneCollapsed.value || focusMode.value);
+const entryGuidance = computed(() => {
+  if (activeRecord.value && clipboardEnabled.value) {
+    return "确认本条后，在其他软件逐项复制；自动填入草稿，检查后保存。";
+  }
+  if (activeRecord.value) return "只保存下方已选择表头的改动，成功后自动进入下一条。";
+  return "输入“病理号-蜡块号”，按 Enter 即可连续创建。";
+});
+
+function restoreLayoutPreferences(): void {
+  try {
+    recordPaneCollapsed.value = window.localStorage.getItem(QUICK_ENTRY_RECORD_PANE_STORAGE_KEY) === "true";
+    focusMode.value = window.localStorage.getItem(QUICK_ENTRY_FOCUS_MODE_STORAGE_KEY) === "true";
+  } catch {
+    // localStorage may be unavailable in restricted desktop environments.
+  }
+}
+
+function persistLayoutPreference(key: string, value: boolean): void {
+  try {
+    window.localStorage.setItem(key, String(value));
+  } catch {
+    // Layout preferences are optional; the current session can continue without persistence.
+  }
+}
+
+function toggleRecordPane(): void {
+  recordPaneCollapsed.value = !recordPaneCollapsed.value;
+  persistLayoutPreference(QUICK_ENTRY_RECORD_PANE_STORAGE_KEY, recordPaneCollapsed.value);
+}
+
+function toggleFocusMode(): void {
+  focusMode.value = !focusMode.value;
+  persistLayoutPreference(QUICK_ENTRY_FOCUS_MODE_STORAGE_KEY, focusMode.value);
+}
 
 function stopNativeClipboard(): void {
   const sessionId = clipboardSession.context?.sessionId;
@@ -872,12 +916,6 @@ function endClipboardFieldDrag(): void {
   dragClipboardInsertAfter.value = false;
 }
 
-function entryFieldStyle(): Record<string, string> {
-  return {
-    "--quick-field-width": `${fieldSettings.value.fieldWidth}px`,
-  };
-}
-
 function quickEntryPageStyle(): Record<string, string> {
   return {
     "--quick-entry-font-size": `${fieldSettings.value.fontSize}px`,
@@ -900,6 +938,14 @@ function startFieldDrag(event: DragEvent, fieldId: string): void {
 
 function dragOverField(event: DragEvent): void {
   updateOrderDropTarget(event, "field");
+}
+
+function entryFormStyle(): Record<string, string> {
+  const width = fieldSettings.value.fieldWidth;
+  return {
+    "--quick-field-width": `${width}px`,
+    "--quick-form-max-width": `${width * 4 + 66}px`,
+  };
 }
 
 function dropField(event: DragEvent): void {
@@ -1296,6 +1342,7 @@ function refreshRecordsPeriodically(): void {
 }
 
 onMounted(() => {
+  restoreLayoutPreferences();
   if (bridge?.windowKind === "quick-entry") {
     removeOpenRequestListener = bridge.onQuickEntryOpenRequested((context) => {
       void handleOpenRequest(context);
@@ -1336,7 +1383,11 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="quick-entry-page" :style="quickEntryPageStyle()">
+  <div
+    class="quick-entry-page"
+    :class="{ 'records-collapsed': effectiveRecordPaneCollapsed, 'is-focus-mode': focusMode }"
+    :style="quickEntryPageStyle()"
+  >
     <header class="quick-entry-header">
       <div class="quick-entry-brand">
         <Dna :stroke-width="1.7" aria-hidden="true" />
@@ -1365,7 +1416,14 @@ onBeforeUnmount(() => {
         <span v-if="bridge?.windowKind === 'quick-entry'" class="always-on-top-badge">
           <span aria-hidden="true" /> 始终置顶
         </span>
-        <el-button :icon="ArrowLeft" @click="returnToMain">返回主程序</el-button>
+        <el-button
+          size="small"
+          :icon="focusMode ? Minimize2 : Maximize2"
+          data-layout-action="focus"
+          :aria-pressed="focusMode"
+          @click="toggleFocusMode"
+        >{{ focusMode ? '退出专注' : '专注录入' }}</el-button>
+        <el-button size="small" :icon="ArrowLeft" @click="returnToMain">返回主程序</el-button>
       </div>
     </header>
 
@@ -1383,52 +1441,76 @@ onBeforeUnmount(() => {
     </div>
 
     <main v-else class="quick-entry-layout">
-      <aside class="record-pane">
+      <aside
+        v-show="!focusMode"
+        class="record-pane"
+        :class="{ 'is-collapsed': recordPaneCollapsed }"
+      >
         <div class="record-pane-header">
-          <div>
+          <div v-if="!recordPaneCollapsed">
             <h2>可快速录入</h2>
             <p>{{ unreportedRecords.length }} 条记录</p>
           </div>
-          <el-button
-            text
-            circle
-            :icon="Refresh"
-            :loading="recordsLoading"
-            aria-label="刷新病理号列表"
-            title="刷新"
-            @click="loadUnreportedRecords(activeProjectId)"
-          />
-        </div>
-        <el-input
-          v-model="recordSearch"
-          class="record-search"
-          clearable
-          :prefix-icon="Search"
-          placeholder="搜索病理号"
-        />
-        <p class="record-pane-note">锁定或已生成报告的记录不会出现在这里。</p>
-
-        <el-scrollbar v-loading="recordsLoading" class="record-list">
-          <button
-            v-for="record in filteredRecords"
-            :key="record.id"
-            type="button"
-            class="record-list-item"
-            :data-record-id="record.id"
-            :class="{ active: activeRecord?.id === record.id }"
-            :disabled="saving"
-            @click="selectRecord(record)"
-          >
-            <span class="record-pathology">{{ record.pathology_number }}</span>
-            <span class="record-meta">
-              {{ record.experiment_date || '未填日期' }}
-              <el-icon v-if="record.locked" title="记录已锁定"><Lock /></el-icon>
-            </span>
-          </button>
-          <div v-if="!recordsLoading && !filteredRecords.length" class="record-list-empty">
-            {{ recordSearch ? '没有匹配的病理号' : '暂无可快速录入记录' }}
+          <div class="record-pane-actions">
+            <el-button
+              v-if="!recordPaneCollapsed"
+              text
+              circle
+              :icon="Refresh"
+              :loading="recordsLoading"
+              aria-label="刷新病理号列表"
+              title="刷新"
+              @click="loadUnreportedRecords(activeProjectId)"
+            />
+            <el-button
+              text
+              circle
+              :icon="recordPaneCollapsed ? PanelLeftOpen : PanelLeftClose"
+              data-layout-action="records"
+              :aria-expanded="!recordPaneCollapsed"
+              aria-controls="quick-entry-record-list"
+              :aria-label="recordPaneCollapsed ? '展开病理号列表' : '收起病理号列表'"
+              :title="recordPaneCollapsed ? '展开病理号列表' : '收起病理号列表'"
+              @click="toggleRecordPane"
+            />
           </div>
-        </el-scrollbar>
+        </div>
+        <template v-if="!recordPaneCollapsed">
+          <el-input
+            v-model="recordSearch"
+            class="record-search"
+            clearable
+            :prefix-icon="Search"
+            placeholder="搜索病理号"
+          />
+          <p class="record-pane-note">锁定或已生成报告的记录不会出现在这里。</p>
+
+          <el-scrollbar id="quick-entry-record-list" v-loading="recordsLoading" class="record-list">
+            <button
+              v-for="record in filteredRecords"
+              :key="record.id"
+              type="button"
+              class="record-list-item"
+              :data-record-id="record.id"
+              :class="{ active: activeRecord?.id === record.id }"
+              :disabled="saving"
+              @click="selectRecord(record)"
+            >
+              <span class="record-pathology">{{ record.pathology_number }}</span>
+              <span class="record-meta">
+                {{ record.experiment_date || '未填日期' }}
+                <el-icon v-if="record.locked" title="记录已锁定"><Lock /></el-icon>
+              </span>
+            </button>
+            <div v-if="!recordsLoading && !filteredRecords.length" class="record-list-empty">
+              {{ recordSearch ? '没有匹配的病理号' : '暂无可快速录入记录' }}
+            </div>
+          </el-scrollbar>
+        </template>
+        <div v-else class="record-pane-rail" title="收起的可快速录入记录">
+          <strong>{{ unreportedRecords.length }}</strong>
+          <span>记录</span>
+        </div>
       </aside>
 
       <section class="entry-pane">
@@ -1444,16 +1526,23 @@ onBeforeUnmount(() => {
               </el-tag>
               <el-tag v-if="isLocked" type="danger" effect="plain">已锁定</el-tag>
               <el-tag v-if="isDirty" type="info" effect="plain">未保存</el-tag>
+              <span v-if="activeRecord?.block_number" class="entry-block-chip">
+                蜡块 {{ activeRecord.block_number }}
+              </span>
+              <span
+                class="entry-guidance"
+                role="note"
+                tabindex="0"
+                :aria-label="entryGuidance"
+                :title="entryGuidance"
+              ><Info :size="16" aria-hidden="true" /></span>
             </div>
-            <p>
-              {{ activeRecord && clipboardEnabled ? '确认本条后，在其他软件逐项复制；自动填入草稿，检查后保存。' : activeRecord ? '只保存下方已选择表头的改动，成功后自动进入下一条。' : '输入“病理号-蜡块号”，按 Enter 即可连续创建。' }}
-            </p>
           </div>
           <div class="entry-toolbar">
-            <el-button :icon="Setting" :disabled="saving" @click="openFieldSettings">
-              快捷表头与尺寸（{{ entryFields.length }}）
+            <el-button size="small" :icon="Setting" :disabled="saving" @click="openFieldSettings">
+              表头与尺寸（{{ entryFields.length }}）
             </el-button>
-            <el-button :icon="Plus" type="primary" plain :disabled="saving" @click="startCreate">
+            <el-button size="small" :icon="Plus" type="primary" plain :disabled="saving" @click="startCreate">
               新增记录
             </el-button>
           </div>
@@ -1469,9 +1558,6 @@ onBeforeUnmount(() => {
                 @change="toggleClipboardFollow(Boolean($event))"
               />
               <span v-if="!clipboardAvailable" class="clipboard-note">仅 Windows 桌面版可用</span>
-              <span v-else-if="clipboardEnabled && activeRecord" class="clipboard-record">
-                当前：{{ activeRecord.pathology_number }}{{ activeRecord.block_number ? ` / 蜡块 ${activeRecord.block_number}` : '' }}
-              </span>
             </div>
             <template v-if="clipboardEnabled">
               <div class="clipboard-progress" aria-live="polite">
@@ -1480,7 +1566,7 @@ onBeforeUnmount(() => {
                 </strong>
                 <strong v-else-if="clipboardSession.status === 'complete'">全部填完，请检查后 Ctrl+Enter 保存</strong>
                 <strong v-else>等待确认本条</strong>
-                <span>{{ clipboardSession.message }}</span>
+                <span :title="clipboardSession.message">{{ clipboardSession.message }}</span>
               </div>
               <div v-if="activeRecord" class="clipboard-toolbar">
                 <el-button
@@ -1533,12 +1619,12 @@ onBeforeUnmount(() => {
             class="entry-form"
             label-position="top"
             size="default"
+            :style="entryFormStyle()"
             @submit.prevent
           >
             <el-form-item
               v-for="field in entryFields"
               :key="field.id"
-              :style="entryFieldStyle()"
               :class="{ 'clipboard-next-field': clipboardEnabled && clipboardNextField?.id === field.id, 'clipboard-filled-field': clipboardEnabled && clipboardSession.lastFilledFieldId === field.id }"
             >
               <template #label>
@@ -1834,9 +1920,13 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .clipboard-follow-panel {
+  display: flex;
   flex: 0 0 auto;
-  margin: 10px 12px 0;
-  padding: 8px 10px;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 8px 0;
+  padding: 5px 7px;
   border: 1px solid var(--app-border);
   border-radius: 8px;
 }
@@ -1847,13 +1937,38 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
   gap: 8px;
 }
-.clipboard-toolbar { margin-top: 8px; gap: 5px; flex-wrap: nowrap; overflow-x: auto; padding-bottom: 3px; }
+.clipboard-follow-heading { flex: 0 0 auto; flex-wrap: nowrap; }
+.clipboard-toolbar {
+  min-width: 0;
+  max-width: 62%;
+  flex: 0 1 auto;
+  flex-wrap: nowrap;
+  gap: 5px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
 .clipboard-toolbar :deep(.el-button) { flex: 0 0 auto; }
 .clipboard-toolbar :deep(.el-button + .el-button) { margin-left: 0; }
 .clipboard-note, .clipboard-progress span { color: var(--app-muted); font-size: 12px; }
-.clipboard-record { overflow-wrap: anywhere; font-size: 12px; }
-.clipboard-progress { display: grid; gap: 3px; margin-top: 5px; }
-.clipboard-progress strong { color: var(--app-primary-text); font-size: 13px; }
+.clipboard-progress {
+  display: flex;
+  min-width: 120px;
+  flex: 1 1 220px;
+  align-items: center;
+  gap: 7px;
+}
+.clipboard-progress strong {
+  flex: 0 0 auto;
+  color: var(--app-primary-text);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.clipboard-progress span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .clipboard-field-mark { color: var(--app-primary-text); font-size: 11px; }
 .clipboard-next-field .entry-field { outline: 2px solid var(--app-primary-border); border-radius: 5px; }
 .clipboard-filled-field .entry-field { background: var(--app-primary-soft); border-radius: 5px; }
@@ -1908,32 +2023,32 @@ onBeforeUnmount(() => {
 
 .quick-entry-header {
   display: flex;
-  min-height: 64px;
+  min-height: 52px;
   flex: 0 0 auto;
   align-items: center;
-  gap: 14px;
+  gap: 10px;
   border-bottom: 1px solid var(--app-border);
   background: var(--app-bg);
-  padding: 10px 14px;
+  padding: 6px 10px;
   box-shadow: 0 1px 3px rgb(16 24 40 / 5%);
 }
 
 .quick-entry-brand {
   display: flex;
-  min-width: 170px;
+  min-width: 142px;
   align-items: center;
-  gap: 9px;
+  gap: 7px;
 }
 
 .quick-entry-brand svg {
-  padding: 7px;
+  padding: 6px;
   color: var(--app-primary-text);
   background: var(--app-primary-soft);
   border: 1px solid var(--app-primary-border);
-  border-radius: 11px;
-  width: 36px;
-  height: 36px;
-  flex: 0 0 36px;
+  border-radius: 9px;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
 }
 
 .quick-entry-brand div {
@@ -1946,12 +2061,11 @@ onBeforeUnmount(() => {
 }
 
 .quick-entry-brand span {
-  color: var(--app-muted);
-  font-size: calc(var(--quick-entry-font-size, 14px) - 1px);
+  display: none;
 }
 
 .project-select {
-  width: min(240px, 28vw);
+  width: min(220px, 28vw);
 }
 
 .quick-entry-header-actions {
@@ -1990,8 +2104,17 @@ onBeforeUnmount(() => {
   min-height: 0;
   flex: 1;
   grid-template-columns: minmax(100px, 110px) minmax(0, 1fr);
-  gap: 12px;
-  padding: 12px;
+  gap: 8px;
+  padding: 8px;
+}
+
+.quick-entry-page.records-collapsed .quick-entry-layout {
+  grid-template-columns: 44px minmax(0, 1fr);
+}
+
+.quick-entry-page.is-focus-mode .quick-entry-layout {
+  grid-template-columns: minmax(0, 1fr);
+  padding: 6px;
 }
 
 .record-pane,
@@ -2014,6 +2137,43 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   padding: 10px 6px 7px;
+}
+
+.record-pane-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.record-pane-actions :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.record-pane.is-collapsed .record-pane-header {
+  justify-content: center;
+  padding: 6px 3px;
+}
+
+.record-pane-rail {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border-top: 1px solid var(--app-border-light);
+  color: var(--app-muted);
+  font-size: calc(var(--quick-entry-font-size, 14px) - 2px);
+}
+
+.record-pane-rail strong {
+  color: var(--app-primary-text);
+  font-size: var(--quick-entry-font-size, 14px);
+}
+
+.record-pane-rail span {
+  writing-mode: vertical-rl;
 }
 
 .record-pane-header h2 {
@@ -2114,11 +2274,11 @@ onBeforeUnmount(() => {
 .entry-pane-header {
   display: flex;
   flex: 0 0 auto;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 14px;
+  gap: 10px;
   border-bottom: 1px solid var(--app-border-light);
-  padding: 14px 16px 12px;
+  padding: 7px 10px;
 }
 
 .entry-heading {
@@ -2130,7 +2290,7 @@ onBeforeUnmount(() => {
   min-width: 0;
   flex-wrap: wrap;
   align-items: center;
-  gap: 7px;
+  gap: 5px;
 }
 
 .entry-title-row h1 {
@@ -2146,16 +2306,37 @@ onBeforeUnmount(() => {
   gap: 3px;
 }
 
-.entry-heading p {
-  margin: 5px 0 0;
+.entry-block-chip {
+  border-radius: 999px;
+  background: var(--app-surface-soft);
   color: var(--app-muted);
-  font-size: calc(var(--quick-entry-font-size, 14px) - 1px);
+  padding: 2px 7px;
+  font-size: calc(var(--quick-entry-font-size, 14px) - 2px);
+  white-space: nowrap;
+}
+
+.entry-guidance {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--app-muted);
+  cursor: help;
+}
+
+.entry-guidance:hover,
+.entry-guidance:focus-visible {
+  background: var(--app-hover);
+  color: var(--app-primary-text);
+  outline: none;
 }
 
 .entry-toolbar {
   display: flex;
   flex: 0 0 auto;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   justify-content: flex-end;
   gap: 7px;
 }
@@ -2176,19 +2357,18 @@ onBeforeUnmount(() => {
 
 .entry-form {
   box-sizing: border-box;
-  display: flex;
+  display: grid;
   width: 100%;
-  max-width: 560px;
-  flex-wrap: wrap;
+  max-width: min(var(--quick-form-max-width, 706px), 100%);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--quick-field-width, 160px)), 1fr));
   align-items: start;
-  gap: 10px 16px;
+  gap: 8px 14px;
   margin-inline: auto;
-  padding: 12px 16px 20px;
+  padding: 10px 12px 16px;
 }
 
 .entry-form :deep(.el-form-item) {
-  width: min(var(--quick-field-width, 160px), 100%);
-  flex: 0 0 min(var(--quick-field-width, 160px), 100%);
+  width: 100%;
   min-width: 0;
   margin-bottom: 0;
 }
@@ -2271,14 +2451,14 @@ onBeforeUnmount(() => {
 
 .entry-footer {
   display: flex;
-  min-height: 58px;
+  min-height: 48px;
   flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   border-top: 1px solid var(--app-border);
   background: var(--app-bg);
-  padding: 10px 14px;
+  padding: 6px 10px;
 }
 
 .entry-footer > span {
@@ -2293,6 +2473,15 @@ onBeforeUnmount(() => {
 
 .entry-footer .el-button + .el-button {
   margin-left: 0;
+}
+
+.quick-entry-page.is-focus-mode .entry-toolbar,
+.quick-entry-page.is-focus-mode .entry-footer > span {
+  display: none;
+}
+
+.quick-entry-page.is-focus-mode .entry-footer {
+  justify-content: flex-end;
 }
 
 .field-dialog-note {
@@ -2455,6 +2644,21 @@ onBeforeUnmount(() => {
   }
 }
 
+@container quick-entry-form (max-width: 760px) {
+  .clipboard-follow-panel {
+    flex-wrap: wrap;
+  }
+
+  .clipboard-progress {
+    min-width: 0;
+  }
+
+  .clipboard-toolbar {
+    max-width: 100%;
+    flex-basis: 100%;
+  }
+}
+
 @media (max-width: 820px) {
   .quick-entry-header {
     gap: 9px;
@@ -2477,7 +2681,7 @@ onBeforeUnmount(() => {
   }
 
   .entry-pane-header {
-    display: grid;
+    flex-wrap: wrap;
   }
 
   .entry-toolbar {
@@ -2499,12 +2703,8 @@ onBeforeUnmount(() => {
     padding: 8px 12px;
   }
 
-  .entry-heading p {
-    display: none;
-  }
-
   .clipboard-follow-panel {
-    margin: 7px 10px 0;
+    margin: 5px 8px 0;
     padding: 5px 8px;
   }
 
@@ -2531,7 +2731,7 @@ onBeforeUnmount(() => {
 }
 .record-pane, .entry-pane { border-color: var(--app-border); box-shadow: 0 4px 20px rgb(30 41 59 / 3%); }
 .record-pane-header { background: var(--app-surface-soft); }
-.record-pane-header p, .record-pane-note, .record-meta, .entry-heading p,
+.record-pane-header p, .record-pane-note, .record-meta,
 .entry-footer > span, .quick-entry-brand span, .field-selector-head {
   font-size: calc(var(--quick-entry-font-size, 14px) - 1px);
 }

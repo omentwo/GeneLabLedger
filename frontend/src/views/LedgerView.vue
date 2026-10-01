@@ -10,8 +10,6 @@ import {
   Lock,
   Minus,
   Plus,
-  RefreshCw as Refresh,
-  Search,
   Settings2 as Setting,
   LockOpen as Unlock,
   NotebookTabs,
@@ -66,7 +64,6 @@ import {
   getRecordsByIds,
   commitCellBatch,
   commitReplace,
-  listRecords,
   previewCellBatch,
   previewReplace,
   previewReorderByDate,
@@ -80,7 +77,6 @@ import {
   updateRecord,
   validateNewRecord,
 } from "@/api/records";
-import type { RecordSearchScope } from "@/api/records";
 import EditableChoiceInput from "@/components/EditableChoiceInput.vue";
 import EditableDateInput from "@/components/EditableDateInput.vue";
 import LedgerTemplateManager from "@/components/LedgerTemplateManager.vue";
@@ -416,28 +412,13 @@ const ledgerContextMenu = ref<{
   target: LedgerContextMenuTarget;
 } | null>(null);
 const exportVisible = ref(false);
-const searchText = ref("");
-const searchStatus = ref("");
-const searchDate = ref("");
+const moreActionsVisible = ref(false);
 const showLockedRecords = ref(false);
-const searchScope = ref<RecordSearchScope>("all");
-const searchProjectIds = ref<string[]>([]);
-const appliedSearch = reactive({
-  text: "",
-  status: "",
-  date: "",
-  // The scope control defaults to all projects, but the initial ledger load
-  // remains a normal current-project data load until the user clicks Query.
-  scope: "current" as RecordSearchScope,
-  projectIds: [] as string[],
-});
 const exportFilter = reactive({
   start: "",
   end: "",
 });
 const draftRows = ref<LedgerRow[]>([]);
-const globalSearchResults = ref<ProjectRecord[]>([]);
-const globalSearchTotal = ref(0);
 const focusRecordId = ref("");
 const highlightDialogVisible = ref(false);
 const highlightLoading = ref(false);
@@ -752,6 +733,7 @@ const gridCellSelectionCount = computed(() => {
   );
 });
 const hasGridCellSelection = computed(() => gridCellSelectionCount.value > 0);
+const batchSelectionActive = computed(() => selectedCount.value > 0 || hasGridCellSelection.value);
 const gridCellInternalEditing = computed(() => Boolean(editingGridCell.value));
 const columnToolsField = computed(
   () => fields.value.find((field) => field.id === columnToolsOpenFieldId.value) ?? null,
@@ -811,7 +793,6 @@ const ledgerFontOption = computed(
       (option) => option.value === ledgerDisplaySettings.value.fontFamily,
     ) ?? LEDGER_FONT_FAMILY_OPTIONS[0],
 );
-const globalSearchActive = computed(() => appliedSearch.scope !== "current");
 const ledgerTableStyle = computed<CSSProperties>(
   () => {
     const scale = ledgerZoomScale.value;
@@ -891,6 +872,11 @@ function clearSelectionsAfterLedgerViewChange(): void {
   activeGridCell.value = null;
   clearGridCellSelection();
   clearRecordSelection();
+}
+
+function clearBatchSelection(): void {
+  clearRecordSelection();
+  clearGridCellSelection();
 }
 
 async function restoreGridFocusAfterLedgerViewChange(
@@ -3357,29 +3343,6 @@ function valueFor(record: ProjectRecord, field: FieldDefinition): string {
   return record.values[field.id] ?? "";
 }
 
-function handleSearchScopeChange(scope: RecordSearchScope): void {
-  if (scope === "selected") {
-    if (!searchProjectIds.value.length && activeProjectId.value) {
-      searchProjectIds.value = [activeProjectId.value];
-    }
-  } else {
-    searchProjectIds.value = [];
-  }
-}
-
-function globalMatchedValue(record: ProjectRecord): string {
-  const term = appliedSearch.text.trim();
-  if (!term) return "";
-  const candidates = [
-    record.project_name,
-    record.pathology_number,
-    record.block_number ?? "",
-    record.experiment_number ?? "",
-    ...Object.values(record.values),
-  ];
-  return candidates.find((value) => value.includes(term)) ?? "";
-}
-
 async function scrollToFocusedRecord(
   shouldApply: () => boolean = () => true,
 ): Promise<boolean> {
@@ -4006,32 +3969,27 @@ async function persistDraft(record: LedgerRow, notify = true): Promise<boolean> 
 type PersistedRecordLocation = "focused" | "filtered-out" | "skipped" | "failed";
 
 function currentRecordViewHasMembershipFilters(): boolean {
-  return Boolean(
-    appliedSearch.text.trim()
-    || appliedSearch.status
-    || appliedSearch.date
-    || Object.values(ledgerFilters.value).some(Boolean),
-  );
+  return Object.values(ledgerFilters.value).some(Boolean);
 }
 
 async function locatePersistedRecord(
   recordId: string,
   projectId: string,
 ): Promise<PersistedRecordLocation> {
-  if (activeProjectId.value !== projectId || appliedSearch.scope !== "current") {
+  if (activeProjectId.value !== projectId) {
     return "skipped";
   }
   if (!currentRecordViewHasMembershipFilters()) {
     loadedRecordCount.value = records.value.length;
     focusRecordId.value = recordId;
     await scrollToFocusedRecord(
-      () => activeProjectId.value === projectId && appliedSearch.scope === "current",
+      () => activeProjectId.value === projectId,
     );
     return "focused";
   }
   try {
     const result = await queryRecordIds(buildRecordQuery(projectId));
-    if (activeProjectId.value !== projectId || appliedSearch.scope !== "current") {
+    if (activeProjectId.value !== projectId) {
       return "skipped";
     }
     recordTotal.value = result.total;
@@ -4050,7 +4008,7 @@ async function locatePersistedRecord(
       loadedRecordCount.value = records.value.length;
       focusRecordId.value = recordId;
       await scrollToFocusedRecord(
-        () => activeProjectId.value === projectId && appliedSearch.scope === "current",
+        () => activeProjectId.value === projectId,
       );
       return "focused";
     }
@@ -4437,9 +4395,6 @@ async function openLedgerNative(): Promise<void> {
       scope,
       include_locked: showLockedRecords.value,
       cells,
-      search: appliedSearch.text || undefined,
-      status: appliedSearch.status || undefined,
-      experiment_date: appliedSearch.date || undefined,
       print_engine: previewEngine.value,
     });
     void monitorNativeLedgerJob(task).catch((error) => {
@@ -4583,13 +4538,10 @@ async function loadRecords(
   } = {},
 ): Promise<boolean> {
   if (!options.preserveHistory) ledgerHistory.clear();
-  const isGlobalScope = appliedSearch.scope !== "current";
-  if (!projectId && !isGlobalScope) {
+  if (!projectId) {
     records.value = [];
     recordTotal.value = 0;
     loadedRecordCount.value = 0;
-    globalSearchResults.value = [];
-    globalSearchTotal.value = 0;
     return true;
   }
   const showLoading = options.showLoading ?? true;
@@ -4597,11 +4549,10 @@ async function loadRecords(
   recordsAbortController?.abort();
   const controller = new AbortController();
   recordsAbortController = controller;
-  const currentQuery = isGlobalScope ? null : buildRecordQuery(projectId);
-  const currentQueryKey = currentQuery ? ledgerRecordQueryKey(currentQuery) : "";
+  const currentQuery = buildRecordQuery(projectId);
+  const currentQueryKey = ledgerRecordQueryKey(currentQuery);
   const queryCacheGeneration = projectRecordCacheGeneration(projectId);
   const cacheHit = options.preferCache
-    && currentQuery
     && ledgerRecordCache.isFresh(currentQueryKey)
     ? ledgerRecordCache.get(currentQueryKey)
     : null;
@@ -4610,33 +4561,12 @@ async function loadRecords(
   try {
     let loaded: ProjectRecord[] = [];
     let total = 0;
-    if (isGlobalScope) {
-      let offset = 0;
-      while (true) {
-        const page = await listRecords({
-          scope: appliedSearch.scope,
-          include_locked: showLockedRecords.value,
-          project_id: undefined,
-          project_ids:
-            appliedSearch.scope === "selected" ? [...appliedSearch.projectIds] : undefined,
-          status: appliedSearch.status || undefined,
-          search: appliedSearch.text || undefined,
-          experiment_date: appliedSearch.date || undefined,
-          limit: loadBatchSize.value,
-          offset,
-        }, controller.signal);
-        total = page.total;
-        loaded.push(...page.items);
-        loadedRecordCount.value = loaded.length;
-        offset += page.items.length;
-        if (!page.items.length || offset >= page.total) break;
-      }
-    } else if (cacheHit) {
+    if (cacheHit) {
       total = cacheHit.snapshot.total;
       loaded = cacheHit.snapshot.records;
     } else {
       const page = await queryAllRecordBatches(
-        currentQuery!,
+        currentQuery,
         controller.signal,
         (loadedCount, nextTotal) => {
           if (requestSequence !== loadSequence || projectId !== activeProjectId.value) return;
@@ -4654,27 +4584,16 @@ async function loadRecords(
       }
     }
     if (requestSequence !== loadSequence || projectId !== activeProjectId.value) return false;
-    const preserveGridSelection = !isGlobalScope && options.preserveSelection && tableProjectId.value === projectId;
+    const preserveGridSelection = options.preserveSelection && tableProjectId.value === projectId;
     const activeIdentity = preserveGridSelection ? captureGridIdentity(activeGridCell.value) : null;
     const anchorIdentity = preserveGridSelection ? captureGridIdentity(gridSelectionAnchor.value) : null;
     const rangeIdentities = preserveGridSelection && gridCellRange.value
       ? { anchor: captureGridIdentity(gridCellRange.value.anchor), focus: captureGridIdentity(gridCellRange.value.focus) }
       : null;
-    if (isGlobalScope) {
-      records.value = [];
-      draftRows.value = [];
-      insertedGroupRegistry.clear();
-      globalSearchResults.value = loaded;
-      globalSearchTotal.value = total;
-      persistedValues.clear();
-    } else {
-      records.value = loaded;
-      recordTotal.value = total;
-      loadedRecordCount.value = loaded.length;
-      globalSearchResults.value = [];
-      globalSearchTotal.value = 0;
-      tableProjectId.value = projectId;
-    }
+    records.value = loaded;
+    recordTotal.value = total;
+    loadedRecordCount.value = loaded.length;
+    tableProjectId.value = projectId;
     if (preserveGridSelection) {
       const positions = selectedGridCellPositions();
       const active = restoreGridIdentity(activeIdentity) ?? positions[0] ?? null;
@@ -4703,16 +4622,16 @@ async function loadRecords(
     clearAllCellSaveStates();
     selectedRecords.value = [];
     if (!options.preserveSelection) clearRecordSelection();
-    if (!isGlobalScope) rememberAll();
+    rememberAll();
     const requestIsCurrent = () => (
       requestSequence === loadSequence
       && projectId === activeProjectId.value
       && !controller.signal.aborted
     );
-    if (options.stabilizeTable && !isGlobalScope) await refreshTableLayout(requestIsCurrent);
+    if (options.stabilizeTable) await refreshTableLayout(requestIsCurrent);
     else await nextTick();
     if (!requestIsCurrent()) return false;
-    if (!isGlobalScope && options.preserveSelection && selectedRecordIds.value.size) {
+    if (options.preserveSelection && selectedRecordIds.value.size) {
       records.value.forEach((record) => {
         if (selectedRecordIds.value.has(record.id)) {
           selectedRecordCache.set(record.id, record);
@@ -4720,11 +4639,9 @@ async function loadRecords(
       });
       selectedRecords.value = records.value.filter((record) => selectedRecordIds.value.has(record.id));
     }
-    if (!isGlobalScope) {
-      const scrolledToFocus = await scrollToFocusedRecord(requestIsCurrent);
-      if (options.stabilizeTable && !scrolledToFocus) {
-        await scrollTableToBottomOnce(requestIsCurrent);
-      }
+    const scrolledToFocus = await scrollToFocusedRecord(requestIsCurrent);
+    if (options.stabilizeTable && !scrolledToFocus) {
+      await scrollTableToBottomOnce(requestIsCurrent);
     }
     return true;
   } catch (error) {
@@ -4773,10 +4690,6 @@ function buildRecordQuery(
   return {
     project_id: projectId,
     include_locked: showLockedRecords.value,
-    status: appliedSearch.status || null,
-    search: appliedSearch.text || null,
-    experiment_date_from: appliedSearch.date || null,
-    experiment_date_to: appliedSearch.date || null,
     field_filters: fieldFilters,
     sort: sort
       ? {
@@ -4797,59 +4710,13 @@ async function ensureProjectLoaded(projectId: string): Promise<void> {
   if (projectLoadPromise) await projectLoadPromise;
 }
 
-function applySearch(): void {
-  try {
-    const nextText = searchText.value.trim();
-    const nextStatus = searchStatus.value;
-    const nextDate = normalizeDate(searchDate.value);
-    if (searchScope.value === "selected" && !searchProjectIds.value.length) {
-      throw new Error("请选择至少一个项目");
-    }
-    if (
-      searchScope.value !== "current" &&
-      !nextText &&
-      !nextStatus &&
-      !nextDate
-    ) {
-      throw new Error("跨项目搜索时请至少填写一个搜索条件");
-    }
-    searchDate.value = nextDate;
-    appliedSearch.text = nextText;
-    appliedSearch.status = nextStatus;
-    appliedSearch.date = nextDate;
-    appliedSearch.scope = searchScope.value;
-    appliedSearch.projectIds = [...searchProjectIds.value];
-    void loadRecords();
-  } catch (error) {
-    ElMessage.warning(error instanceof Error ? error.message : "筛选日期无效");
-  }
-}
-
-function resetSearch(): void {
-  searchText.value = "";
-  searchStatus.value = "";
-  searchDate.value = "";
-  searchScope.value = "current";
-  searchProjectIds.value = [];
-  Object.assign(appliedSearch, { text: "", status: "", date: "" });
-  Object.assign(appliedSearch, {
-    scope: "current",
-    projectIds: [],
-  });
-  void loadRecords(activeProjectId.value);
-}
-
-function refreshRecords(): void {
-  void loadRecords(activeProjectId.value, { preserveHistory: true, preserveSelection: true });
-}
-
 async function handleLockedVisibilityChange(): Promise<void> {
   clearSelectionsAfterLedgerViewChange();
   await loadRecords(activeProjectId.value, { preserveHistory: true });
 }
 
 function openReorderDialog(): void {
-  reorderDate.value = appliedSearch.date || searchDate.value || shanghaiDateKey(new Date());
+  reorderDate.value = shanghaiDateKey(new Date());
   reorderPreview.value = null;
   reorderDialogVisible.value = true;
 }
@@ -4892,35 +4759,12 @@ async function confirmReorderByDate(): Promise<void> {
 }
 
 function selectProject(projectId: string): void {
-  const wasGlobalSearch = globalSearchActive.value;
-  if (wasGlobalSearch) {
-    searchScope.value = "current";
-    searchProjectIds.value = [];
-    appliedSearch.scope = "current";
-    appliedSearch.projectIds = [];
-  }
-  if (activeProjectId.value === projectId) {
-    if (wasGlobalSearch) void loadRecords(projectId, { preserveHistory: true });
-    return;
-  }
+  if (activeProjectId.value === projectId) return;
   activeProjectId.value = projectId;
 }
 
 function scrollProjectTabs(direction: -1 | 1): void {
   projectStripRef.value?.scrollBy({ left: direction * 240, behavior: "smooth" });
-}
-
-function openGlobalSearchResult(record: ProjectRecord): void {
-  focusRecordId.value = record.id;
-  searchScope.value = "current";
-  searchProjectIds.value = [];
-  appliedSearch.scope = "current";
-  appliedSearch.projectIds = [];
-  if (activeProjectId.value === record.project_id) {
-    void loadRecords(record.project_id, { preserveHistory: true });
-  } else {
-    activeProjectId.value = record.project_id;
-  }
 }
 
 function recordRowSelectable(row: LedgerRow): boolean {
@@ -5935,6 +5779,23 @@ async function updateSelectedReportStatus(reportGenerated: boolean): Promise<voi
   }
 }
 
+function handleBatchStatusCommand(status: RecordStatus): void {
+  void updateSelectedStatus(status);
+}
+
+function handleBatchReportCommand(command: "generated" | "pending"): void {
+  void updateSelectedReportStatus(command === "generated");
+}
+
+function handleBatchHighlightCommand(command: "set" | "clear"): void {
+  if (command === "set") openCurrentHighlightDialog();
+  else void clearSelectedHighlight();
+}
+
+function handleBatchLockCommand(command: "lock" | "unlock"): void {
+  void updateSelectedLock(command === "lock");
+}
+
 async function deleteLedgerRecords(selectedTargets: ProjectRecord[]): Promise<void> {
   if (!selectedTargets.length) {
     ElMessage.warning("请先勾选需要删除的记录");
@@ -6182,8 +6043,6 @@ async function initializeLedger(): Promise<void> {
     return;
   }
   rememberLastLedgerProjectId(initialProjectId);
-  appliedSearch.scope = "current";
-  appliedSearch.projectIds = [];
   await router.replace({ query: { ...route.query, project: initialProjectId } });
   applyLedgerProjectLayout(initialProjectId);
   await loadRecords(initialProjectId, { stabilizeTable: true });
@@ -6257,203 +6116,172 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="page-stack ledger-page" :class="{ 'global-search-mode': globalSearchActive }">
+  <div class="page-stack ledger-page">
     <section class="page-card ledger-command-card">
-      <header class="ledger-workspace-heading">
-        <span class="ledger-workspace-mark" aria-hidden="true"><NotebookTabs :size="20" :stroke-width="1.7" /></span>
-        <h1>{{ globalSearchActive ? '跨项目检索' : (currentProject?.name || '台账') }}</h1>
-        <span class="ledger-workspace-count">{{ globalSearchActive ? globalSearchTotal : recordTotal }} 条记录</span>
-      </header>
-      <div class="page-card-body">
-        <div class="ledger-toolbar">
-          <div class="ledger-filter-group">
-            <EditableDateInput
-              v-model="searchDate"
-              class="date-filter"
-              placeholder="按实验日期筛选"
-              @change="searchDate = $event"
-            />
-            <div
-              v-if="!globalSearchActive"
-              class="ledger-cell-editor-bar"
-              :class="{
-                'is-expanded': ledgerCellEditorExpanded,
-                'is-readonly': ledgerCellEditorReadonly,
-              }"
-              role="group"
-              :aria-label="ledgerCellEditorTitle"
-              :title="ledgerCellEditorTitle"
-            >
-              <span class="ledger-cell-editor-address">{{ ledgerCellEditorAddress }}</span>
-              <el-input
-                id="ledger-cell-editor-input"
-                class="ledger-cell-editor-input"
-                type="textarea"
-                resize="none"
-                :rows="ledgerCellEditorExpanded ? 4 : 1"
-                :model-value="ledgerCellEditorValue"
-                :disabled="ledgerCellEditorDisabled"
-                :readonly="ledgerCellEditorReadonly"
-                :placeholder="ledgerCellEditorCell
-                  ? `编辑 ${ledgerCellEditorCell.field.label}`
-                  : '选择单元格后可编辑完整内容'"
-                :aria-label="ledgerCellEditorCell
-                  ? `编辑单元格 ${ledgerCellEditorAddress}，${ledgerCellEditorCell.field.label}`
-                  : '单元格编辑栏'"
-                autocomplete="off"
-                spellcheck="false"
-                @focus="beginLedgerCellEditorEdit"
-                @update:model-value="updateLedgerCellEditorValue"
-                @blur="handleLedgerCellEditorBlur"
-                @keydown="handleLedgerCellEditorKeydown"
-              />
-              <button
-                type="button"
-                class="ledger-cell-editor-toggle"
-                :aria-expanded="ledgerCellEditorExpanded"
-                aria-controls="ledger-cell-editor-input"
-                aria-keyshortcuts="Control+Shift+U"
-                :aria-label="ledgerCellEditorExpanded ? '收起单元格编辑栏' : '展开单元格编辑栏'"
-                :title="ledgerCellEditorExpanded
-                  ? '收起编辑栏（Ctrl+Shift+U）'
-                  : '展开编辑栏（Ctrl+Shift+U）'"
-                @pointerdown.stop.prevent
-                @click.stop="toggleLedgerCellEditorExpanded"
-              >
-                <ArrowUp v-if="ledgerCellEditorExpanded" :size="15" aria-hidden="true" />
-                <ArrowDown v-else :size="15" aria-hidden="true" />
-              </button>
-            </div>
-            <el-input
-              v-model="searchText"
-              clearable
-              placeholder="搜索项目、病理号或任意表头内容"
-              :prefix-icon="Search"
-              @keyup.enter="applySearch"
-              @clear="applySearch"
-            />
-            <el-select v-model="searchStatus" clearable placeholder="全部状态">
-              <el-option label="待实验" value="待实验" />
-              <el-option label="已完成" value="已完成" />
-            </el-select>
-            <el-select
-              v-model="searchScope"
-              class="search-scope-select"
-              @change="handleSearchScopeChange"
-            >
-              <el-option label="当前项目" value="current" />
-              <el-option label="全部项目" value="all" />
-              <el-option label="选定项目" value="selected" />
-            </el-select>
-            <el-button class="ledger-query-button" type="primary" :icon="Search" @click="applySearch">
-              查询
-            </el-button>
-            <el-button class="ledger-reset-button" @click="resetSearch">重置</el-button>
-            <el-button class="ledger-refresh-button" :icon="Refresh" @click="refreshRecords">
-              刷新
-            </el-button>
-            <el-checkbox
-              v-model="showLockedRecords"
-              class="ledger-locked-visibility"
-              @change="handleLockedVisibilityChange"
-            >
-              显示锁定记录
-            </el-checkbox>
-          </div>
-          <div v-if="!globalSearchActive" class="ledger-operation-group">
-            <el-button
-              class="ledger-history-button"
-              :icon="Undo2"
-              text
-              :disabled="!canUndoHistory"
-              :loading="historyBusy"
-              @click="undoLedger"
-            >
-              撤销
-            </el-button>
-            <el-button
-              class="ledger-history-button"
-              :icon="Redo2"
-              text
-              :disabled="!canRedoHistory"
-              :loading="historyBusy"
-              @click="redoLedger"
-            >
-              恢复
-            </el-button>
-            <el-button
-              :icon="Plus"
-              type="primary"
-              plain
-              @click="appendDraftRow"
-            >
-              新增记录
-            </el-button>
-            <el-button :icon="Plus" @click="openQuickEntry">快速录入</el-button>
-            <el-button @click="openReorderDialog">按日期重排</el-button>
-            <el-button @click="openFindReplace">查找替换</el-button>
-            <el-button
-              :icon="Setting"
-              :type="columnToolsVisible ? 'primary' : undefined"
-              @click="toggleColumnTools"
-            >
-              排序/筛选
-            </el-button>
-            <el-button @click="bestFitAllColumns($event)">最佳列宽</el-button>
-            <el-button :icon="Download" @click="exportVisible = !exportVisible">
-              导出 Excel
-            </el-button>
-            <el-select
-              v-model="previewEngine"
-              class="ledger-preview-engine"
-              aria-label="打印引擎"
-              @change="savePreviewEngineSetting"
-            >
-              <el-option label="自动选择" value="auto" />
-              <el-option label="Microsoft Excel" value="word" :disabled="!nativeEngineAvailable('word')" />
-              <el-option label="WPS" value="wps" :disabled="!nativeEngineAvailable('wps')" />
-            </el-select>
-            <el-select v-model="previewScope" class="ledger-preview-scope" aria-label="打开范围">
-              <el-option label="当前选区" value="selection" :disabled="!hasGridCellSelection" />
-              <el-option label="当前台账" value="project" />
-              <el-option label="整本台账" value="all" />
-            </el-select>
-            <el-button
-              :loading="nativePreviewLoading"
-              :disabled="!nativeEngineAvailable(previewEngine)"
-              @click="openLedgerNative"
-            >
-              使用 {{ nativeEngineLabel() }} 打开
-            </el-button>
-          </div>
-          <div v-if="searchScope === 'selected'" class="ledger-search-advanced">
-            <el-select
-              v-model="searchProjectIds"
-              class="search-project-select"
-              multiple
-              collapse-tags
-              collapse-tags-tooltip
-              filterable
-              placeholder="选择项目"
-            >
-              <el-option
-                v-for="project in appStore.projects"
-                :key="project.id"
-                :label="project.name"
-                :value="project.id"
-              />
-            </el-select>
-          </div>
+      <header class="ledger-workspace-heading" aria-label="台账工具栏">
+        <div class="ledger-workspace-identity">
+          <span class="ledger-workspace-mark" aria-hidden="true"><NotebookTabs :size="20" :stroke-width="1.7" /></span>
+          <h1 :title="currentProject?.name">{{ currentProject?.name || '台账' }}</h1>
         </div>
-      </div>
+        <div class="ledger-workspace-actions" role="toolbar" aria-label="台账常用操作">
+          <el-button
+            class="ledger-history-button"
+            size="small"
+            :icon="Undo2"
+            text
+            :disabled="!canUndoHistory"
+            :loading="historyBusy"
+            title="撤销"
+            @click="undoLedger"
+          >撤销</el-button>
+          <el-button
+            class="ledger-history-button"
+            size="small"
+            :icon="Redo2"
+            text
+            :disabled="!canRedoHistory"
+            :loading="historyBusy"
+            title="恢复"
+            @click="redoLedger"
+          >恢复</el-button>
+          <span class="ledger-toolbar-divider" aria-hidden="true" />
+          <el-button size="small" :icon="Plus" type="primary" plain @click="appendDraftRow">
+            新增记录
+          </el-button>
+          <el-button size="small" :icon="Plus" @click="openQuickEntry">快速录入</el-button>
+        </div>
+        <div
+          class="ledger-cell-editor-bar"
+          :class="{
+            'is-expanded': ledgerCellEditorExpanded,
+            'is-readonly': ledgerCellEditorReadonly,
+          }"
+          role="group"
+          :aria-label="ledgerCellEditorTitle"
+          :title="ledgerCellEditorTitle"
+        >
+          <span class="ledger-cell-editor-address">{{ ledgerCellEditorAddress }}</span>
+          <el-input
+            id="ledger-cell-editor-input"
+            class="ledger-cell-editor-input"
+            type="textarea"
+            resize="none"
+            :rows="ledgerCellEditorExpanded ? 4 : 1"
+            :model-value="ledgerCellEditorValue"
+            :disabled="ledgerCellEditorDisabled"
+            :readonly="ledgerCellEditorReadonly"
+            :placeholder="ledgerCellEditorCell
+              ? `编辑 ${ledgerCellEditorCell.field.label}`
+              : '选择单元格后可编辑完整内容'"
+            :aria-label="ledgerCellEditorCell
+              ? `编辑单元格 ${ledgerCellEditorAddress}，${ledgerCellEditorCell.field.label}`
+              : '单元格编辑栏'"
+            autocomplete="off"
+            spellcheck="false"
+            @focus="beginLedgerCellEditorEdit"
+            @update:model-value="updateLedgerCellEditorValue"
+            @blur="handleLedgerCellEditorBlur"
+            @keydown="handleLedgerCellEditorKeydown"
+          />
+          <button
+            type="button"
+            class="ledger-cell-editor-toggle"
+            :aria-expanded="ledgerCellEditorExpanded"
+            aria-controls="ledger-cell-editor-input"
+            aria-keyshortcuts="Control+Shift+U"
+            :aria-label="ledgerCellEditorExpanded ? '收起单元格编辑栏' : '展开单元格编辑栏'"
+            :title="ledgerCellEditorExpanded
+              ? '收起编辑栏（Ctrl+Shift+U）'
+              : '展开编辑栏（Ctrl+Shift+U）'"
+            @pointerdown.stop.prevent
+            @click.stop="toggleLedgerCellEditorExpanded"
+          >
+            <ArrowUp v-if="ledgerCellEditorExpanded" :size="15" aria-hidden="true" />
+            <ArrowDown v-else :size="15" aria-hidden="true" />
+          </button>
+        </div>
+        <el-checkbox
+          v-model="showLockedRecords"
+          class="ledger-locked-visibility"
+          @change="handleLockedVisibilityChange"
+        >显示锁定记录</el-checkbox>
+        <div class="ledger-workspace-actions" role="toolbar" aria-label="台账导出与更多操作">
+          <el-button size="small" :icon="Download" @click="exportVisible = !exportVisible">
+            导出 Excel
+          </el-button>
+          <el-popover
+            v-model:visible="moreActionsVisible"
+            placement="bottom-end"
+            :width="380"
+            trigger="click"
+            popper-class="ledger-toolbar-popover"
+          >
+            <template #reference>
+              <el-button size="small" :icon="Setting" data-toolbar-action="more">更多</el-button>
+            </template>
+            <div class="ledger-popover-section">
+              <strong class="ledger-popover-title">数据与视图</strong>
+              <div class="ledger-popover-action-grid">
+                <el-button @click="moreActionsVisible = false; openReorderDialog()">按日期重排</el-button>
+                <el-button @click="moreActionsVisible = false; openFindReplace()">查找替换</el-button>
+                <el-button
+                  :icon="Setting"
+                  :type="columnToolsVisible ? 'primary' : undefined"
+                  @click="moreActionsVisible = false; toggleColumnTools()"
+                >排序/筛选</el-button>
+                <el-button @click="moreActionsVisible = false; bestFitAllColumns($event)">最佳列宽</el-button>
+                <el-button
+                  :icon="Setting"
+                  class="ledger-manage-project-action"
+                  @click="moreActionsVisible = false; managerVisible = true"
+                >管理项目与表头</el-button>
+              </div>
+            </div>
+            <div class="ledger-popover-section ledger-native-open-section">
+              <strong class="ledger-popover-title">使用 Excel/WPS 打开</strong>
+              <div class="ledger-native-open-options">
+                <label>
+                  <span>打开方式</span>
+                  <el-select
+                    v-model="previewEngine"
+                    class="ledger-preview-engine"
+                    aria-label="打开方式"
+                    @change="savePreviewEngineSetting"
+                  >
+                    <el-option label="自动选择" value="auto" />
+                    <el-option label="Microsoft Excel" value="word" :disabled="!nativeEngineAvailable('word')" />
+                    <el-option label="WPS" value="wps" :disabled="!nativeEngineAvailable('wps')" />
+                  </el-select>
+                </label>
+                <label>
+                  <span>打开范围</span>
+                  <el-select v-model="previewScope" class="ledger-preview-scope" aria-label="打开范围">
+                    <el-option label="当前选区" value="selection" :disabled="!hasGridCellSelection" />
+                    <el-option label="当前台账" value="project" />
+                    <el-option label="整本台账" value="all" />
+                  </el-select>
+                </label>
+              </div>
+              <el-button
+                class="ledger-native-open-button"
+                type="primary"
+                plain
+                :loading="nativePreviewLoading"
+                :disabled="!nativeEngineAvailable(previewEngine)"
+                @click="moreActionsVisible = false; openLedgerNative()"
+              >使用 {{ nativeEngineLabel() }} 打开</el-button>
+            </div>
+          </el-popover>
+        </div>
+      </header>
     </section>
 
-    <section v-if="exportVisible && !globalSearchActive" class="page-card export-panel">
+    <section v-if="exportVisible" class="page-card export-panel">
       <div class="page-card-header">
         <div>
           <h2 class="page-card-title">导出当前项目台账</h2>
           <p class="page-description">
-            导出当前查询结果；可继续按实验日期缩小范围。
+            导出当前项目台账；可按实验日期指定导出范围。
           </p>
         </div>
         <el-button text @click="exportVisible = false">收起</el-button>
@@ -6470,109 +6298,115 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <section v-if="globalSearchActive" class="page-card global-search-results">
-      <div class="page-card-header">
-        <div>
-          <h2 class="page-card-title">跨项目搜索结果</h2>
-          <p class="page-description">
-            共 {{ globalSearchTotal }} 条记录；点击结果可切换到对应项目并定位记录。
-          </p>
-        </div>
-        <el-tag effect="plain">{{ appliedSearch.scope === "all" ? "全部项目" : "选定项目" }}</el-tag>
+    <section
+      class="selection-bar"
+      role="toolbar"
+      aria-label="批量操作"
+    >
+      <div class="selection-summary" aria-live="polite">
+        <strong v-if="hasGridCellSelection">已选 {{ gridCellSelectionCount }} 个单元格</strong>
+        <strong v-else>已选 {{ selectedCount }} 条记录</strong>
+        <span>批量操作</span>
       </div>
-      <el-table
-        :data="globalSearchResults"
-        border
-        height="420"
-        v-loading="loading"
-        empty-text="没有匹配的跨项目记录"
-        @row-click="openGlobalSearchResult"
-      >
-        <el-table-column prop="project_name" label="项目" min-width="160" />
-        <el-table-column prop="pathology_number" label="病理号" min-width="150" />
-        <el-table-column prop="experiment_number" label="实验编号" min-width="150" />
-        <el-table-column prop="status" label="状态" width="100" />
-        <el-table-column prop="experiment_date" label="实验日期" width="130" />
-        <el-table-column label="命中内容" min-width="220">
-          <template #default="{ row }: { row: ProjectRecord }">
-            {{ globalMatchedValue(row) }}
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="110" fixed="right">
-          <template #default="{ row }: { row: ProjectRecord }">
-            <el-button link type="primary" @click.stop="openGlobalSearchResult(row)">
-              打开台账
-            </el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-    </section>
-
-    <section v-if="!globalSearchActive" class="selection-bar">
       <el-select
         v-model="recordSelectionScope"
         class="record-selection-scope"
         aria-label="记录选择范围"
+        size="small"
       >
         <el-option label="全部记录" value="all" />
         <el-option label="非锁定记录" value="unlocked" />
       </el-select>
       <div class="selection-quick-actions" aria-label="快速选择">
-        <el-button @click="selectVisibleRecords">全选</el-button>
-        <el-button @click="invertVisibleSelection">反选</el-button>
+        <el-button size="small" @click="selectVisibleRecords">全选</el-button>
+        <el-button size="small" @click="invertVisibleSelection">反选</el-button>
       </div>
+      <span class="selection-divider" aria-hidden="true" />
+      <el-dropdown
+        trigger="click"
+        :disabled="gridCellInternalEditing || (!selectedCount && !hasGridCellSelection)"
+        @command="handleBatchHighlightCommand"
+      >
+        <el-button
+          size="small"
+          :icon="Brush"
+          :loading="highlightLoading"
+          :disabled="gridCellInternalEditing || (!selectedCount && !hasGridCellSelection)"
+        >
+          底色<ArrowDown :size="14" />
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="set">设置底色</el-dropdown-item>
+            <el-dropdown-item command="clear">清除底色</el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
+      <el-dropdown
+        trigger="click"
+        :disabled="!selectedCount"
+        @command="handleBatchStatusCommand"
+      >
+        <el-button size="small" :disabled="!selectedCount">
+          状态<ArrowDown :size="14" />
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="已完成">已完成</el-dropdown-item>
+            <el-dropdown-item command="待实验">待实验</el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
+      <el-dropdown
+        trigger="click"
+        :disabled="!selectedCount"
+        @command="handleBatchReportCommand"
+      >
+        <el-button size="small" :disabled="!selectedCount">
+          报告状态<ArrowDown :size="14" />
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="generated">已生成报告</el-dropdown-item>
+            <el-dropdown-item command="pending">待生成报告</el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
+      <el-dropdown
+        trigger="click"
+        :disabled="!selectedCount"
+        @command="handleBatchLockCommand"
+      >
+        <el-button size="small" :disabled="!selectedCount">
+          锁定<ArrowDown :size="14" />
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="lock" :icon="Lock">锁定</el-dropdown-item>
+            <el-dropdown-item command="unlock" :icon="Unlock">解锁</el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
       <el-button
+        size="small"
         type="danger"
         plain
         :icon="Delete"
+        :disabled="!selectedCount"
         @click="deleteSelectedRecords"
-      >
-        删除所选
-      </el-button>
+      >删除所选</el-button>
       <el-button
-        :icon="Brush"
-        :disabled="gridCellInternalEditing || (!selectedCount && !hasGridCellSelection)"
-        @click="openCurrentHighlightDialog"
+        class="selection-clear-button"
+        size="small"
+        text
+        :disabled="!batchSelectionActive"
+        @click="clearBatchSelection"
       >
-        设置底色
-      </el-button>
-      <el-button
-        :icon="Delete"
-        plain
-        :loading="highlightLoading"
-        :disabled="gridCellInternalEditing || (!selectedCount && !hasGridCellSelection)"
-        @click="clearSelectedHighlight"
-      >
-        清除底色
-      </el-button>
-      <el-button @click="updateSelectedStatus('已完成')">
-        已完成
-      </el-button>
-      <el-button @click="updateSelectedStatus('待实验')">
-        待实验
-      </el-button>
-      <el-button @click="updateSelectedReportStatus(true)">
-        已生成报告
-      </el-button>
-      <el-button @click="updateSelectedReportStatus(false)">
-        待生成报告
-      </el-button>
-      <el-button
-        :icon="Lock"
-        @click="updateSelectedLock(true)"
-      >
-        锁定
-      </el-button>
-      <el-button :icon="Unlock" @click="updateSelectedLock(false)">
-        解锁
-      </el-button>
-      <el-button :icon="Setting" class="manage-project-button" @click="managerVisible = true">
-        管理项目与表头
+        取消选择
       </el-button>
     </section>
 
     <section
-      v-if="!globalSearchActive"
       ref="ledgerTableCardRef"
       class="page-card ledger-table-card"
       @pointerdown.capture="handleGridPointerDown"
@@ -7343,25 +7177,42 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .ledger-workspace-heading {
+  box-sizing: border-box;
   display: flex;
+  min-width: 0;
+  min-height: 48px;
   align-items: center;
-  gap: 10px;
-  padding: 12px 14px 0;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 6px 10px;
+  scrollbar-width: thin;
+}
+
+.ledger-workspace-heading::-webkit-scrollbar {
+  height: 4px;
+}
+
+.ledger-workspace-identity {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
 }
 
 .ledger-workspace-mark {
   display: grid;
   place-items: center;
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   flex: 0 0 auto;
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--app-primary-soft);
   color: var(--app-primary-text);
 }
 
 .ledger-workspace-heading h1 {
   min-width: 0;
+  max-width: 100px;
   overflow: hidden;
   margin: 0;
   color: var(--app-text);
@@ -7371,35 +7222,43 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.ledger-workspace-count {
-  flex-shrink: 0;
-  margin-left: auto;
-  border: 1px solid var(--app-border);
-  border-radius: 999px;
-  background: var(--app-bg);
-  padding: 4px 10px;
-  color: var(--app-muted);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
+.ledger-workspace-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.ledger-workspace-actions :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.ledger-workspace-actions :deep(.el-button) {
+  min-height: 28px;
+  flex: 0 0 auto;
+}
+
+.ledger-toolbar-divider,
+.selection-divider {
+  width: 1px;
+  height: 20px;
+  flex: 0 0 1px;
+  background: var(--app-border);
 }
 
 .ledger-page > .page-card {
+  min-width: 0;
   border-color: var(--app-border);
   border-radius: 14px;
   box-shadow: 0 3px 14px rgb(45 42 38 / 3%);
 }
 
-.ledger-command-card .page-card-body {
-  padding: 12px 14px;
-}
-
-.ledger-toolbar :deep(.el-button + .el-button),
 .selection-bar :deep(.el-button + .el-button) {
   margin-left: 0;
 }
 
-.selection-bar > *,
-.ledger-filter-group > .date-filter {
+.selection-bar > * {
   flex-shrink: 0;
 }
 
@@ -7547,12 +7406,8 @@ onBeforeUnmount(() => {
   height: calc(100dvh - 68px);
   min-height: 0;
   flex-direction: column;
-  gap: 10px;
+  gap: 6px;
   overflow: hidden;
-}
-
-.ledger-page.global-search-mode {
-  overflow: auto;
 }
 
 .ledger-page > .page-card:not(.ledger-table-card),
@@ -7656,35 +7511,12 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
 }
 
-.manage-project-button {
-  margin-left: auto;
-}
-
-.ledger-toolbar {
-  display: grid;
-  gap: 8px;
-}
-.ledger-filter-group,
-.ledger-operation-group {
-  border-top: 1px solid var(--app-border-light);
-  padding-top: 10px;
-  padding-bottom: 3px;
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 8px;
-}
-
-.ledger-filter-group {
-  flex-wrap: wrap;
-}
-
 .ledger-cell-editor-bar {
   box-sizing: border-box;
   display: flex;
-  min-width: 320px;
+  min-width: 220px;
   height: 32px;
-  flex: 1 1 420px;
+  flex: 1 1 320px;
   align-items: stretch;
   overflow: hidden;
   border: 1px solid var(--app-border-strong);
@@ -7795,37 +7627,61 @@ onBeforeUnmount(() => {
   outline-offset: -2px;
 }
 
-.ledger-search-advanced {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  flex-wrap: wrap;
+:global(.ledger-toolbar-popover) {
+  padding: 10px !important;
+}
+
+:global(.ledger-toolbar-popover .ledger-popover-section) {
+  display: grid;
   gap: 8px;
 }
 
-.search-scope-select {
-  width: 130px;
+:global(.ledger-toolbar-popover .ledger-popover-section + .ledger-popover-section) {
+  margin-top: 10px;
+  border-top: 1px solid var(--app-border-light);
+  padding-top: 10px;
 }
 
-.search-project-select {
-  width: 280px;
+:global(.ledger-toolbar-popover .ledger-popover-title) {
+  color: var(--app-text);
+  font-size: 12px;
+  font-weight: 700;
 }
 
-.ledger-operation-group {
-  flex-wrap: wrap;
+:global(.ledger-toolbar-popover .ledger-popover-action-grid) {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+:global(.ledger-toolbar-popover .ledger-popover-action-grid .el-button) {
+  width: 100%;
   justify-content: flex-start;
+  margin: 0;
 }
 
-.ledger-operation-group > * {
-  flex: 0 0 auto;
+:global(.ledger-toolbar-popover .ledger-manage-project-action) {
+  grid-column: 1 / -1;
 }
 
-.ledger-preview-scope {
-  width: 132px;
+:global(.ledger-toolbar-popover .ledger-native-open-options) {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
-.ledger-preview-engine {
-  width: 150px;
+:global(.ledger-toolbar-popover .ledger-native-open-options label) {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+:global(.ledger-toolbar-popover .ledger-preview-scope),
+:global(.ledger-toolbar-popover .ledger-preview-engine),
+:global(.ledger-toolbar-popover .ledger-native-open-button) {
+  width: 100%;
 }
 
 .ledger-header-label {
@@ -8084,84 +7940,29 @@ onBeforeUnmount(() => {
   display: block;
 }
 
-.date-filter,
 .export-date {
   width: 190px;
 }
 
-.ledger-filter-group > :deep(.el-input):not(.date-filter) {
-  min-width: 260px;
-  flex: 1 1 320px;
-}
-
-.ledger-filter-group > :deep(.el-select) {
-  flex: 0 0 130px;
-  width: 130px;
-}
-
-.ledger-filter-group > :deep(.el-button) {
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-
-.ledger-query-button {
-  min-width: 94px;
-}
-
-.ledger-reset-button {
-  min-width: 72px;
-}
-
-.ledger-refresh-button {
-  min-width: 96px;
-}
-
 .ledger-locked-visibility {
   flex: 0 0 auto;
+  margin-right: 0;
   white-space: nowrap;
+}
+
+.ledger-locked-visibility :deep(.el-checkbox__label) {
+  padding-left: 5px;
+  font-size: 12px;
 }
 
 .ledger-history-button {
-  width: 72px;
-  min-width: 72px;
-}
-
-.global-search-results {
-  min-width: 0;
-  overflow: hidden;
-}
-
-.global-search-results :deep(.el-table) {
-  width: 100%;
-}
-
-.global-search-results :deep(.el-table .cell) {
-  text-align: center;
+  width: auto;
+  min-width: 58px;
 }
 
 :deep(.search-focus-row > td) {
   background: var(--app-primary-soft) !important;
   transition: background-color 300ms ease;
-}
-
-@media (max-width: 900px) {
-  .ledger-cell-editor-bar {
-    min-width: 300px;
-    flex-basis: 300px;
-  }
-
-  .ledger-filter-group > :deep(.el-input):not(.date-filter) {
-    min-width: 220px;
-  }
-
-  .ledger-operation-group {
-    justify-content: flex-start;
-  }
-
-  .ledger-search-advanced > :deep(.el-input),
-  .ledger-search-advanced > :deep(.el-select) {
-    width: 100%;
-  }
 }
 
 .export-panel {
@@ -8175,19 +7976,45 @@ onBeforeUnmount(() => {
 
 .selection-bar {
   display: flex;
-  min-height: 44px;
+  min-height: 42px;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
+  flex-wrap: nowrap;
+  gap: 6px;
+  overflow-x: auto;
   border: 1px solid var(--app-primary-border);
   border-radius: 12px;
   background: var(--app-hover);
-  padding: 6px 10px;
+  padding: 5px 8px;
+  scrollbar-width: none;
+}
+
+.selection-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.selection-summary {
+  display: grid;
+  min-width: 112px;
+  flex: 0 0 auto;
+  gap: 1px;
+  line-height: 1.15;
+}
+
+.selection-summary strong {
+  color: var(--app-primary-text);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.selection-summary span {
+  color: var(--app-muted);
+  font-size: 11px;
 }
 
 .record-selection-scope {
-  width: 132px;
-  flex: 0 0 132px;
+  width: 120px;
+  flex: 0 0 120px;
 }
 
 .selection-quick-actions {
@@ -8200,8 +8027,18 @@ onBeforeUnmount(() => {
   margin-left: 0;
 }
 
-.selection-bar > :deep(.el-button) {
-  min-height: 32px;
+.selection-bar > :deep(.el-button),
+.selection-bar :deep(.el-dropdown .el-button) {
+  min-height: 28px;
+}
+
+.selection-bar > :deep(.el-dropdown),
+.selection-clear-button {
+  flex: 0 0 auto;
+}
+
+.selection-bar :deep(.el-button > svg) {
+  margin-left: 3px;
 }
 
 .ledger-table-card {

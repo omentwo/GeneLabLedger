@@ -49,6 +49,7 @@ function record(id: string, pathology = id, block = "1"): ProjectRecord {
 }
 interface QuickState {
   activeRecord: ProjectRecord | null; activeRecordUnavailable: boolean; activeProjectId: string;
+  recordPaneCollapsed: boolean; focusMode: boolean; effectiveRecordPaneCollapsed: boolean;
   entryValues: Record<string, string>; combinedPathologyInput: string;
   entryFields: FieldDefinition[];
   clipboardFieldSequence: (fieldId: string) => string;
@@ -60,6 +61,7 @@ interface QuickState {
   overwriteClipboardField: () => Promise<void>; undoClipboardField: () => Promise<void>;
   moveSelectedFieldTo: (fieldId: string, targetIndex: number) => void;
   moveClipboardFieldTo: (fieldId: string, targetIndex: number) => void;
+  toggleRecordPane: () => void; toggleFocusMode: () => void;
   openFieldSettings: () => void; saveFieldSettings: () => Promise<void>;
   handleCombinedPathologyKeydown: (event: KeyboardEvent) => void;
   loadUnreportedRecords: (projectId: string) => Promise<void>;
@@ -69,6 +71,7 @@ let rows: ProjectRecord[], changes: RecordCellChange[];
 const scrollDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
 beforeEach(() => {
   vi.clearAllMocks();
+  window.localStorage.clear();
   Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
   rows = [record("r1", "P1"), record("r2", "P2")];
   changes = [];
@@ -115,6 +118,47 @@ async function selectAndBegin(state: QuickState, selected: ProjectRecord): Promi
 }
 
 describe("quick-entry clipboard integration", () => {
+  it("expands the editing workspace without changing field order or clipboard flow", async () => {
+    const state = await mount();
+    await state.selectRecord(rows[0]!);
+    const fieldOrder = state.entryFields.map((item) => item.id);
+    const page = container.querySelector<HTMLElement>(".quick-entry-page")!;
+    const recordPane = container.querySelector<HTMLElement>(".record-pane")!;
+    const form = container.querySelector<HTMLElement>(".entry-form")!;
+
+    expect(form.style.getPropertyValue("--quick-form-max-width")).toBe("706px");
+    expect(container.querySelector(".record-search")).not.toBeNull();
+    state.toggleRecordPane();
+    await nextTick();
+    expect(state.recordPaneCollapsed).toBe(true);
+    expect(state.effectiveRecordPaneCollapsed).toBe(true);
+    expect(page.classList.contains("records-collapsed")).toBe(true);
+    expect(container.querySelector(".record-search")).toBeNull();
+    expect(container.querySelector(".record-pane-rail")?.textContent).toContain("2");
+    expect(window.localStorage.getItem("gene-lab-ledger.quick-entry-record-pane-collapsed")).toBe("true");
+
+    state.toggleFocusMode();
+    await nextTick();
+    expect(state.focusMode).toBe(true);
+    expect(page.classList.contains("is-focus-mode")).toBe(true);
+    expect(recordPane.style.display).toBe("none");
+    expect(window.localStorage.getItem("gene-lab-ledger.quick-entry-focus-mode")).toBe("true");
+    expect(state.entryFields.map((item) => item.id)).toEqual(fieldOrder);
+
+    await state.beginClipboardFollow();
+    copy(state, "专注录入内容");
+    expect(state.entryValues.name).toBe("专注录入内容");
+    expect(container.querySelector(".clipboard-follow-panel")).not.toBeNull();
+
+    app?.unmount();
+    app = undefined;
+    container.remove();
+    const restored = await mount();
+    expect(restored.recordPaneCollapsed).toBe(true);
+    expect(restored.focusMode).toBe(true);
+    expect(container.querySelector(".quick-entry-page")?.classList.contains("is-focus-mode")).toBe(true);
+  });
+
   it("fills the selected patient draft in order without saving or moving focus", async () => {
     const state = await mount();
     expect(container.querySelector(".clipboard-follow-panel")).toBeNull();
