@@ -7180,7 +7180,7 @@ onBeforeUnmount(() => {
   box-sizing: border-box;
   display: flex;
   min-width: 0;
-  min-height: 48px;
+  min-height: 52px;
   align-items: center;
   gap: 8px;
   overflow-x: auto;
@@ -7235,8 +7235,9 @@ onBeforeUnmount(() => {
 }
 
 .ledger-workspace-actions :deep(.el-button) {
-  min-height: 28px;
+  min-height: 32px;
   flex: 0 0 auto;
+  font-size: 14px;
 }
 
 .ledger-toolbar-divider,
@@ -7952,7 +7953,7 @@ onBeforeUnmount(() => {
 
 .ledger-locked-visibility :deep(.el-checkbox__label) {
   padding-left: 5px;
-  font-size: 12px;
+  font-size: 14px;
 }
 
 .ledger-history-button {
@@ -7976,7 +7977,7 @@ onBeforeUnmount(() => {
 
 .selection-bar {
   display: flex;
-  min-height: 42px;
+  min-height: 46px;
   align-items: center;
   flex-wrap: nowrap;
   gap: 6px;
@@ -8017,6 +8018,11 @@ onBeforeUnmount(() => {
   flex: 0 0 120px;
 }
 
+.record-selection-scope :deep(.el-select__wrapper) {
+  min-height: 32px;
+  font-size: 14px;
+}
+
 .selection-quick-actions {
   display: inline-flex;
   align-items: center;
@@ -8027,9 +8033,9 @@ onBeforeUnmount(() => {
   margin-left: 0;
 }
 
-.selection-bar > :deep(.el-button),
-.selection-bar :deep(.el-dropdown .el-button) {
-  min-height: 28px;
+.selection-bar :deep(.el-button) {
+  min-height: 32px;
+  font-size: 14px;
 }
 
 .selection-bar > :deep(.el-dropdown),

@@ -1448,7 +1448,7 @@ onBeforeUnmount(() => {
       >
         <div class="record-pane-header">
           <div v-if="!recordPaneCollapsed">
-            <h2>可快速录入</h2>
+            <h2>记录</h2>
             <p>{{ unreportedRecords.length }} 条记录</p>
           </div>
           <div class="record-pane-actions">
@@ -1507,7 +1507,7 @@ onBeforeUnmount(() => {
             </div>
           </el-scrollbar>
         </template>
-        <div v-else class="record-pane-rail" title="收起的可快速录入记录">
+        <div v-else class="record-pane-rail" title="收起的记录列表">
           <strong>{{ unreportedRecords.length }}</strong>
           <span>记录</span>
         </div>
