@@ -16,6 +16,7 @@ from app.schemas import (
     NativePreviewRead,
     PreviewCapabilitiesRead,
 )
+from app.services.filenames import safe_filename
 from app.services.office_preview import OfficePreviewError, OfficePreviewService
 from app.services.workbooks import build_xlsx
 
@@ -75,11 +76,6 @@ def _preview_filters(project_id: str, payload: LedgerNativePreviewCreate) -> lis
             filters.append(ProjectRecord.locked.is_(False))
         return filters
     return _search_filters(project_id, payload)
-
-
-def _safe_filename(value: str) -> str:
-    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value).strip(" ._")
-    return (cleaned or "ledger")[:100]
 
 
 def _build_ledger_sheet(
@@ -181,7 +177,8 @@ def _build_ledger_source(
 ) -> tuple[bytes, str, str, int]:
     if payload.scope != "all":
         sheet, count = _build_ledger_sheet(session, project, payload)
-        return build_xlsx([sheet]), f"{_safe_filename(project.name)}.xlsx", payload.scope, count
+        filename = safe_filename(project.name, fallback="ledger", max_length=100) + ".xlsx"
+        return build_xlsx([sheet]), filename, payload.scope, count
     projects = list(
         session.scalars(
             select(Project).options(selectinload(Project.fields)).order_by(Project.sort_order, Project.id)

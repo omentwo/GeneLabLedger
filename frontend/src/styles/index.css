@@ -240,6 +240,17 @@ textarea {
 .workspace-page .page-card-header { flex-wrap: wrap; padding: var(--app-space-3) var(--app-space-4); }
 .workspace-page .page-card-body { padding: var(--app-space-4); }
 .el-table { --el-table-header-bg-color: var(--app-surface-soft); --el-table-header-text-color: var(--app-muted); --el-table-row-hover-bg-color: var(--app-hover); --el-table-current-row-bg-color: var(--app-primary-soft); }
+.workspace-table-surface { min-width: 0; border-top: 1px solid var(--app-border); }
+.workspace-table-surface .el-table-v2 {
+  --el-table-border-color: var(--app-border);
+  --el-table-header-bg-color: var(--app-surface-soft);
+  --el-table-header-text-color: var(--app-muted);
+  --el-table-text-color: var(--app-text);
+  --el-table-bg-color: var(--app-bg);
+  --el-table-row-hover-bg-color: var(--app-hover);
+}
+.workspace-table-surface .el-table-v2__header-cell,
+.workspace-table-surface .el-table-v2__row-cell { min-width: 0; border-right: 1px solid var(--app-border); }
 .el-dialog { --el-dialog-border-radius: 16px; --el-dialog-box-shadow: 0 24px 80px rgb(30 41 59 / 14%); max-width: calc(100vw - 24px); }
 .el-dialog__header { padding-bottom: var(--app-space-4); border-bottom: 1px solid var(--app-border); margin-bottom: var(--app-space-4); }
 .el-dialog__title { font-weight: 650; }

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import shutil
 import uuid
 from datetime import datetime
@@ -49,6 +48,7 @@ from app.services.docx_template import (
     extract_placeholders,
     render_docx,
 )
+from app.services.filenames import safe_filename
 from app.services.office_preview import OfficePreviewError
 from app.services.office_printing import (
     OfficePrintError,
@@ -59,11 +59,6 @@ from app.services.serializers import template_dict, template_version_dict
 from app.timezones import ASIA_SHANGHAI
 
 router = APIRouter(tags=["报告模板与直接打印"])
-
-
-def safe_filename(value: str, fallback: str = "report") -> str:
-    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value).strip(" ._")
-    return cleaned[:120] or fallback
 
 
 def settings_from(request: Request) -> Settings:

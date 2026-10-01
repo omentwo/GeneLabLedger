@@ -12,7 +12,6 @@ import {
   Plus,
   Settings2 as Setting,
   LockOpen as Unlock,
-  NotebookTabs,
   Undo2,
   Redo2,
   Check,
@@ -160,7 +159,6 @@ import {
 } from "@/utils/validationPrompt";
 import {
   applyLedgerTableView,
-  getLedgerFieldValue,
   reanchorInsertedDraftGroup,
   type LedgerDraftPlacement,
   type LedgerFieldFilter,
@@ -169,6 +167,7 @@ import {
   type LedgerRow,
   type LedgerSortState,
 } from "@/utils/ledgerTableView";
+import { getRecordFieldValue as valueFor } from "@/utils/recordFieldValue";
 import { summarizeLedgerSelection } from "@/utils/ledgerSelectionStats";
 import {
   LedgerRecordCache,
@@ -838,7 +837,7 @@ function filterOptionsForField(field: FieldDefinition): string[] {
     values.add("待实验");
     values.add("已完成");
   }
-  baseTableRows.value.forEach((row) => values.add(getLedgerFieldValue(row, field)));
+  baseTableRows.value.forEach((row) => values.add(valueFor(row, field)));
   return [...values].sort((left, right) => {
     if (!left) return -1;
     if (!right) return 1;
@@ -3345,15 +3344,6 @@ function fieldOptions(field: FieldDefinition): string[] {
     .slice()
     .sort((a, b) => a.sort_order - b.sort_order)
     .map((option) => option.value);
-}
-
-function valueFor(record: ProjectRecord, field: FieldDefinition): string {
-  if (field.system_key === "pathology_number") return record.pathology_number;
-  if (field.system_key === "block_number") return record.block_number ?? "";
-  if (field.system_key === "experiment_date") return record.experiment_date ?? "";
-  if (field.system_key === "experiment_number") return record.experiment_number ?? "";
-  if (field.system_key === "status") return record.status;
-  return record.values[field.id] ?? "";
 }
 
 async function scrollToFocusedRecord(
@@ -6109,7 +6099,9 @@ watch(
     ledgerDisplaySettings.value.fontSizePx,
     ledgerDisplaySettings.value.zoomPercent,
   ],
-  () => refreshTableLayout(),
+  () => {
+    refreshTableLayout();
+  },
 );
 
 watch(activeProjectId, async (projectId, previousProjectId) => {
@@ -6246,10 +6238,6 @@ onBeforeUnmount(() => {
   <div class="page-stack ledger-page">
     <section class="page-card ledger-command-card">
       <header class="ledger-workspace-heading" aria-label="台账工具栏">
-        <div class="ledger-workspace-identity">
-          <span class="ledger-workspace-mark" aria-hidden="true"><NotebookTabs :size="20" :stroke-width="1.7" /></span>
-          <h1 :title="currentProject?.name">{{ currentProject?.name || '台账' }}</h1>
-        </div>
         <div class="ledger-workspace-actions" role="toolbar" aria-label="台账常用操作">
           <el-button
             class="ledger-history-button"
@@ -6542,16 +6530,18 @@ onBeforeUnmount(() => {
       @paste.capture="handleGridPaste"
       @contextmenu.capture="handleLedgerContextMenu"
     >
-      <div
-        v-if="gridFillPreviewRange && gridFillPreviewSummary"
-        class="grid-fill-preview-popover"
-        :style="{
-          left: `${gridFillPreviewPointer.left}px`,
-          top: `${gridFillPreviewPointer.top}px`,
-        }"
-      >
-        <span>{{ gridFillPreviewSummary }}</span>
-      </div>
+      <transition name="ledger-overlay-pop">
+        <div
+          v-if="gridFillPreviewRange && gridFillPreviewSummary"
+          class="grid-fill-preview-popover"
+          :style="{
+            left: `${gridFillPreviewPointer.left}px`,
+            top: `${gridFillPreviewPointer.top}px`,
+          }"
+        >
+          <span>{{ gridFillPreviewSummary }}</span>
+        </div>
+      </transition>
       <div
         v-loading="loading"
         class="ledger-table-surface"
@@ -6743,7 +6733,11 @@ onBeforeUnmount(() => {
                       @change="saveField(row, virtualColumnField(column)!)"
                     />
                   </template>
-                  <span v-else class="cell-field-value">
+                  <span
+                    v-else
+                    class="cell-field-value"
+                    :title="valueFor(row, virtualColumnField(column)!)"
+                  >
                     {{ valueFor(row, virtualColumnField(column)!) }}
                   </span>
                   <span
@@ -6802,168 +6796,172 @@ onBeforeUnmount(() => {
           </template>
         </el-auto-resizer>
       </div>
-      <div
-        v-if="columnToolsField"
-        class="ledger-column-tools-popover"
-        :style="{ left: `${columnToolsPosition.left}px`, top: `${columnToolsPosition.top}px` }"
-        @pointerdown.stop
-        @click.stop
-        @contextmenu.prevent
-      >
-        <div class="ledger-column-tools-title">{{ columnToolsField.label }}</div>
-        <div class="ledger-column-tools-sort">
-          <el-button size="small" @click="setLedgerSort(columnToolsField, 'ascending')">升序</el-button>
-          <el-button size="small" @click="setLedgerSort(columnToolsField, 'descending')">降序</el-button>
-          <el-button
-            size="small"
-            :disabled="ledgerSort?.fieldId !== columnToolsField.id"
-            @click="setLedgerSort(columnToolsField, null)"
-          >
-            取消排序
+      <transition name="ledger-overlay-pop">
+        <div
+          v-if="columnToolsField"
+          class="ledger-column-tools-popover"
+          :style="{ left: `${columnToolsPosition.left}px`, top: `${columnToolsPosition.top}px` }"
+          @pointerdown.stop
+          @click.stop
+          @contextmenu.prevent
+        >
+          <div class="ledger-column-tools-title">{{ columnToolsField.label }}</div>
+          <div class="ledger-column-tools-sort">
+            <el-button size="small" @click="setLedgerSort(columnToolsField, 'ascending')">升序</el-button>
+            <el-button size="small" @click="setLedgerSort(columnToolsField, 'descending')">降序</el-button>
+            <el-button
+              size="small"
+              :disabled="ledgerSort?.fieldId !== columnToolsField.id"
+              @click="setLedgerSort(columnToolsField, null)"
+            >
+              取消排序
+            </el-button>
+          </div>
+          <el-button class="ledger-best-fit-button" size="small" @click="bestFitColumn(columnToolsField)">
+            当前列最佳宽度
           </el-button>
-        </div>
-        <el-button class="ledger-best-fit-button" size="small" @click="bestFitColumn(columnToolsField)">
-          当前列最佳宽度
-        </el-button>
-        <div class="ledger-column-tools-filter-label">筛选</div>
-        <el-select
-          v-if="columnToolsFilterKind === 'options'"
-          v-model="columnToolsDraft.options"
-          class="ledger-column-tools-filter-control"
-          multiple
-          collapse-tags
-          collapse-tags-tooltip
-          clearable
-          placeholder="选择筛选值"
-        >
-          <el-option
-            v-for="option in columnToolOptions"
-            :key="option"
-            :label="option || '（空白）'"
-            :value="option"
-          />
-        </el-select>
-        <el-input
-          v-else-if="columnToolsFilterKind === 'text'"
-          v-model="columnToolsDraft.text"
-          class="ledger-column-tools-filter-control"
-          clearable
-          placeholder="包含文字"
-          @keyup.enter="applyColumnFilter"
-        />
-        <el-checkbox
-          v-if="columnToolsFilterKind === 'text'"
-          v-model="columnToolsDraft.emptyOnly"
-          class="ledger-column-tools-empty-filter"
-        >
-          只显示空值
-        </el-checkbox>
-        <div v-else class="ledger-column-tools-date-range">
-          <el-date-picker
-            v-model="columnToolsDraft.start"
-            type="date"
-            value-format="YYYY-MM-DD"
-            placeholder="开始日期"
-          />
-          <el-date-picker
-            v-model="columnToolsDraft.end"
-            type="date"
-            value-format="YYYY-MM-DD"
-            placeholder="结束日期"
-          />
-        </div>
-        <div class="ledger-column-tools-actions">
-          <el-button size="small" type="primary" @click="applyColumnFilter">应用筛选</el-button>
-          <el-button size="small" @click="clearColumnFilter">清除筛选</el-button>
-        </div>
-      </div>
-      <div
-        v-if="ledgerContextMenu"
-        class="ledger-context-menu"
-        :style="contextMenuStyle"
-        role="menu"
-        @pointerdown.stop
-        @click.stop
-        @contextmenu.prevent
-      >
-        <button
-          type="button"
-          role="menuitem"
-          :disabled="ledgerContextMenu.target.kind !== 'cell' || !hasGridCellSelection || loading || gridCutInProgress"
-          class="ledger-context-menu-shortcut-item"
-          title="剪切选中单元格（Ctrl+X / Cmd+X）"
-          aria-keyshortcuts="Control+X Meta+X"
-          @click="contextCut"
-        >
-          <span>剪切</span><kbd>Ctrl+X</kbd>
-        </button>
-        <button type="button" role="menuitem" class="ledger-context-menu-shortcut-item" @click="contextCopy">
-          <span>复制</span><kbd>Ctrl+C</kbd>
-        </button>
-        <button
-          type="button"
-          role="menuitem"
-          :disabled="ledgerContextMenu.target.kind !== 'cell' || !hasGridCellSelection"
-          @click="contextDelete"
-        >
-          删除
-        </button>
-        <div class="ledger-context-menu-submenu">
-          <button
-            type="button"
-            class="ledger-context-menu-submenu-trigger"
-            role="menuitem"
-            aria-haspopup="menu"
+          <div class="ledger-column-tools-filter-label">筛选</div>
+          <el-select
+            v-if="columnToolsFilterKind === 'options'"
+            v-model="columnToolsDraft.options"
+            class="ledger-column-tools-filter-control"
+            multiple
+            collapse-tags
+            collapse-tags-tooltip
+            clearable
+            placeholder="选择筛选值"
           >
-            <span>插入行</span>
-            <ArrowRight :size="14" aria-hidden="true" />
-          </button>
-          <div
-            class="ledger-context-menu-submenu-panel"
-            :class="{ 'opens-left': ledgerContextMenu.submenuLeft }"
-            role="group"
-            aria-label="插入行设置"
+            <el-option
+              v-for="option in columnToolOptions"
+              :key="option"
+              :label="option || '（空白）'"
+              :value="option"
+            />
+          </el-select>
+          <el-input
+            v-else-if="columnToolsFilterKind === 'text'"
+            v-model="columnToolsDraft.text"
+            class="ledger-column-tools-filter-control"
+            clearable
+            placeholder="包含文字"
+            @keyup.enter="applyColumnFilter"
+          />
+          <el-checkbox
+            v-if="columnToolsFilterKind === 'text'"
+            v-model="columnToolsDraft.emptyOnly"
+            class="ledger-column-tools-empty-filter"
           >
-            <label class="ledger-context-menu-insert-count">
-              <span>插入行数</span>
-              <input
-                v-model.number="contextInsertRowCount"
-                type="number"
-                min="1"
-                max="100"
-                step="1"
-                inputmode="numeric"
-                aria-label="插入行数，范围 1 到 100"
-                @click.stop
-                @keydown.enter.stop.prevent="contextInsertRows('before')"
-              />
-            </label>
-            <button type="button" role="menuitem" @click="contextInsertRows('before')">
-              在上方插入
-            </button>
-            <button type="button" role="menuitem" @click="contextInsertRows('after')">
-              在下方插入
-            </button>
+            只显示空值
+          </el-checkbox>
+          <div v-else class="ledger-column-tools-date-range">
+            <el-date-picker
+              v-model="columnToolsDraft.start"
+              type="date"
+              value-format="YYYY-MM-DD"
+              placeholder="开始日期"
+            />
+            <el-date-picker
+              v-model="columnToolsDraft.end"
+              type="date"
+              value-format="YYYY-MM-DD"
+              placeholder="结束日期"
+            />
+          </div>
+          <div class="ledger-column-tools-actions">
+            <el-button size="small" type="primary" @click="applyColumnFilter">应用筛选</el-button>
+            <el-button size="small" @click="clearColumnFilter">清除筛选</el-button>
           </div>
         </div>
-        <div class="ledger-context-menu-separator" role="separator"></div>
-        <button
-          type="button"
-          class="ledger-context-menu-danger"
-          role="menuitem"
-          :disabled="loading"
-          :title="contextDeleteRecordCount > 1
-            ? `永久删除选中的 ${contextDeleteRecordCount} 条记录`
-            : contextMenuRow?.locked
-              ? '当前记录已锁定，请先解锁后再删除'
-              : '永久删除当前记录'"
-          @click="contextDeleteRecord"
+      </transition>
+      <transition name="ledger-overlay-pop">
+        <div
+          v-if="ledgerContextMenu"
+          class="ledger-context-menu"
+          :style="contextMenuStyle"
+          role="menu"
+          @pointerdown.stop
+          @click.stop
+          @contextmenu.prevent
         >
-          {{ contextDeleteRecordCount > 1
-            ? '删除所选记录'
-            : '删除记录' }}
-        </button>
-      </div>
+          <button
+            type="button"
+            role="menuitem"
+            :disabled="ledgerContextMenu.target.kind !== 'cell' || !hasGridCellSelection || loading || gridCutInProgress"
+            class="ledger-context-menu-shortcut-item"
+            title="剪切选中单元格（Ctrl+X / Cmd+X）"
+            aria-keyshortcuts="Control+X Meta+X"
+            @click="contextCut"
+          >
+            <span>剪切</span><kbd>Ctrl+X</kbd>
+          </button>
+          <button type="button" role="menuitem" class="ledger-context-menu-shortcut-item" @click="contextCopy">
+            <span>复制</span><kbd>Ctrl+C</kbd>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            :disabled="ledgerContextMenu.target.kind !== 'cell' || !hasGridCellSelection"
+            @click="contextDelete"
+          >
+            删除
+          </button>
+          <div class="ledger-context-menu-submenu">
+            <button
+              type="button"
+              class="ledger-context-menu-submenu-trigger"
+              role="menuitem"
+              aria-haspopup="menu"
+            >
+              <span>插入行</span>
+              <ArrowRight :size="14" aria-hidden="true" />
+            </button>
+            <div
+              class="ledger-context-menu-submenu-panel"
+              :class="{ 'opens-left': ledgerContextMenu.submenuLeft }"
+              role="group"
+              aria-label="插入行设置"
+            >
+              <label class="ledger-context-menu-insert-count">
+                <span>插入行数</span>
+                <input
+                  v-model.number="contextInsertRowCount"
+                  type="number"
+                  min="1"
+                  max="100"
+                  step="1"
+                  inputmode="numeric"
+                  aria-label="插入行数，范围 1 到 100"
+                  @click.stop
+                  @keydown.enter.stop.prevent="contextInsertRows('before')"
+                />
+              </label>
+              <button type="button" role="menuitem" @click="contextInsertRows('before')">
+                在上方插入
+              </button>
+              <button type="button" role="menuitem" @click="contextInsertRows('after')">
+                在下方插入
+              </button>
+            </div>
+          </div>
+          <div class="ledger-context-menu-separator" role="separator"></div>
+          <button
+            type="button"
+            class="ledger-context-menu-danger"
+            role="menuitem"
+            :disabled="loading"
+            :title="contextDeleteRecordCount > 1
+              ? `永久删除选中的 ${contextDeleteRecordCount} 条记录`
+              : contextMenuRow?.locked
+                ? '当前记录已锁定，请先解锁后再删除'
+                : '永久删除当前记录'"
+            @click="contextDeleteRecord"
+          >
+            {{ contextDeleteRecordCount > 1
+              ? '删除所选记录'
+              : '删除记录' }}
+          </button>
+        </div>
+      </transition>
       <div class="ledger-bottom-bar">
         <div class="project-tab-navigation" aria-label="项目标签滚动">
           <el-button
@@ -7319,36 +7317,6 @@ onBeforeUnmount(() => {
   height: 4px;
 }
 
-.ledger-workspace-identity {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: var(--app-space-2);
-}
-
-.ledger-workspace-mark {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  flex: 0 0 auto;
-  border-radius: var(--app-radius-control);
-  background: var(--app-primary-soft);
-  color: var(--app-primary-text);
-}
-
-.ledger-workspace-heading h1 {
-  min-width: 0;
-  max-width: 100px;
-  overflow: hidden;
-  margin: 0;
-  color: var(--app-text);
-  font-size: 16px;
-  font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .ledger-workspace-actions {
   display: flex;
   flex: 0 0 auto;
@@ -7388,14 +7356,6 @@ onBeforeUnmount(() => {
 
 .selection-bar > * {
   flex-shrink: 0;
-}
-
-.ledger-page :deep(.el-table) {
-  --el-table-border-color: var(--app-border);
-  --el-table-header-bg-color: var(--app-surface-soft);
-  --el-table-header-text-color: var(--app-muted);
-  --el-table-row-hover-bg-color: var(--app-hover);
-  --el-table-current-row-bg-color: var(--app-primary-soft);
 }
 
 .ledger-table-card :deep(.ledger-loading-mask) {
@@ -8025,11 +7985,21 @@ onBeforeUnmount(() => {
   background: var(--app-bg);
   box-shadow: 0 8px 26px rgb(45 42 38 / 10%);
   padding: var(--app-space-1);
+  transform-origin: top left;
+  animation: ledger-overlay-pop-in 0.16s ease;
 }
 
 .ledger-context-menu-submenu-panel.opens-left {
   right: calc(100% - 4px);
   left: auto;
+  transform-origin: top right;
+}
+
+@keyframes ledger-overlay-pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.94);
+  }
 }
 
 .ledger-context-menu-insert-count {
@@ -8607,6 +8577,7 @@ onBeforeUnmount(() => {
   justify-content: center;
   overflow: hidden;
   background: var(--app-card);
+  transition: background-color 150ms ease;
 }
 
 .ledger-table-surface :deep(.el-table-v2__left) {
@@ -8618,6 +8589,11 @@ onBeforeUnmount(() => {
 }
 
 .ledger-table-surface :deep(.el-table-v2__row.draft-row .el-table-v2__row-cell) {
+  background: var(--app-hover);
+}
+
+.ledger-table-surface :deep(.el-table-v2__row:hover .el-table-v2__row-cell),
+.ledger-table-surface :deep(.el-table-v2__row.is-hovered .el-table-v2__row-cell) {
   background: var(--app-hover);
 }
 
@@ -8700,6 +8676,17 @@ onBeforeUnmount(() => {
   max-height: var(--ledger-editor-height, 32px);
   overflow: hidden;
   text-overflow: ellipsis;
+  animation: ledger-cell-appear 180ms ease-out;
+}
+
+@keyframes ledger-cell-appear {
+  from { opacity: 0.35; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ledger-table-surface :deep(.cell-field-value) { animation: none; }
+  .ledger-table-surface :deep(.el-table-v2__row-cell) { transition: none; }
 }
 
 .ledger-v2-selection-control {
@@ -8773,6 +8760,34 @@ onBeforeUnmount(() => {
 @media (prefers-reduced-motion: reduce) {
   .project-tab,
   .highlight-color-swatch {
+    transition: none;
+  }
+}
+</style>
+
+<!-- 台账浮层统一缩放淡入淡出：列工具面板 / 右键菜单 / 填充预览在组件内，
+     单元格 tooltip 的 popper 挂在 body 下，因此这些类需要全局生效 -->
+<style>
+.ledger-overlay-pop-enter-active {
+  transition: opacity 0.16s ease, transform 0.16s ease;
+  transform-origin: top left;
+}
+
+.ledger-overlay-pop-leave-active {
+  transition: opacity 0.12s ease, transform 0.12s ease;
+  transform-origin: top left;
+  pointer-events: none;
+}
+
+.ledger-overlay-pop-enter-from,
+.ledger-overlay-pop-leave-to {
+  opacity: 0;
+  transform: scale(0.94);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ledger-overlay-pop-enter-active,
+  .ledger-overlay-pop-leave-active {
     transition: none;
   }
 }

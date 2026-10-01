@@ -8,8 +8,8 @@ import {
   RefreshCw as Refresh,
   Upload as UploadFilled,
 } from "@lucide/vue";
-import { ElMessage, ElMessageBox } from "element-plus";
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { ElMessage, ElMessageBox, TableV2FixedDir, type Column } from "element-plus";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 
 import { getNativePreviewStatus, getPreviewCapabilities } from "@/api/preview";
@@ -45,11 +45,6 @@ import type {
   PreviewCapabilities,
 } from "@/types/api";
 
-interface RecordTableRef {
-  clearSelection: () => void;
-  toggleRowSelection: (row: ProjectRecord, selected?: boolean) => void;
-}
-
 const route = useRoute();
 const appStore = useAppStore();
 const loading = ref(false);
@@ -74,7 +69,6 @@ const createProjectId = ref("");
 const createName = ref("");
 const createFile = ref<File | null>(null);
 const versionFileInput = ref<HTMLInputElement>();
-const recordTableRef = ref<RecordTableRef>();
 
 const activeTemplate = computed(() =>
   templates.value.find((template) => template.id === activeTemplateId.value),
@@ -105,6 +99,24 @@ const filteredRecords = computed(() => {
       .includes(keyword);
   });
 });
+const selectedRecordIds = computed(() => new Set(selectedRecords.value.map((record) => record.id)));
+const allRecordsSelected = computed(() =>
+  filteredRecords.value.length > 0 &&
+  filteredRecords.value.every((record) => selectedRecordIds.value.has(record.id)),
+);
+const someRecordsSelected = computed(() =>
+  selectedRecords.value.length > 0 && !allRecordsSelected.value,
+);
+
+watch(recordSearch, () => { selectedRecords.value = []; }, { flush: "sync" });
+watch(filteredRecords, (visible) => {
+  const recordsById = new Map(visible.map((record) => [record.id, record]));
+  selectedRecords.value = selectedRecords.value.flatMap((record) => {
+    const current = recordsById.get(record.id);
+    return current ? [current] : [];
+  });
+}, { flush: "sync" });
+
 const createFileLabel = computed(
   () =>
     createFile.value?.name ??
@@ -128,6 +140,45 @@ let templateRequestGeneration = 0;
 
 function placeholderText(value: string): string {
   return `{{${value}}}`;
+}
+
+function mappingVirtualColumns(width: number): Column[] {
+  const placeholderWidth = Math.max(190, (width - 150) * 0.4);
+  return [
+    { key: "placeholder", title: "Word 占位符", width: placeholderWidth },
+    { key: "source_type", title: "来源类型", width: 150 },
+    { key: "content", title: "台账字段或固定内容", width: Math.max(300, width - placeholderWidth - 150) },
+  ];
+}
+
+function recordVirtualColumns(width: number): Column[] {
+  const extraWidth = Math.max(0, width - 882);
+  return [
+    { key: "selection", width: 52, align: "center", fixed: TableV2FixedDir.LEFT },
+    { key: "pathology_number", dataKey: "pathology_number", title: "病理号", width: 160 + extraWidth / 3 },
+    { key: "experiment_date", title: "实验日期", width: 140 },
+    { key: "status", title: "状态", width: 110 },
+    { key: "report_generated", title: "报告", width: 120 },
+    { key: "values", title: "其他台账内容", width: 300 + extraWidth * 2 / 3 },
+  ];
+}
+
+function recordValuesText(record: ProjectRecord): string {
+  return Object.entries(record.values).map(([fieldId, value]) => {
+    const label = activeProject.value?.fields.find((field) => field.id === fieldId)?.label ?? fieldId;
+    return `${label}：${value}`;
+  }).join("；") || "—";
+}
+
+function setRecordSelected(record: ProjectRecord, selected: boolean): void {
+  if (!filteredRecords.value.some((row) => row.id === record.id)) return;
+  const next = selectedRecords.value.filter((row) => row.id !== record.id);
+  if (selected) next.push(record);
+  selectedRecords.value = next;
+}
+
+function setAllRecordsSelected(selected: boolean): void {
+  selectedRecords.value = selected ? filteredRecords.value.slice() : [];
 }
 
 function latestVersion(template: ReportTemplate): ReportTemplateVersion | undefined {
@@ -190,15 +241,8 @@ async function loadRecordsForTemplate(): Promise<void> {
   if (requested.some((record) => record.report_generated)) {
     showGenerated.value = true;
   }
-  await nextTick();
-  if (generation !== recordRequestGeneration || activeTemplateId.value !== template.id) return;
-  recordTableRef.value?.clearSelection();
-  requested.forEach((record) => {
-    recordTableRef.value?.toggleRowSelection(record, true);
-  });
-  if (requested.length) {
-    selectedRecords.value = requested;
-  }
+  const visibleIds = new Set(filteredRecords.value.map((record) => record.id));
+  selectedRecords.value = requested.filter((record) => visibleIds.has(record.id));
 }
 
 async function loadAvailablePrinters(): Promise<void> {
@@ -410,18 +454,6 @@ async function monitorNativeReportJob(task: NativePreviewTask): Promise<void> {
   }
 }
 
-watch(showGenerated, async (visible) => {
-  if (visible) return;
-  selectedRecords.value = selectedRecords.value.filter(
-    (record) => !record.report_generated,
-  );
-  await nextTick();
-  recordTableRef.value?.clearSelection();
-  selectedRecords.value.forEach((record) => {
-    recordTableRef.value?.toggleRowSelection(record, true);
-  });
-});
-
 function handleCreateFile(event: Event): void {
   createFile.value = (event.target as HTMLInputElement).files?.[0] ?? null;
 }
@@ -622,51 +654,49 @@ onMounted(() => {
             当前版本共识别 {{ activeVersion.placeholders.length }} 个占位符。
             所有占位符完成映射或明确设为“留空”后，才能直接打印报告。
           </div>
-          <el-table :data="mappings" row-key="placeholder" border max-height="430">
-            <el-table-column prop="placeholder" label="Word 占位符" min-width="190">
-              <template #default="{ row }: { row: ReportMappingInput }">
-                <code v-text="placeholderText(row.placeholder)" />
-              </template>
-            </el-table-column>
-            <el-table-column label="来源类型" width="150">
-              <template #default="{ row }: { row: ReportMappingInput }">
-                <el-select v-model="row.source_type">
-                  <el-option
-                    v-for="(label, value) in sourceTypeLabels"
-                    :key="value"
-                    :label="label"
-                    :value="value"
-                  />
-                </el-select>
-              </template>
-            </el-table-column>
-            <el-table-column label="台账字段或固定内容" min-width="300">
-              <template #default="{ row }: { row: ReportMappingInput }">
-                <el-select
-                  v-if="row.source_type === 'field'"
-                  v-model="row.field_id"
-                  filterable
-                  placeholder="选择任意台账表头"
-                  style="width: 100%"
+          <div
+            class="workspace-table-surface mapping-table-surface"
+            aria-label="报告占位符映射表"
+            :style="{ height: `${Math.min(430, Math.max(140, 44 + mappings.length * 48 + 12))}px` }"
+          >
+            <el-auto-resizer>
+              <template #default="{ height, width }">
+                <el-table-v2
+                  v-if="height > 0 && width > 0"
+                  :columns="mappingVirtualColumns(width)"
+                  :data="mappings"
+                  :width="width"
+                  :height="height"
+                  :row-height="48"
+                  :header-height="44"
+                  row-key="placeholder"
+                  fixed
                 >
-                  <el-option
-                    v-for="field in activeProject?.fields ?? []"
-                    :key="field.id"
-                    :label="field.label"
-                    :value="field.id"
-                  />
-                </el-select>
-                <el-input
-                  v-else-if="row.source_type === 'fixed'"
-                  v-model="row.fixed_value"
-                  placeholder="每份报告都写入这段文字"
-                />
-                <span v-else class="muted">
-                  {{ sourceTypeLabels[row.source_type] }}
-                </span>
+                  <template #cell="{ rowData: row, column }: { rowData: ReportMappingInput; column: Column }">
+                    <code v-if="column.key === 'placeholder'" class="mapping-placeholder" :title="placeholderText(row.placeholder)" v-text="placeholderText(row.placeholder)" />
+                    <el-select v-else-if="column.key === 'source_type'" v-model="row.source_type" :aria-label="`${row.placeholder} 来源类型`" style="width: 100%">
+                      <el-option v-for="(label, value) in sourceTypeLabels" :key="value" :label="label" :value="value" />
+                    </el-select>
+                    <template v-else-if="column.key === 'content'">
+                      <el-select
+                        v-if="row.source_type === 'field'"
+                        v-model="row.field_id"
+                        filterable
+                        placeholder="选择任意台账表头"
+                        :aria-label="`${row.placeholder} 台账字段`"
+                        style="width: 100%"
+                      >
+                        <el-option v-for="field in activeProject?.fields ?? []" :key="field.id" :label="field.label" :value="field.id" />
+                      </el-select>
+                      <el-input v-else-if="row.source_type === 'fixed'" v-model="row.fixed_value" :aria-label="`${row.placeholder} 固定文字`" placeholder="每份报告都写入这段文字" />
+                      <span v-else class="muted">{{ sourceTypeLabels[row.source_type] }}</span>
+                    </template>
+                  </template>
+                  <template #empty><el-empty description="当前模板没有占位符" :image-size="60" /></template>
+                </el-table-v2>
               </template>
-            </el-table-column>
-          </el-table>
+            </el-auto-resizer>
+          </div>
           <div class="mapping-actions">
             <el-button type="primary" @click="saveMappings">保存占位符映射</el-button>
           </div>
@@ -752,52 +782,52 @@ onMounted(() => {
           </el-button>
         </div>
       </div>
-      <el-table
-        ref="recordTableRef"
-        :data="filteredRecords"
-        row-key="id"
-        border
-        max-height="340"
-        empty-text="当前项目暂无台账记录"
-        @selection-change="selectedRecords = $event"
-      >
-        <el-table-column type="selection" width="52" align="center" />
-        <el-table-column prop="pathology_number" label="病理号" min-width="160" />
-        <el-table-column prop="experiment_date" label="实验日期" width="140">
-          <template #default="{ row }: { row: ProjectRecord }">
-            {{ row.experiment_date || "—" }}
+      <div class="workspace-table-surface report-record-table-surface" aria-label="报告打印记录表">
+        <el-auto-resizer>
+          <template #default="{ height, width }">
+            <el-table-v2
+              v-if="height > 0 && width > 0"
+              :columns="recordVirtualColumns(width)"
+              :data="filteredRecords"
+              :width="width"
+              :height="height"
+              :row-height="42"
+              :header-height="42"
+              row-key="id"
+              fixed
+            >
+              <template #header-cell="{ column }">
+                <el-checkbox
+                  v-if="column.key === 'selection'"
+                  :model-value="allRecordsSelected"
+                  :indeterminate="someRecordsSelected"
+                  :disabled="!filteredRecords.length"
+                  aria-label="选择全部报告记录"
+                  @change="setAllRecordsSelected(Boolean($event))"
+                />
+                <span v-else>{{ column.title }}</span>
+              </template>
+              <template #cell="{ rowData: row, column }">
+                <el-checkbox
+                  v-if="column.key === 'selection'"
+                  :model-value="selectedRecordIds.has(row.id)"
+                  :aria-label="`选择报告记录 ${row.pathology_number}`"
+                  @change="setRecordSelected(row, Boolean($event))"
+                />
+                <span v-else-if="column.key === 'pathology_number'" class="record-values" :title="row.pathology_number">{{ row.pathology_number }}</span>
+                <span v-else-if="column.key === 'experiment_date'">{{ row.experiment_date || "—" }}</span>
+                <el-tag v-else-if="column.key === 'status'" :type="row.status === '已完成' ? 'success' : 'warning'">{{ row.status }}</el-tag>
+                <template v-else-if="column.key === 'report_generated'">
+                  <el-tag v-if="row.report_generated" type="success">已生成</el-tag>
+                  <span v-else class="muted">未生成</span>
+                </template>
+                <span v-else-if="column.key === 'values'" class="record-values" :title="recordValuesText(row)">{{ recordValuesText(row) }}</span>
+              </template>
+              <template #empty><el-empty description="当前项目暂无台账记录" :image-size="72" /></template>
+            </el-table-v2>
           </template>
-        </el-table-column>
-        <el-table-column prop="status" label="状态" width="110">
-          <template #default="{ row }: { row: ProjectRecord }">
-            <el-tag :type="row.status === '已完成' ? 'success' : 'warning'">
-              {{ row.status }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="报告" width="120">
-          <template #default="{ row }: { row: ProjectRecord }">
-            <el-tag v-if="row.report_generated" type="success">已生成</el-tag>
-            <span v-else class="muted">未生成</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="其他台账内容" min-width="300">
-          <template #default="{ row }: { row: ProjectRecord }">
-            <span class="record-values">
-              {{
-                Object.entries(row.values)
-                  .map(([fieldId, value]) => {
-                    const label =
-                      activeProject?.fields.find((field) => field.id === fieldId)?.label ??
-                      fieldId;
-                    return `${label}：${value}`;
-                  })
-                  .join("；") || "—"
-              }}
-            </span>
-          </template>
-        </el-table-column>
-      </el-table>
+        </el-auto-resizer>
+      </div>
     </section>
   </div>
 
@@ -943,6 +973,9 @@ code {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.report-record-table-surface { height: 340px; }
+.mapping-placeholder { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .file-drop {
   display: flex;

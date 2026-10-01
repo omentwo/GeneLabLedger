@@ -3,6 +3,7 @@ import type {
   ProjectRecord,
   RecordCellChange,
 } from "@/types/api";
+import { getRecordFieldValue } from "@/utils/recordFieldValue";
 
 export const QUICK_ENTRY_SETTINGS_KEY = "quick_entry_settings";
 export const QUICK_ENTRY_FIELD_WIDTH_MIN = 160;
@@ -215,18 +216,6 @@ export function parseCombinedPathologyNumber(value: string): ParsedCombinedPatho
   return { pathologyNumber, blockNumber, normalized: `${pathologyNumber}-${blockNumber}` };
 }
 
-export function quickEntryFieldValue(
-  record: ProjectRecord,
-  field: FieldDefinition,
-): string {
-  if (field.system_key === "pathology_number") return record.pathology_number;
-  if (field.system_key === "block_number") return record.block_number ?? "";
-  if (field.system_key === "experiment_date") return record.experiment_date ?? "";
-  if (field.system_key === "experiment_number") return record.experiment_number ?? "";
-  if (field.system_key === "status") return record.status;
-  return record.values[field.id] ?? "";
-}
-
 export function quickEntryDefaultValue(field: FieldDefinition): string {
   if (field.system_key === "status") return "待实验";
   if (field.is_core) return "";
@@ -284,7 +273,7 @@ export function buildQuickEntryChanges(
     const value = normalizeQuickEntryFieldValue(field, values[field.id] ?? "");
     const expectedValue = normalizeQuickEntryFieldValue(
       field,
-      baselineValues[field.id] ?? quickEntryFieldValue(record, field),
+      baselineValues[field.id] ?? getRecordFieldValue(record, field),
     );
     if (value === expectedValue) return [];
     return [{

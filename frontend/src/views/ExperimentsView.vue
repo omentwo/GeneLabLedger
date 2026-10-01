@@ -11,8 +11,8 @@ import {
   ArrowDownUp as Rank,
   Settings2 as Setting,
 } from "@lucide/vue";
-import { ElMessage, ElMessageBox } from "element-plus";
-import { computed, onMounted, ref } from "vue";
+import { ElMessage, ElMessageBox, TableV2FixedDir, type Column } from "element-plus";
+import { computed, onMounted, ref, watch } from "vue";
 
 import { updateProject } from "@/api/projects";
 import { assignExperimentNumbers, listRecords } from "@/api/records";
@@ -29,6 +29,7 @@ import {
   normalizeExperimentProjectOrder,
 } from "@/utils/experimentProjectOrder";
 import { exportWorkbook } from "@/utils/workbook";
+import { getRecordFieldValue } from "@/utils/recordFieldValue";
 
 type QueueColumnSource =
   | "sequence"
@@ -47,11 +48,10 @@ interface QueueColumn {
   source?: QueueColumnSource;
 }
 
-interface CandidateTableRef {
-  toggleAllSelection: () => void;
-  clearSelection: () => void;
-  toggleRowSelection: (row: ProjectRecord, selected?: boolean) => void;
-}
+type ExperimentTableColumn = Column & {
+  kind?: "selection";
+  definition?: QueueColumn;
+};
 
 const defaultQueueColumns: QueueColumn[] = [
   { key: "sequence", name: "序号", export: true, source: "sequence" },
@@ -71,7 +71,7 @@ const appStore = useAppStore();
 const loading = ref(false);
 const records = ref<ProjectRecord[]>([]);
 const queueItems = ref<ProjectRecord[]>([]);
-const selectedCandidates = ref<ProjectRecord[]>([]);
+const selectedCandidateIds = ref(new Set<string>());
 const candidateSearch = ref("");
 const candidateProjectId = ref("");
 const prefixDraft = ref("");
@@ -90,7 +90,6 @@ const projectOrderDraft = ref<string[]>([]);
 const projectOrderSettingValue = ref<unknown>(null);
 const newQueueColumnName = ref("");
 const newCandidateColumnName = ref("");
-const candidateTableRef = ref<CandidateTableRef>();
 
 const queuedRecordIds = computed(() => new Set(queueItems.value.map((item) => item.id)));
 const experimentProjects = computed(() =>
@@ -129,6 +128,28 @@ const pendingCandidates = computed(() => {
       .includes(keyword);
   });
 });
+const pendingCandidatesById = computed(() =>
+  new Map(pendingCandidates.value.map((record) => [record.id, record])),
+);
+const selectedCandidates = computed(() =>
+  Array.from(selectedCandidateIds.value).flatMap((id) => {
+    const record = pendingCandidatesById.value.get(id);
+    return record ? [record] : [];
+  }),
+);
+const allCandidatesSelected = computed(() =>
+  pendingCandidates.value.length > 0 &&
+  selectedCandidates.value.length === pendingCandidates.value.length,
+);
+const someCandidatesSelected = computed(() =>
+  selectedCandidates.value.length > 0 && !allCandidatesSelected.value,
+);
+
+// The former table did not reserve selection when its filtered data changed.
+watch(pendingCandidates, () => {
+  selectedCandidateIds.value = new Set();
+}, { flush: "sync" });
+
 const availableFieldLabels = computed(() => {
   const labels = new Set<string>();
   appStore.projects.forEach((project) => project.fields.forEach((field) => labels.add(field.label)));
@@ -137,6 +158,41 @@ const availableFieldLabels = computed(() => {
 
 function inferSource(column: QueueColumn): QueueColumnSource {
   return column.source ?? `field:${column.name}`;
+}
+
+function virtualColumns(
+  columns: QueueColumn[],
+  tableWidth: number,
+  includeSelection = false,
+): ExperimentTableColumn[] {
+  const result: ExperimentTableColumn[] = columns.map((column) => {
+    const source = inferSource(column);
+    return {
+      key: column.key,
+      title: column.name,
+      definition: column,
+      width: source === "sequence" ? 72 : source === "actions" ? 130 : source === "project" ? 180 : 150,
+      fixed: source === "actions" ? TableV2FixedDir.RIGHT : undefined,
+      align: source === "sequence" || source === "actions" ? "center" : "left",
+    };
+  });
+  if (includeSelection) {
+    result.unshift({
+      key: "candidate-selection",
+      kind: "selection",
+      width: 46,
+      fixed: TableV2FixedDir.LEFT,
+      align: "center",
+    });
+  }
+  const flexibleColumns = result.filter((column) =>
+    column.definition && !["sequence", "actions"].includes(inferSource(column.definition)),
+  );
+  const extraWidth = Math.max(0, tableWidth - result.reduce((total, column) => total + column.width, 0));
+  flexibleColumns.forEach((column) => {
+    column.width += extraWidth / flexibleColumns.length;
+  });
+  return result;
 }
 
 function normalizeColumns(value: unknown, defaults: QueueColumn[]): QueueColumn[] {
@@ -159,11 +215,7 @@ function projectFieldValue(record: ProjectRecord, fieldLabel: string): string {
   );
   if (!field) return "";
   if (field.system_key === "pathology_number") return experimentPathologyNumber(record);
-  if (field.system_key === "block_number") return record.block_number ?? "";
-  if (field.system_key === "experiment_date") return record.experiment_date ?? "";
-  if (field.system_key === "experiment_number") return record.experiment_number ?? "";
-  if (field.system_key === "status") return record.status;
-  return record.values[field.id] ?? "";
+  return getRecordFieldValue(record, field);
 }
 
 function diagnosisFor(record: ProjectRecord): string {
@@ -186,8 +238,7 @@ function clearNumberingQueue(): void {
   }
   const clearedCount = queueItems.value.length;
   queueItems.value = [];
-  selectedCandidates.value = [];
-  candidateTableRef.value?.clearSelection();
+  selectedCandidateIds.value = new Set();
   ElMessage.success(`已将 ${clearedCount} 条记录放回待实验记录列表，台账数据未修改`);
 }
 
@@ -256,18 +307,30 @@ function addSelectedToQueue(): void {
   const existing = new Set(queueItems.value.map((item) => item.id));
   const added = selectedCandidates.value.filter((record) => !existing.has(record.id));
   queueItems.value.push(...added);
-  selectedCandidates.value = [];
-  candidateTableRef.value?.clearSelection();
+  selectedCandidateIds.value = new Set();
   ElMessage.success(`已加入 ${added.length} 条记录`);
 }
 
+function setCandidateSelected(record: ProjectRecord, selected: boolean): void {
+  if (!pendingCandidatesById.value.has(record.id)) return;
+  const next = new Set(selectedCandidateIds.value);
+  if (selected) next.add(record.id);
+  else next.delete(record.id);
+  selectedCandidateIds.value = next;
+}
+
+function setAllCandidatesSelected(selected: boolean): void {
+  const next = selected ? new Set(selectedCandidateIds.value) : new Set<string>();
+  if (selected) pendingCandidates.value.forEach((record) => next.add(record.id));
+  selectedCandidateIds.value = next;
+}
+
 function invertCandidates(): void {
-  pendingCandidates.value.forEach((record) => {
-    candidateTableRef.value?.toggleRowSelection(
-      record,
-      !selectedCandidates.value.some((selected) => selected.id === record.id),
-    );
-  });
+  selectedCandidateIds.value = new Set(
+    pendingCandidates.value
+      .filter((record) => !selectedCandidateIds.value.has(record.id))
+      .map((record) => record.id),
+  );
 }
 
 function applySort(): void {
@@ -529,7 +592,7 @@ onMounted(() => {
           <div class="toolbar">
             <el-button size="small" :icon="Setting" @click="candidateEditorVisible = true">编辑表头</el-button>
             <el-button size="small" @click="eligibilityVisible = true">设置项目</el-button>
-            <el-button size="small" @click="candidateTableRef?.toggleAllSelection()">全选</el-button>
+            <el-button size="small" @click="setAllCandidatesSelected(!allCandidatesSelected)">全选</el-button>
             <el-button size="small" @click="invertCandidates">反选</el-button>
           </div>
         </div>
@@ -540,23 +603,48 @@ onMounted(() => {
           </el-select>
           <el-button type="primary" @click="addSelectedToQueue">加入编号（{{ selectedCandidates.length }}）</el-button>
         </div>
-        <el-table
-          ref="candidateTableRef"
-          :data="pendingCandidates"
-          row-key="id"
-          border
-          max-height="calc(100vh - 360px)"
-          empty-text="没有符合条件的待实验记录"
-          @selection-change="selectedCandidates = $event"
-        >
-          <el-table-column type="selection" width="46" align="center" />
-          <el-table-column v-for="column in candidateColumns" :key="column.key" :label="column.name" min-width="120">
-            <template #default="{ row }: { row: ProjectRecord }">
-              <el-tag v-if="inferSource(column) === 'project'" effect="plain">{{ candidateCellValue(row, column) }}</el-tag>
-              <span v-else>{{ candidateCellValue(row, column) || "—" }}</span>
+        <div class="workspace-table-surface experiment-table-surface" aria-label="待实验记录表">
+          <el-auto-resizer>
+            <template #default="{ height, width }">
+              <el-table-v2
+                v-if="height > 0 && width > 0"
+                :columns="virtualColumns(candidateColumns, width, true)"
+                :data="pendingCandidates"
+                :width="width"
+                :height="height"
+                :row-height="42"
+                :header-height="42"
+                row-key="id"
+                fixed
+              >
+                <template #header-cell="{ column }">
+                  <el-checkbox
+                    v-if="column.kind === 'selection'"
+                    :model-value="allCandidatesSelected"
+                    :indeterminate="someCandidatesSelected"
+                    :disabled="!pendingCandidates.length"
+                    aria-label="选择全部待实验记录"
+                    @change="setAllCandidatesSelected(Boolean($event))"
+                  />
+                  <span v-else class="experiment-cell-value" :title="column.title">{{ column.title }}</span>
+                </template>
+                <template #cell="{ rowData: row, column }">
+                  <el-checkbox
+                    v-if="column.kind === 'selection'"
+                    :model-value="selectedCandidateIds.has(row.id)"
+                    :aria-label="`选择待实验记录 ${experimentPathologyNumber(row)}`"
+                    @change="setCandidateSelected(row, Boolean($event))"
+                  />
+                  <template v-else-if="column.definition">
+                    <el-tag v-if="inferSource(column.definition) === 'project'" class="experiment-project-tag" effect="plain" :title="candidateCellValue(row, column.definition)">{{ candidateCellValue(row, column.definition) }}</el-tag>
+                    <span v-else class="experiment-cell-value" :title="candidateCellValue(row, column.definition)">{{ candidateCellValue(row, column.definition) || "—" }}</span>
+                  </template>
+                </template>
+                <template #empty><el-empty description="没有符合条件的待实验记录" :image-size="72" /></template>
+              </el-table-v2>
             </template>
-          </el-table-column>
-        </el-table>
+          </el-auto-resizer>
+        </div>
       </section>
 
       <section class="page-card queue-card">
@@ -580,20 +668,37 @@ onMounted(() => {
           <el-button :icon="Download" @click="exportQueue">导出 Excel</el-button>
           <el-button type="success" :icon="Check" @click="applyNumbering">编排完成并回写编号</el-button>
         </div>
-        <el-table :data="queueItems" row-key="id" border max-height="calc(100vh - 360px)" empty-text="当前没有已选择的记录">
-          <el-table-column v-for="column in queueColumns" :key="column.key" :label="column.name" :min-width="inferSource(column) === 'actions' ? 130 : 115" :fixed="inferSource(column) === 'actions' ? 'right' : undefined">
-            <template #default="{ row, $index }: { row: ProjectRecord; $index: number }">
-              <div v-if="inferSource(column) === 'actions'" class="queue-actions">
-                <el-button link :icon="ArrowUp" :disabled="$index === 0" @click="moveQueueItem($index, -1)" />
-                <el-button link :icon="ArrowDown" :disabled="$index === queueItems.length - 1" @click="moveQueueItem($index, 1)" />
-                <el-button link type="danger" :icon="Delete" @click="removeItem(row)" />
-              </div>
-              <code v-else-if="inferSource(column) === 'experiment_number' || inferSource(column) === 'pathology_number'">{{ queueCellValue(row, column, $index) || "—" }}</code>
-              <el-tag v-else-if="inferSource(column) === 'project'" effect="plain">{{ queueCellValue(row, column, $index) }}</el-tag>
-              <span v-else>{{ queueCellValue(row, column, $index) || "—" }}</span>
+        <div class="workspace-table-surface experiment-table-surface" aria-label="编号编排表">
+          <el-auto-resizer>
+            <template #default="{ height, width }">
+              <el-table-v2
+                v-if="height > 0 && width > 0"
+                :columns="virtualColumns(queueColumns, width)"
+                :data="queueItems"
+                :width="width"
+                :height="height"
+                :row-height="42"
+                :header-height="42"
+                row-key="id"
+                fixed
+              >
+                <template #cell="{ rowData: row, rowIndex, column }">
+                  <template v-if="column.definition">
+                    <div v-if="inferSource(column.definition) === 'actions'" class="queue-actions">
+                      <el-button link :icon="ArrowUp" :disabled="rowIndex === 0" :aria-label="`上移记录 ${experimentPathologyNumber(row)}`" @click="moveQueueItem(rowIndex, -1)" />
+                      <el-button link :icon="ArrowDown" :disabled="rowIndex === queueItems.length - 1" :aria-label="`下移记录 ${experimentPathologyNumber(row)}`" @click="moveQueueItem(rowIndex, 1)" />
+                      <el-button link type="danger" :icon="Delete" :aria-label="`移除记录 ${experimentPathologyNumber(row)}`" @click="removeItem(row)" />
+                    </div>
+                    <code v-else-if="inferSource(column.definition) === 'experiment_number' || inferSource(column.definition) === 'pathology_number'" class="experiment-cell-value" :title="String(queueCellValue(row, column.definition, rowIndex))">{{ queueCellValue(row, column.definition, rowIndex) || "—" }}</code>
+                    <el-tag v-else-if="inferSource(column.definition) === 'project'" class="experiment-project-tag" effect="plain" :title="String(queueCellValue(row, column.definition, rowIndex))">{{ queueCellValue(row, column.definition, rowIndex) }}</el-tag>
+                    <span v-else class="experiment-cell-value" :title="String(queueCellValue(row, column.definition, rowIndex))">{{ queueCellValue(row, column.definition, rowIndex) || "—" }}</span>
+                  </template>
+                </template>
+                <template #empty><el-empty description="当前没有已选择的记录" :image-size="72" /></template>
+              </el-table-v2>
             </template>
-          </el-table-column>
-        </el-table>
+          </el-auto-resizer>
+        </div>
       </section>
     </div>
   </div>
@@ -670,6 +775,10 @@ onMounted(() => {
 .experiment-workspace { display: grid; grid-template-columns: minmax(420px, 0.9fr) minmax(560px, 1.1fr); gap: 12px; }
 .candidate-card,
 .queue-card { min-width: 0; overflow: hidden; }
+.experiment-table-surface { height: clamp(280px, calc(100vh - 360px), 720px); }
+.experiment-cell-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.experiment-project-tag { max-width: 100%; }
+.experiment-project-tag :deep(.el-tag__content) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .candidate-filter { display: grid; grid-template-columns: minmax(160px, 1fr) 130px auto; gap: 8px; }
 .queue-toolbar,
 .queue-actions,

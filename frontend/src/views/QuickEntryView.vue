@@ -59,13 +59,13 @@ import {
   normalizeQuickEntrySettings,
   parseCombinedPathologyNumber,
   quickEntryDefaultValue,
-  quickEntryFieldValue,
   resolveQuickEntryProjectSettings,
   unreportedQuickEntryRecords,
   type QuickEntryFieldDefaults,
   type QuickEntryProjectSettings,
   type QuickEntrySettingsDocument,
 } from "@/utils/quickEntry";
+import { getRecordFieldValue } from "@/utils/recordFieldValue";
 import { buildValidationPromptCopy } from "@/utils/validationPrompt";
 
 const route = useRoute();
@@ -446,7 +446,7 @@ async function scrollRecordIntoView(recordId: string): Promise<void> {
 
 function valuesForRecord(record: ProjectRecord): Record<string, string> {
   return Object.fromEntries(
-    projectFields.value.map((field) => [field.id, quickEntryFieldValue(record, field)]),
+    projectFields.value.map((field) => [field.id, getRecordFieldValue(record, field)]),
   );
 }
 
@@ -624,7 +624,7 @@ function reconcileValuesAfterFieldRefresh(previousFields: FieldDefinition[]): vo
   const nextBaselines: Record<string, string> = {};
   projectFields.value.forEach((field) => {
     const fallback = activeRecord.value
-      ? quickEntryFieldValue(activeRecord.value, field)
+      ? getRecordFieldValue(activeRecord.value, field)
       : quickEntryDefaultValue(field);
     nextValues[field.id] = Object.hasOwn(previousValues, field.id)
       ? previousValues[field.id] ?? ""
