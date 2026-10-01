@@ -853,6 +853,21 @@ function closeColumnTools(): void {
   columnToolsOpenFieldId.value = "";
 }
 
+// 原生 title 悬浮提示：仅当单元格文本被截断时设置，浏览器自带延迟与滚动/移开关闭
+function updateCellTitle(event: MouseEvent, content: string): void {
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLElement)) return;
+  if (target.scrollWidth > target.clientWidth + 1
+    || target.scrollHeight > target.clientHeight + 1) {
+    target.title = content;
+  }
+}
+
+function clearCellTitle(event: MouseEvent): void {
+  const target = event.currentTarget;
+  if (target instanceof HTMLElement) target.title = "";
+}
+
 function closeLedgerOverlays(): void {
   closeColumnTools();
   closeLedgerContextMenu();
@@ -6736,7 +6751,8 @@ onBeforeUnmount(() => {
                   <span
                     v-else
                     class="cell-field-value"
-                    :title="valueFor(row, virtualColumnField(column)!)"
+                    @mouseenter="updateCellTitle($event, valueFor(row, virtualColumnField(column)!))"
+                    @mouseleave="clearCellTitle"
                   >
                     {{ valueFor(row, virtualColumnField(column)!) }}
                   </span>
