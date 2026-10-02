@@ -19,6 +19,7 @@ import DashboardChart from "@/components/dashboard/DashboardChart.vue";
 import { useAppStore } from "@/stores/app";
 import type { DashboardSummary } from "@/types/api";
 import { chartLabelColor, projectColorSlot, useChartPalette } from "@/utils/chartPalette";
+import { prefersReducedMotion, useAnimatedNumber } from "@/utils/motion";
 
 const appStore = useAppStore();
 const router = useRouter();
@@ -30,6 +31,24 @@ const trendMonths = ref<6 | 12>(12);
 const countFormatter = new Intl.NumberFormat("zh-CN");
 let requestController: AbortController | null = null;
 const chartPalette = useChartPalette();
+const reducedMotion = prefersReducedMotion();
+
+// KPI 数字滚动：刷新或切换项目时从旧值缓动到新值
+const totalRecordsDisplay = useAnimatedNumber(computed(() => summary.value?.total_records ?? 0));
+const currentMonthDisplay = useAnimatedNumber(computed(() => summary.value?.current_month ?? 0));
+const recent30DaysDisplay = useAnimatedNumber(computed(() => summary.value?.recent_30_days ?? 0));
+
+// 图表入场/更新动画（echarts 内建）；柱状图额外按索引错峰
+const chartMotion = reducedMotion
+  ? { animation: false }
+  : {
+      animationDuration: 1100,
+      animationDurationUpdate: 450,
+    };
+const chartStagger = (step: number) => ({
+  animationDelay: (index: number) => index * step,
+  animationDelayUpdate: (index: number) => index * Math.round(step / 2),
+});
 
 function formatCount(value: number): string {
   return countFormatter.format(value);
@@ -83,7 +102,8 @@ const lineChartOption = computed<EChartsCoreOption>(() => {
   const border = cssColor("--app-border", "#e0e4ee");
   const points = visibleMonthly.value;
   return {
-    animationDuration: 450,
+    ...chartMotion,
+    animationEasing: "cubicOut" as const,
     aria: { enabled: true, decal: { show: true } },
     grid: { left: 16, right: 18, top: 24, bottom: 8, containLabel: true },
     tooltip: {
@@ -156,7 +176,10 @@ function projectColor(projectId: string): string {
 }
 
 const structureChartOption = computed<EChartsCoreOption>(() => ({
-  animationDuration: 450,
+  // echarts 5.6 起堆叠柱原生支持整列自基线生长（PR #20862），各段比例锁定
+  ...chartMotion,
+  animationEasing: "cubicOut" as const,
+  ...chartStagger(80),
   aria: { enabled: true, decal: { show: true } },
   grid: { left: 8, right: 10, top: 18, bottom: 74, containLabel: true },
   tooltip: {
@@ -227,7 +250,9 @@ const projectChartOption = computed<EChartsCoreOption>(() => {
   const secondary = cssColor("--app-chart-secondary", "#9180c7");
   const text = cssColor("--app-muted", "#606b80");
   return {
-    animationDuration: 450,
+    ...chartMotion,
+    animationEasing: "cubicOut" as const,
+    ...chartStagger(80),
     aria: { enabled: true, decal: { show: true } },
     grid: { left: 12, right: 18, top: 36, bottom: 6, containLabel: true },
     legend: {
@@ -340,11 +365,13 @@ onBeforeUnmount(() => requestController?.abort());
       </div>
     </header>
 
-    <div v-if="errorMessage" class="dashboard-alert" role="alert">
-      <CircleAlert :size="18" aria-hidden="true" />
-      <span>{{ errorMessage }}</span>
-      <button type="button" @click="loadDashboard">重新加载</button>
-    </div>
+    <transition name="dashboard-alert">
+      <div v-if="errorMessage" class="dashboard-alert" role="alert">
+        <CircleAlert :size="18" aria-hidden="true" />
+        <span>{{ errorMessage }}</span>
+        <button type="button" @click="loadDashboard">重新加载</button>
+      </div>
+    </transition>
 
     <template v-if="loading && !summary">
       <section class="kpi-grid" aria-label="正在加载核心指标">
@@ -357,18 +384,18 @@ onBeforeUnmount(() => requestController?.abort());
       <section class="kpi-grid" aria-label="核心统计指标">
         <article class="kpi-card kpi-card-primary">
           <span class="kpi-icon"><FlaskConical :size="20" aria-hidden="true" /></span>
-          <div class="kpi-content"><span class="kpi-label">实验记录总量</span><strong>{{ formatCount(summary.total_records) }}</strong><small>当前筛选范围内全部记录</small></div>
+          <div class="kpi-content"><span class="kpi-label">实验记录总量</span><strong>{{ formatCount(totalRecordsDisplay) }}</strong><small>当前筛选范围内全部记录</small></div>
         </article>
         <article class="kpi-card">
           <span class="kpi-icon"><CalendarDays :size="20" aria-hidden="true" /></span>
           <div class="kpi-content">
-            <span class="kpi-label">本月实验</span><strong>{{ formatCount(summary.current_month) }}</strong>
+            <span class="kpi-label">本月实验</span><strong>{{ formatCount(currentMonthDisplay) }}</strong>
             <small :class="`change-${monthChange.tone}`"><TrendingUp v-if="monthChange.tone === 'up'" :size="14" aria-hidden="true" /><TrendingDown v-else-if="monthChange.tone === 'down'" :size="14" aria-hidden="true" />{{ monthChange.label }}</small>
           </div>
         </article>
         <article class="kpi-card">
           <span class="kpi-icon"><Clock3 :size="20" aria-hidden="true" /></span>
-          <div class="kpi-content"><span class="kpi-label">近 30 天</span><strong>{{ formatCount(summary.recent_30_days) }}</strong><small>截至 {{ summary.as_of }}</small></div>
+          <div class="kpi-content"><span class="kpi-label">近 30 天</span><strong>{{ formatCount(recent30DaysDisplay) }}</strong><small>截至 {{ summary.as_of }}</small></div>
         </article>
       </section>
 
@@ -401,7 +428,7 @@ onBeforeUnmount(() => requestController?.abort());
         <aside class="panel ranking-panel" aria-labelledby="ranking-title">
           <header class="panel-header"><div><span class="panel-eyebrow">排名</span><h2 id="ranking-title">本月前 {{ PROJECT_RANKING_LIMIT }} 名</h2><p>按本月实验例数排序</p></div></header>
           <ol v-if="topProjects.length" class="ranking-list">
-            <li v-for="(project, index) in topProjects" :key="project.id">
+            <li v-for="(project, index) in topProjects" :key="project.id" :style="{ '--rank': index }">
               <RouterLink :to="{ path: '/ledger', query: { project: project.id } }" class="ranking-link">
                 <span class="ranking-index" :class="{ leading: index < 3 }">{{ index + 1 }}</span>
                 <span class="ranking-main"><strong>{{ project.name }}</strong><i><b :style="{ width: `${(project.current_month / topProjectMax) * 100}%` }" /></i></span>
@@ -439,9 +466,16 @@ onBeforeUnmount(() => requestController?.abort());
 .dashboard-alert { display: flex; align-items: center; gap: var(--app-space-2); padding: var(--app-space-3) var(--app-space-3); border: 1px solid var(--app-danger); border-radius: var(--app-radius-control); color: var(--app-danger-text); background: var(--app-danger-soft); font-size: 13px; }
 .dashboard-alert span { flex: 1; }
 .dashboard-alert button { border: 0; color: inherit; background: transparent; font: inherit; font-weight: 700; cursor: pointer; }
+.dashboard-alert-enter-active,
+.dashboard-alert-leave-active { transition: opacity 160ms ease, transform 160ms ease; }
+.dashboard-alert-enter-from,
+.dashboard-alert-leave-to { opacity: 0; transform: translateY(-6px); }
+/* 刷新数据时内容轻微降透明，提示正在更新 */
+.dashboard[aria-busy="true"] .kpi-card,
+.dashboard[aria-busy="true"] .panel { opacity: 0.6; }
 .kpi-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--app-space-3); }
 .kpi-card, .panel, .loading-panel { border: 1px solid var(--app-border); border-radius: var(--app-radius-card); background: var(--app-card); box-shadow: 0 1px 2px rgb(15 23 42 / 4%); }
-.kpi-card { display: flex; align-items: flex-start; gap: var(--app-space-3); min-width: 0; padding: var(--app-space-4); }
+.kpi-card { display: flex; align-items: flex-start; gap: var(--app-space-3); min-width: 0; padding: var(--app-space-4); transition: opacity 200ms ease; }
 .kpi-card-primary { border-color: var(--app-primary-border); background: linear-gradient(145deg, var(--app-card), var(--app-primary-soft)); }
 .kpi-icon { display: grid; flex: 0 0 38px; width: 38px; height: 38px; place-items: center; border-radius: var(--app-radius-control); color: var(--app-primary-text); background: var(--app-primary-soft); }
 .kpi-content { display: grid; min-width: 0; gap: var(--app-space-1); }
@@ -451,8 +485,25 @@ onBeforeUnmount(() => requestController?.abort());
 .kpi-content small { display: flex; align-items: center; gap: var(--app-space-1); min-height: 18px; color: var(--app-subtle); font-size: 11px; }
 .kpi-content small.change-up { color: var(--app-success-text); }
 .kpi-content small.change-down { color: var(--app-danger-text); }
+/* 入场：卡片与面板按序上浮淡入（数据刷新不重挂载，只播一次） */
+.kpi-card,
+.panel {
+  animation: dashboard-rise 480ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+.kpi-grid .kpi-card:nth-child(1) { animation-delay: 0ms; }
+.kpi-grid .kpi-card:nth-child(2) { animation-delay: 70ms; }
+.kpi-grid .kpi-card:nth-child(3) { animation-delay: 140ms; }
+.analytics-grid .panel:nth-child(1) { animation-delay: 220ms; }
+.analytics-grid .panel:nth-child(2) { animation-delay: 290ms; }
+.workload-grid .panel:nth-child(1) { animation-delay: 360ms; }
+.workload-grid .panel:nth-child(2) { animation-delay: 430ms; }
+.project-panel { animation-delay: 500ms; }
+@keyframes dashboard-rise {
+  from { opacity: 0; transform: translateY(14px); }
+}
 .analytics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--app-space-3); }
-.panel { min-width: 0; padding: var(--app-space-4); }
+.panel { min-width: 0; padding: var(--app-space-4); transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease, opacity 200ms ease; }
+.panel:hover { transform: translateY(-2px); border-color: var(--app-border-strong); box-shadow: 0 10px 28px rgb(45 42 38 / 10%); }
 .panel-header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--app-space-4); }
 .panel-header h2 { margin: 0; font-size: 17px; line-height: 1.3; }
 .range-switch { display: inline-flex; flex: 0 0 auto; padding: var(--app-space-1); border: 1px solid var(--app-border); border-radius: var(--app-radius-control); background: var(--app-surface-soft); }
@@ -473,7 +524,8 @@ onBeforeUnmount(() => requestController?.abort());
 .ranking-main { display: grid; min-width: 0; gap: var(--app-space-2); }
 .ranking-main strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; transition: color 0.15s ease; }
 .ranking-main i { display: block; height: 4px; overflow: hidden; border-radius: var(--app-radius-pill); background: var(--app-border-light); }
-.ranking-main i b { display: block; height: 100%; min-width: 3px; border-radius: inherit; background: var(--app-chart-primary); }
+.ranking-main i b { display: block; height: 100%; min-width: 3px; border-radius: inherit; background: var(--app-chart-primary); transform-origin: left center; transition: width 560ms cubic-bezier(0.22, 1, 0.36, 1); animation: ranking-fill 560ms cubic-bezier(0.22, 1, 0.36, 1) backwards; animation-delay: calc(420ms + var(--rank, 0) * 70ms); }
+@keyframes ranking-fill { from { transform: scaleX(0); } }
 .ranking-value { display: flex; align-items: baseline; gap: var(--app-space-optical); }
 .ranking-value strong { font-size: 15px; }
 .ranking-value small { color: var(--app-muted); font-size: 10px; }
@@ -513,7 +565,12 @@ onBeforeUnmount(() => requestController?.abort());
   .project-links { grid-template-columns: minmax(0, 1fr); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .spinning { animation: none; }
-  .project-link { transition: none; }
+  .dashboard,
+  .dashboard *,
+  .dashboard *::before,
+  .dashboard *::after {
+    transition: none !important;
+    animation: none !important;
+  }
 }
 </style>

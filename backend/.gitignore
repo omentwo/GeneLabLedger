@@ -8,3 +8,4 @@ __pycache__/
 data/
 tools/
 .env
+virtual-year.db

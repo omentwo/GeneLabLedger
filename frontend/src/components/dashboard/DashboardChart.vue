@@ -32,6 +32,7 @@ const emit = defineEmits<{
 const chartElement = ref<HTMLDivElement | null>(null);
 let chart: ReturnType<typeof echarts.init> | null = null;
 let resizeObserver: ResizeObserver | null = null;
+let renderedSize = { width: 0, height: 0 };
 
 function render(): void {
   chart?.setOption(props.option, { notMerge: true });
@@ -42,7 +43,22 @@ onMounted(() => {
   chart = echarts.init(chartElement.value, undefined, { renderer: "svg" });
   chart.on("click", (params) => emit("chartClick", params));
   render();
-  resizeObserver = new ResizeObserver(() => chart?.resize());
+  renderedSize = {
+    width: chartElement.value.clientWidth,
+    height: chartElement.value.clientHeight,
+  };
+  // ResizeObserver 的首次回调与入场动画同时发生且尺寸未变，
+  // 此时 resize 会打断柱子的生长动画，因此只在尺寸真正变化时 resize
+  resizeObserver = new ResizeObserver((entries) => {
+    const entry = entries[entries.length - 1];
+    if (!entry) return;
+    const width = Math.round(entry.contentRect.width);
+    const height = Math.round(entry.contentRect.height);
+    if (width <= 0 || height <= 0) return;
+    if (width === renderedSize.width && height === renderedSize.height) return;
+    renderedSize = { width, height };
+    chart?.resize();
+  });
   resizeObserver.observe(chartElement.value);
 });
 
