@@ -24,9 +24,6 @@
   --app-success-text: var(--app-muted);
   --app-warning-text: #925005;
   --app-primary-rgb: 139 134 128;
-  --app-chart-third: var(--app-chart-primary);
-  --app-chart-fourth: var(--app-chart-primary);
-  --app-chart-fifth: var(--app-chart-primary);
   --app-live: #10b981;
   --app-disabled: #c0bab3;
   --app-loading-mask: #ffffff;
@@ -34,7 +31,6 @@
   --palette-primary-text: #625c55;
   --app-primary-text: var(--palette-primary-text);
   --app-on-primary: #151412;
-  --app-brand: #8b8680;
   --palette-primary: #8b8680;
   --app-primary: var(--palette-primary);
   --palette-primary-hover: #a29c95;

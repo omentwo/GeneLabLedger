@@ -5,7 +5,8 @@
   /* Chart categorical slots. Tableau 10 hues re-ordered for warm/cool
      alternation, then darkened until every slot clears the 3:1 non-text
      contrast floor against the lightest theme card (tests/theme-contrast.spec.ts).
-     Slots must stay mutually distinguishable: no two share a hue family. */
+     Slots must stay mutually distinguishable: no two share a hue family,
+     and every pair clears the ΔE2000 floor enforced by the same test. */
   --palette-cat-1: #2e6d9e; /* blue */
   --palette-cat-2: #c1500f; /* burnt orange */
   --palette-cat-3: #1f8080; /* teal */
@@ -38,13 +39,16 @@
   --app-chart-category-8: var(--palette-cat-8);
 }
 
+/* Dark-card variant: same eight hue families as the light set, re-spaced as
+   Tailwind pastels that clear 3:1 on the dark cards. Lightness-only pairs
+   (two blues, amber next to orange) are banned — the ΔE2000 test guards it. */
 :root[data-theme="noir"], :root[data-theme="biolum"] {
-  --palette-cat-1: #60a5fa;
-  --palette-cat-2: #a78bfa;
-  --palette-cat-3: #5eead4;
-  --palette-cat-4: #fbbf24;
-  --palette-cat-5: #f9a8d4;
-  --palette-cat-6: #93c5fd;
-  --palette-cat-7: #bef264;
-  --palette-cat-8: #fdba74;
+  --palette-cat-1: #60a5fa; /* blue */
+  --palette-cat-2: #a78bfa; /* violet */
+  --palette-cat-3: #5eead4; /* teal */
+  --palette-cat-4: #fbbf24; /* gold */
+  --palette-cat-5: #f9a8d4; /* pink */
+  --palette-cat-6: #f87171; /* red */
+  --palette-cat-7: #bef264; /* lime */
+  --palette-cat-8: #a8a29e; /* warm gray */
 }

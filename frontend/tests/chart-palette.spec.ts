@@ -10,7 +10,7 @@ describe("theme-aware chart palette", () => {
   it("updates cached chart options when only the theme changes", () => {
     vi.spyOn(window, "getComputedStyle").mockImplementation(() => ({
       getPropertyValue: (name: string) => name === "--app-chart-primary"
-        ? document.documentElement.dataset.theme === "noir" ? "#38bdf8" : "#736e67"
+        ? document.documentElement.dataset.theme === "noir" ? "#22d3ee" : "#736e67"
         : name === "--app-card" ? document.documentElement.dataset.theme === "noir" ? "#1a1f26" : "#f0eee8" : "",
     }) as CSSStyleDeclaration);
     setTheme("paper");
@@ -18,7 +18,7 @@ describe("theme-aware chart palette", () => {
     const option = computed(() => ({ color: palette.value["--app-chart-primary"], tooltip: palette.value["--app-card"] }));
     const first = option.value;
     setTheme("noir");
-    expect(option.value).toEqual({ color: "#38bdf8", tooltip: "#1a1f26" });
+    expect(option.value).toEqual({ color: "#22d3ee", tooltip: "#1a1f26" });
     expect(option.value).not.toBe(first);
   });
 
