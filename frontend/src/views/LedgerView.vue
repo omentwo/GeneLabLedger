@@ -4632,7 +4632,9 @@ function sleep(milliseconds: number): Promise<void> {
 async function monitorNativeLedgerJob(task: NativePreviewTask): Promise<void> {
   let current = task;
   let openedNotified = false;
+  let failures = 0;
   for (let attempt = 0; attempt < 28_800; attempt += 1) {
+    if (ledgerDisposed) return;
     if (current.status === "failed") {
       ElMessage.error(current.error || "Excel/WPS 原生窗口打开失败");
       return;
@@ -4645,8 +4647,16 @@ async function monitorNativeLedgerJob(task: NativePreviewTask): Promise<void> {
       ElMessage.info(`${nativeEngineLabel()} 原生窗口已关闭`);
       return;
     }
-    await sleep(500);
-    current = await getNativePreviewStatus(task.job_id);
+    await sleep(openedNotified ? 2000 : 500);
+    if (ledgerDisposed) return;
+    try {
+      current = await getNativePreviewStatus(task.job_id);
+      failures = 0;
+    } catch (error) {
+      if (ledgerDisposed) return;
+      failures += 1;
+      if (failures >= 5) throw error;
+    }
   }
 }
 
