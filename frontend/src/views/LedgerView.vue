@@ -575,6 +575,9 @@ const projectRecordCacheGenerations = new Map<string, number>();
 let ledgerDisposed = false;
 let removeQuickEntryChangedListener: (() => void) | undefined;
 let quickEntryRefreshPromise: Promise<void> = Promise.resolve();
+const QUICK_ENTRY_RETRY_DELAY_MS = 500;
+let quickEntryRetryTimer: number | undefined;
+const quickEntryRetryPending = new Map<string, number>();
 const loadBatchSize = computed(() => ledgerDisplaySettings.value.loadBatchSize);
 const recordTotal = ref(0);
 const loadedRecordCount = ref(0);
@@ -622,6 +625,43 @@ async function acknowledgeQuickEntryChanges(changes: QuickEntryProjectChange[]):
   }
 }
 
+function hasPendingLedgerEdits(): boolean {
+  return Boolean(
+    loading.value
+    || editingGridCell.value
+    || savingIds.value.size
+    || cellSaveInFlightCounts.size
+    || dirtyLedgerChanges().length,
+  );
+}
+
+function scheduleQuickEntryRetry(changes: QuickEntryProjectChange[] = []): void {
+  changes.forEach((change) => {
+    const previous = quickEntryRetryPending.get(change.projectId);
+    if (previous === undefined || change.revision > previous) {
+      quickEntryRetryPending.set(change.projectId, change.revision);
+    }
+  });
+  if (quickEntryRetryTimer !== undefined) return;
+  quickEntryRetryTimer = window.setTimeout(() => {
+    quickEntryRetryTimer = undefined;
+    if (ledgerDisposed) {
+      quickEntryRetryPending.clear();
+      return;
+    }
+    if (preparingClose.value) {
+      scheduleQuickEntryRetry();
+      return;
+    }
+    const pending = [...quickEntryRetryPending.entries()].map(([projectId, revision]) => ({
+      projectId,
+      revision,
+    }));
+    quickEntryRetryPending.clear();
+    queueQuickEntryChanges(pending);
+  }, QUICK_ENTRY_RETRY_DELAY_MS);
+}
+
 async function refreshQuickEntryChanges(changes: QuickEntryProjectChange[]): Promise<void> {
   if (ledgerDisposed || preparingClose.value) return;
   const latestByProject = new Map<string, QuickEntryProjectChange>();
@@ -637,19 +677,29 @@ async function refreshQuickEntryChanges(changes: QuickEntryProjectChange[]): Pro
 
   latestByProject.forEach(({ projectId }) => invalidateProjectRecordCache(projectId));
   const currentChange = latestByProject.get(activeProjectId.value);
-  let currentProjectLoaded = true;
-  if (currentChange) {
-    currentProjectLoaded = await loadRecords(currentChange.projectId, {
-      showLoading: false,
-      preserveHistory: true,
-      preserveSelection: true,
-    });
-  }
-  if (ledgerDisposed) return;
-  const acknowledged = [...latestByProject.values()].filter((change) => (
-    change.projectId !== activeProjectId.value || currentProjectLoaded
+  const otherChanges = [...latestByProject.values()].filter((change) => (
+    change.projectId !== activeProjectId.value
   ));
-  await acknowledgeQuickEntryChanges(acknowledged);
+  if (otherChanges.length) await acknowledgeQuickEntryChanges(otherChanges);
+  if (!currentChange) return;
+  if (hasPendingLedgerEdits()) {
+    scheduleQuickEntryRetry([currentChange]);
+    return;
+  }
+  const currentProjectLoaded = await loadRecords(currentChange.projectId, {
+    showLoading: false,
+    preserveHistory: true,
+    preserveSelection: true,
+    deferForPendingEdits: true,
+  });
+  if (ledgerDisposed) return;
+  if (!currentProjectLoaded) {
+    // The load was deferred (edits started while it ran) or superseded; retry
+    // instead of acknowledging, otherwise the change would never re-apply.
+    scheduleQuickEntryRetry([currentChange]);
+    return;
+  }
+  await acknowledgeQuickEntryChanges([currentChange]);
 }
 
 function queueQuickEntryChanges(changes: QuickEntryProjectChange[]): void {
@@ -6670,6 +6720,9 @@ onBeforeUnmount(() => {
   ledgerDisposed = true;
   ledgerCellEntryMotion.cancel();
   if (rangeRefreshTimer !== undefined) window.clearTimeout(rangeRefreshTimer);
+  if (quickEntryRetryTimer !== undefined) window.clearTimeout(quickEntryRetryTimer);
+  quickEntryRetryTimer = undefined;
+  quickEntryRetryPending.clear();
   ledgerHistory.clear();
   document.removeEventListener("click", handleRecordSelectionClickCapture, true);
   document.removeEventListener("pointerdown", handleLedgerDocumentPointerDown);
