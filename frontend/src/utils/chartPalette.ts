@@ -3,11 +3,13 @@ import { computed } from "vue";
 import { currentTheme } from "@/utils/themePreference";
 
 const defaults: Record<string, string> = {
-  "--app-chart-primary": "#736e67", "--app-chart-secondary": "#91887f",
+  "--app-chart-primary": "#736e67", "--app-chart-secondary": "#4e79a7",
   "--app-card": "#f0eee8", "--app-text": "#2d2a26", "--app-muted": "#6d6760",
   "--app-border": "#e3e1db", "--app-primary-text": "#6d6760",
 };
-const categories = ["#2563a6", "#7660a5", "#2d8279", "#9b6b27", "#a44f70", "#4f719e", "#6a6c38", "#806656"];
+// Mirrors --app-chart-category-* in tokens.css (Tableau hues, darkened to the
+// 3:1 contrast floor); keep the two in sync.
+const categories = ["#2e6d9e", "#c1500f", "#1f8080", "#9a8210", "#7a58b5", "#4f8a28", "#b04a78", "#67625b"];
 categories.forEach((color, index) => { defaults[`--app-chart-category-${index + 1}`] = color; });
 
 export function useChartPalette() {

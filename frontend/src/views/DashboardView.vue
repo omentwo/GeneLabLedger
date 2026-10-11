@@ -104,7 +104,7 @@ const lineChartOption = computed<EChartsCoreOption>(() => {
   return {
     ...chartMotion,
     animationEasing: "cubicOut" as const,
-    aria: { enabled: true, decal: { show: true } },
+    aria: { enabled: true },
     grid: { left: 16, right: 18, top: 24, bottom: 8, containLabel: true },
     tooltip: {
       trigger: "axis",
@@ -180,7 +180,7 @@ const structureChartOption = computed<EChartsCoreOption>(() => ({
   ...chartMotion,
   animationEasing: "cubicOut" as const,
   ...chartStagger(80),
-  aria: { enabled: true, decal: { show: true } },
+  aria: { enabled: true },
   grid: { left: 8, right: 10, top: 18, bottom: 74, containLabel: true },
   tooltip: {
     trigger: "axis",
@@ -253,7 +253,7 @@ const projectChartOption = computed<EChartsCoreOption>(() => {
     ...chartMotion,
     animationEasing: "cubicOut" as const,
     ...chartStagger(80),
-    aria: { enabled: true, decal: { show: true } },
+    aria: { enabled: true },
     grid: { left: 12, right: 18, top: 36, bottom: 6, containLabel: true },
     legend: {
       top: 0,
