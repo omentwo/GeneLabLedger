@@ -6013,8 +6013,12 @@ function bestFitColumn(field: FieldDefinition): void {
   );
 }
 
-function handleReadOnlyCellWheel(event: WheelEvent, cell: GridCellPosition): void {
-  if (isGridCellEditing(cell)) return;
+// Single delegated wheel listener on the table card: cells with overflowing
+// values would otherwise capture the wheel, so non-editing cells forward the
+// scroll to the table body instead (compact sizing behaviour).
+function handleLedgerCellWheel(event: WheelEvent): void {
+  const cell = gridCellFromElement(event.target);
+  if (!cell || isGridCellEditing(cell)) return;
   const tableRoot = ledgerTableCardRef.value;
   if (!tableRoot) return;
   const body = gridTableBodyScrollElement(tableRoot);
@@ -7112,6 +7116,7 @@ onBeforeUnmount(() => {
     <section
       ref="ledgerTableCardRef"
       class="page-card ledger-table-card"
+      @wheel="handleLedgerCellWheel"
       @pointerdown.capture="handleGridPointerDown"
       @click.capture="handleGridClick"
       @dblclick.capture="handleGridDoubleClick"
@@ -7271,10 +7276,6 @@ onBeforeUnmount(() => {
                     :data-row-id="row.id"
                     :data-field-index="column.fieldIndex"
                     :tabindex="cellData.editing ? -1 : 0"
-                    @wheel="handleReadOnlyCellWheel($event, {
-                      rowIndex,
-                      columnIndex: column.fieldIndex ?? -1,
-                    })"
                   >
                     <template v-if="cellData.editing">
                       <EditableDateInput
