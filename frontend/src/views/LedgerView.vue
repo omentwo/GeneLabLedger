@@ -3844,7 +3844,6 @@ async function saveLedgerBeforeClose(): Promise<boolean> {
   const changes = dirtyLedgerChanges();
   const drafts = dirtyLedgerDrafts().map((record) => ({
     record,
-    rowNumber: (tableRowIndexById.value.get(record.id) ?? 0) + 2,
     snapshot: snapshotRecord(record),
   }));
   if (!changes.length && !drafts.length) return true;
@@ -4085,7 +4084,7 @@ async function replayHistoryEntry(
 }
 
 function reconcileCommittedPaste(
-  entries: Array<{ record: LedgerRow; rowNumber: number; snapshot: ProjectRecord }>,
+  entries: Array<{ record: LedgerRow; snapshot: ProjectRecord }>,
   committedIds: string[],
   serverRecords: ProjectRecord[] = [],
 ): ProjectRecord[] | null {
@@ -5997,7 +5996,7 @@ async function pasteGrid(
       rowValues.map((value, columnOffset) => ({ rowOffset, columnOffset, value })),
     );
   if (!entries.length) return [];
-  const changedDraftRows = new Map<string, { record: LedgerRow; rowNumber: number }>();
+  const changedDraftRows = new Map<string, { record: LedgerRow }>();
   const rollbackSnapshots = new Map<string, ValidationCellRollbackSnapshot>();
   const draftIdsBeforePaste = new Set(draftRows.value.map((record) => record.id));
   let appendedDraftIds = new Set<string>();
@@ -6054,7 +6053,6 @@ async function pasteGrid(
       if (isDraft(record)) {
         changedDraftRows.set(record.id, {
           record,
-          rowNumber: targetRowIndex + 2,
         });
       }
       changedCells += 1;
@@ -7755,7 +7753,7 @@ onBeforeUnmount(() => {
           <template v-for="(row, rowIndex) in highlightThemeRows" :key="`theme-${rowIndex}`">
             <button
               v-for="item in row"
-              :key="item.color"
+              :key="item.label"
               type="button"
               class="highlight-color-swatch"
               :class="{ 'is-selected': isHighlightColorSelected(item.color) }"
@@ -7777,7 +7775,7 @@ onBeforeUnmount(() => {
         <div class="highlight-palette-grid">
           <button
             v-for="item in highlightStandardColors"
-            :key="item.color"
+            :key="item.label"
             type="button"
             class="highlight-color-swatch"
             :class="{ 'is-selected': isHighlightColorSelected(item.color) }"

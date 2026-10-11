@@ -98,14 +98,14 @@ def _build_ledger_sheet(
         if not indices:
             raise HTTPException(status_code=422, detail="请选择当前台账的可见单元格")
         fields = fields[min(indices) : max(indices) + 1]
-    filters = _preview_filters(project.id, payload)
-    if payload.scope == "selection":
         filters = [
             ProjectRecord.project_id == project.id,
             ProjectRecord.id.in_({item.record_id for item in payload.cells}),
         ]
         if not payload.include_locked:
             filters.append(ProjectRecord.locked.is_(False))
+    else:
+        filters = _preview_filters(project.id, payload)
     row_count = session.scalar(select(func.count()).select_from(ProjectRecord).where(*filters)) or 0
     if (row_count + 1) * len(fields) > 2_000_000 or row_count > 10_000 or len(fields) > 200:
         raise HTTPException(
@@ -137,11 +137,8 @@ def _build_ledger_sheet(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="The selected cells are not part of this ledger.",
             )
-        ordered_records = [
-            record_by_id[record_id]
-            for record_id in record_by_id
-            if any(target[0] == record_id for target in selected_targets)
-        ]
+        selected_record_ids = {record_id for record_id, _ in selected_targets}
+        ordered_records = [record_by_id[record_id] for record_id in selected_record_ids]
         ordered_records.sort(key=lambda record: (record.position, record.id))
         selected_field_ids = {field_id for _, field_id in selected_targets}
         ordered_fields = [field for field in fields if field.id in selected_field_ids]
