@@ -12,7 +12,9 @@ import type {
   RecordComplexQuery,
 } from "@/types/api";
 import type { LedgerRow } from "@/utils/ledgerTableView";
+import { DEFAULT_LEDGER_RANGE_SETTINGS, LEDGER_RANGE_SETTINGS_KEY, type LedgerRangeSettings } from "@/utils/ledgerRangeSettings";
 import LedgerView from "@/views/LedgerView.vue";
+import { getSetting } from "@/api/system";
 
 const mocks = vi.hoisted(() => ({
   store: {
@@ -24,6 +26,9 @@ const mocks = vi.hoisted(() => ({
   previewCellBatch: vi.fn(),
   commitCellBatch: vi.fn(),
   createRecord: vi.fn(),
+  queryRecordIds: vi.fn(),
+  previewReplace: vi.fn(),
+  putSetting: vi.fn(),
   writeClipboardText: vi.fn(),
   message: { success: vi.fn(), info: vi.fn(), warning: vi.fn(), error: vi.fn() },
 }));
@@ -44,11 +49,14 @@ vi.mock("@/api/records", async (importOriginal) => ({
   previewCellBatch: mocks.previewCellBatch,
   commitCellBatch: mocks.commitCellBatch,
   createRecord: mocks.createRecord,
+  queryRecordIds: mocks.queryRecordIds,
+  previewReplace: mocks.previewReplace,
   validateNewRecord: vi.fn(async () => ({ issues: [] })),
 }));
 vi.mock("@/api/system", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/api/system")>(),
   getSetting: vi.fn(async () => ({ value: null })),
+  putSetting: mocks.putSetting,
 }));
 vi.mock("@/api/preview", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/api/preview")>(),
@@ -64,6 +72,9 @@ interface LedgerState {
   fields: FieldDefinition[];
   loading: boolean;
   showLockedRecords: boolean;
+  ledgerRangeDraft: LedgerRangeSettings;
+  ledgerSort: { fieldId: string; order: "ascending" | "descending" } | null;
+  tableRef: { scrollToRow: ReturnType<typeof vi.fn>; scrollToLeft: ReturnType<typeof vi.fn> } | null;
   recordTotal: number;
   validationPanel: unknown;
   cellSaveStates: Map<string, { status: string }>;
@@ -88,6 +99,10 @@ interface LedgerState {
   replaceGridCellSelection: (positions: Position[], active: Position, anchor?: Position, range?: { anchor: Position; focus: Position }) => void;
   clearBatchSelection: () => void;
   handleLockedVisibilityChange: () => Promise<void>;
+  saveLedgerRangeSettings: () => Promise<void>;
+  exportCurrentProject: () => Promise<void>;
+  findReplaceForm: { fieldId: string; find: string; replacement: string; matchMode: string; caseSensitive: boolean };
+  runFindReplacePreview: () => Promise<void>;
   handleGridKeydown: (event: KeyboardEvent) => void;
   handleGridCopy: (event: ClipboardEvent) => void;
   handleGridCut: (event: ClipboardEvent) => void;
@@ -139,6 +154,7 @@ let previewSequence: number;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(getSetting).mockImplementation(async (key) => ({ key, value: null }));
   window.localStorage.clear();
   mocks.store.projects = ["A", "B"].map((id) => ({
     id, name: id, sort_order: 0, experiment_enabled: true,
@@ -189,6 +205,7 @@ beforeEach(() => {
     };
   });
   mocks.createRecord.mockImplementation(async () => record("A", "unexpected-create"));
+  mocks.putSetting.mockImplementation(async (key, value) => ({ key, value }));
 });
 
 afterEach(() => {
@@ -706,6 +723,9 @@ describe("ledger batch selection", () => {
     });
     const state = await mountLedger();
     expect(state.records.map((row) => row.id)).toEqual([unlocked.id]);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const scrollToRow = vi.fn();
+    state.tableRef = { scrollToRow, scrollToLeft: vi.fn() };
     state.selectVisibleRecords();
     await vi.waitFor(() => expect(state.batchSelectionActive).toBe(true));
     const position = { rowIndex: 0, columnIndex: 2 };
@@ -720,11 +740,128 @@ describe("ledger batch selection", () => {
     expect(state.records.map((row) => row.id)).toEqual([unlocked.id, locked.id]);
     expect(state.batchSelectionActive).toBe(false);
     expect(state.activeGridCell).toBeNull();
+    expect(scrollToRow).toHaveBeenLastCalledWith(1, "end");
 
     state.showLockedRecords = false;
     await state.handleLockedVisibilityChange();
     expect(state.records.map((row) => row.id)).toEqual([unlocked.id]);
+    expect(scrollToRow).toHaveBeenLastCalledWith(0, "end");
     expect(mocks.queryRecords.mock.calls.every(([query]) => query.project_id === "A")).toBe(true);
+  });
+});
+
+describe("ledger range settings", () => {
+  beforeEach(() => {
+    database.set("A", ["26-1", "26-2", "26-10"].map((id, index) => ({ ...record("A", id), position: index + 1 })));
+    mocks.queryRecords.mockImplementation(async (query: RecordComplexQuery) => {
+      let items = (database.get(query.project_id) ?? []).map(clone);
+      if (query.tail_count) items = items.slice(-query.tail_count);
+      return { items, total: items.length, limit: query.limit, offset: query.offset };
+    });
+  });
+
+  it("defaults to all and saves a tail limit independently of batch size", async () => {
+    const state = await mountLedger();
+    expect(state.records).toHaveLength(3);
+    expect(state.ledgerRangeDraft.mode).toBe("all");
+    state.appendDraftRow(false);
+    state.ledgerRangeDraft = { ...DEFAULT_LEDGER_RANGE_SETTINGS, mode: "count", count: 2 };
+    await state.saveLedgerRangeSettings();
+    expect(mocks.putSetting).toHaveBeenLastCalledWith(LEDGER_RANGE_SETTINGS_KEY,
+      expect.objectContaining({ mode: "count", count: 2 }), { expectedValue: null });
+    expect(mocks.queryRecords).toHaveBeenLastCalledWith(expect.objectContaining({ tail_count: 2, limit: 2000 }), expect.any(AbortSignal));
+    expect(state.records.map((row) => row.id)).toEqual(["26-2", "26-10"]);
+    expect(state.draftRows).toHaveLength(1);
+    expect(state.recordTotal).toBe(2);
+  });
+
+  it("takes the bottom of the current natural sort, including reversed order", async () => {
+    const state = await mountLedger();
+    state.ledgerSort = { fieldId: "A-pathology", order: "ascending" };
+    state.ledgerRangeDraft = { ...DEFAULT_LEDGER_RANGE_SETTINGS, mode: "count", count: 2 };
+    await state.saveLedgerRangeSettings();
+    expect(state.records.map((row) => row.id)).toEqual(["26-2", "26-10"]);
+    state.ledgerSort = { fieldId: "A-pathology", order: "descending" };
+    await state.loadRecords("A", { preserveHistory: true });
+    expect(state.records.map((row) => row.id)).toEqual(["26-2", "26-1"]);
+    expect(mocks.queryRecords.mock.calls.at(-1)?.[0].tail_count).toBeUndefined();
+    state.findReplaceForm.fieldId = "A-note";
+    mocks.previewReplace.mockResolvedValue({});
+    await state.runFindReplacePreview();
+    expect(mocks.previewReplace).toHaveBeenLastCalledWith(expect.objectContaining({ record_ids: ["26-2", "26-1"] }));
+    expect(mocks.queryRecordIds).not.toHaveBeenCalled();
+  });
+
+  it("loads a saved month range using the ledger date", async () => {
+    vi.mocked(getSetting).mockImplementation(async (key) => ({ key, value: key === LEDGER_RANGE_SETTINGS_KEY
+      ? { ...DEFAULT_LEDGER_RANGE_SETTINGS, mode: "months", months: 6, includeUndated: false } : null }));
+    await mountLedger();
+    expect(mocks.queryRecords).toHaveBeenLastCalledWith(expect.objectContaining({
+      experiment_date_from: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+      experiment_date_to: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), include_undated: false,
+    }), expect.any(AbortSignal));
+  });
+
+  it("retains pending cell edits when switching display range", async () => {
+    const state = await mountLedger();
+    state.setValue(state.records[0]!, state.fields[2]!, "unsaved");
+    state.ledgerRangeDraft = { ...DEFAULT_LEDGER_RANGE_SETTINGS, mode: "count", count: 1 };
+    await state.saveLedgerRangeSettings();
+    expect(mocks.putSetting).not.toHaveBeenCalled();
+    expect(state.records).toHaveLength(3);
+    expect(state.records[0]!.values["A-note"]).toBe("unsaved");
+  });
+
+  it("applies all records after an edit started during settings persistence finishes", async () => {
+    const state = await mountLedger();
+    state.ledgerRangeDraft = { ...DEFAULT_LEDGER_RANGE_SETTINGS, mode: "count", count: 1 };
+    await state.saveLedgerRangeSettings();
+    const pending = deferred<void>();
+    mocks.putSetting.mockImplementationOnce(async (key, value) => {
+      await pending.promise;
+      return { key, value };
+    });
+    state.ledgerRangeDraft = { ...DEFAULT_LEDGER_RANGE_SETTINGS, mode: "all" };
+    const saving = state.saveLedgerRangeSettings();
+    await vi.waitFor(() => expect(mocks.putSetting).toHaveBeenCalledTimes(2));
+    const edited = state.records[0]!;
+    state.editingGridCell = { rowIndex: 0, columnIndex: 2 };
+    state.editingGridSnapshot = { rowId: edited.id, fieldId: "A-note", value: "" };
+    state.setValue(edited, state.fields[2]!, "temporary input");
+    pending.resolve();
+    await saving;
+    expect(state.records).toHaveLength(1);
+    expect(edited.values["A-note"]).toBe("temporary input");
+    await state.finishGridCellEdit(false, false);
+    await vi.waitFor(() => expect(state.records).toHaveLength(3));
+    expect(mocks.queryRecords.mock.calls.at(-1)?.[0].tail_count).toBeUndefined();
+  });
+
+  it("does not overwrite edits made while the new display range is loading", async () => {
+    const state = await mountLedger();
+    const pending = deferred<void>();
+    const perform = mocks.queryRecords.getMockImplementation()!;
+    mocks.queryRecords.mockImplementationOnce(async (...args: unknown[]) => {
+      const response = await perform(...args);
+      await pending.promise;
+      return response;
+    });
+    state.ledgerRangeDraft = { ...DEFAULT_LEDGER_RANGE_SETTINGS, mode: "count", count: 1 };
+    const saving = state.saveLedgerRangeSettings();
+    await vi.waitFor(() => expect(mocks.queryRecords).toHaveBeenCalledTimes(2));
+    const edited = state.records[2]!;
+    state.editingGridCell = { rowIndex: 2, columnIndex: 2 };
+    state.editingGridSnapshot = { rowId: edited.id, fieldId: "A-note", value: "" };
+    state.setValue(edited, state.fields[2]!, "kept input");
+    pending.resolve();
+    await saving;
+    expect(state.records).toHaveLength(3);
+    expect(state.records[2]!.values["A-note"]).toBe("kept input");
+    expect(state.cellSaveStates.get(`${edited.id}:A-note`)?.status).toBe("dirty");
+    expect(await state.finishGridCellEdit(true, false)).toBe(true);
+    await vi.waitFor(() => expect(state.records).toHaveLength(1));
+    expect(state.records[0]!.values["A-note"]).toBe("kept input");
+    expect(database.get("A")![2]!.values["A-note"]).toBe("kept input");
   });
 });
 

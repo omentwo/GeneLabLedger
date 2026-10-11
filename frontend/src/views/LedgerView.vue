@@ -189,6 +189,17 @@ import {
   type RecordSelectionScope,
 } from "@/utils/ledgerRecordSelection";
 import { exportWorkbook } from "@/utils/workbook";
+import { LedgerCellEntryMotion } from "@/utils/ledgerCellMotion";
+import {
+  DEFAULT_LEDGER_RANGE_SETTINGS,
+  LEDGER_RANGE_SETTINGS_KEY,
+  LEDGER_RANGE_MONTHS_MAX,
+  LEDGER_RANGE_COUNT_MAX,
+  ledgerRangeLabel,
+  normalizeLedgerRangeSettings,
+  resolveLedgerRecordRange,
+  type LedgerRangeSettings,
+} from "@/utils/ledgerRangeSettings";
 
 const route = useRoute();
 const router = useRouter();
@@ -204,9 +215,21 @@ const selectedRecords = ref<ProjectRecord[]>([]);
 const ledgerDisplaySettings = ref<LedgerDisplaySettings>({
   ...DEFAULT_LEDGER_DISPLAY_SETTINGS,
 });
+const ledgerRangeSettings = ref<LedgerRangeSettings>({ ...DEFAULT_LEDGER_RANGE_SETTINGS });
+const ledgerRangeDraft = ref<LedgerRangeSettings>({ ...DEFAULT_LEDGER_RANGE_SETTINGS });
+const ledgerRangeSaving = ref(false);
+let persistedLedgerRange: unknown = null;
+let pendingLedgerRangeApplication = false;
+const ledgerRangeSummary = computed(() => ledgerRangeLabel(ledgerRangeSettings.value));
+const ledgerRangeDates = computed(() => {
+  const range = resolveLedgerRecordRange(ledgerRangeDraft.value);
+  return range.experiment_date_from ? `${range.experiment_date_from} 至 ${range.experiment_date_to}` : "";
+});
 const ledgerTableCardRef = ref<HTMLElement | null>(null);
 const projectStripRef = ref<HTMLElement | null>(null);
 const tableRef = ref<TableV2Instance | null>(null);
+const ledgerCellEntryMotion = new LedgerCellEntryMotion();
+let ledgerMotionScrollTop = 0;
 const ledgerHorizontalScrollbarRef = ref<HTMLElement | null>(null);
 const LEDGER_HORIZONTAL_SCROLLBAR_HEIGHT = 10;
 type AutosizeTextareaInstance = { resizeTextarea: () => void };
@@ -535,6 +558,7 @@ const LEDGER_RECORD_CACHE_MAX_RECORDS = 10_000;
 let draftSequence = 0;
 let loadSequence = 0;
 let recordsAbortController: AbortController | null = null;
+let rangeRefreshTimer: number | undefined;
 const ledgerRecordCache = new LedgerRecordCache({ maxEntries: 2 });
 const projectRecordCacheGenerations = new Map<string, number>();
 let ledgerDisposed = false;
@@ -667,10 +691,12 @@ const fields = computed(() =>
     .slice()
     .sort((left, right) => left.sort_order - right.sort_order),
 );
+const fieldById = computed(() => new Map(fields.value.map((field) => [field.id, field])));
 type LedgerVirtualColumnKind = "selection" | "lock" | "field";
 type LedgerVirtualColumn = Column<unknown> & {
   kind: LedgerVirtualColumnKind;
   fieldId?: string;
+  field?: FieldDefinition;
   fieldIndex?: number;
 };
 const ledgerZoomScale = computed(() => ledgerDisplaySettings.value.zoomPercent / 100);
@@ -717,6 +743,7 @@ const ledgerVirtualColumns = computed<LedgerVirtualColumn[]>(() => {
       dataKey: field.id,
       kind: "field" as const,
       fieldId: field.id,
+      field,
       fieldIndex,
       title: field.label,
       width: Math.max(48, Math.round(field.width * scale)),
@@ -748,7 +775,7 @@ const hasGridCellSelection = computed(() => gridCellSelectionCount.value > 0);
 const batchSelectionActive = computed(() => selectedCount.value > 0 || hasGridCellSelection.value);
 const gridCellInternalEditing = computed(() => Boolean(editingGridCell.value));
 const columnToolsField = computed(
-  () => fields.value.find((field) => field.id === columnToolsOpenFieldId.value) ?? null,
+  () => fieldById.value.get(columnToolsOpenFieldId.value) ?? null,
 );
 const columnToolsFilterKind = computed<"text" | "options" | "date-range">(() => {
   const field = columnToolsField.value;
@@ -972,7 +999,11 @@ type LedgerTableScrollPosition = {
   left: number;
 };
 
-function handleLedgerTableScroll(position: { scrollLeft?: number }): void {
+function handleLedgerTableScroll(position: { scrollLeft?: number; scrollTop?: number }): void {
+  if (typeof position.scrollTop === "number" && position.scrollTop !== ledgerMotionScrollTop) {
+    ledgerMotionScrollTop = position.scrollTop;
+    ledgerCellEntryMotion.cancel();
+  }
   const scrollbar = ledgerHorizontalScrollbarRef.value;
   if (!scrollbar || typeof position.scrollLeft !== "number") return;
   if (Math.abs(scrollbar.scrollLeft - position.scrollLeft) > 0.5) {
@@ -1019,7 +1050,7 @@ function setLedgerSort(field: FieldDefinition, order: "ascending" | "descending"
   ledgerSort.value = order ? { fieldId: field.id, order } : null;
   void persistLedgerProjectLayout();
   closeColumnTools();
-  if (!draftRows.value.length) {
+  if (!draftRows.value.length || (ledgerRangeSettings.value.mode !== "all" && !dirtyLedgerChanges().length)) {
     void loadRecords(activeProjectId.value, { preserveHistory: true });
     return;
   }
@@ -1242,11 +1273,6 @@ function selectGridCell(position: GridCellPosition): void {
     nextPosition,
     { anchor: { ...nextPosition }, focus: { ...nextPosition } },
   );
-}
-
-function virtualColumnField(column: LedgerVirtualColumn): FieldDefinition | undefined {
-  if (column.kind !== "field" || !column.fieldId) return undefined;
-  return fields.value.find((field) => field.id === column.fieldId);
 }
 
 function gridColumnPositions(fieldIndex: number): GridCellPosition[] {
@@ -1531,7 +1557,7 @@ async function finishGridCellEdit(commit = true, focusAfter = true): Promise<boo
   if (!editing || !snapshot) return true;
   const finish = (async (): Promise<boolean> => {
     const record = tableRows.value.find((row) => row.id === snapshot.rowId);
-    const field = fields.value.find((item) => item.id === snapshot.fieldId);
+    const field = fieldById.value.get(snapshot.fieldId);
     const data = record && field ? { record, field } : null;
     if (!data) {
       clearGridCellEdit();
@@ -1577,6 +1603,7 @@ async function finishGridCellEdit(commit = true, focusAfter = true): Promise<boo
     return await finish;
   } finally {
     if (gridCellEditFinishPromise === finish) gridCellEditFinishPromise = null;
+    scheduleLedgerRangeRefresh(activeProjectId.value);
   }
 }
 
@@ -3141,7 +3168,9 @@ function insertDraftRowsAt(
     if (rowIndex >= 0 && columnIndex >= 0) {
       const position = { rowIndex, columnIndex };
       selectGridCell(position);
-      void focusGridCell(position);
+      void focusGridCell(position).then(() => {
+        if (!ledgerDisposed) ledgerCellEntryMotion.play(ledgerTableCardRef.value, new Set(inserted.map((row) => row.id)));
+      });
     }
   });
   return true;
@@ -3350,8 +3379,17 @@ async function refreshTableLayout(
 
 function appendDraftRow(scrollToBottom = true): void {
   if (!currentProject.value || loading.value) return;
-  draftRows.value.push(makeDraftRow());
-  if (scrollToBottom) scrollTableToBottom();
+  const draft = makeDraftRow();
+  draftRows.value.push(draft);
+  if (scrollToBottom) {
+    scrollTableToBottom();
+    void nextTick(async () => {
+      await nextAnimationFrame();
+      if (!ledgerDisposed && draftRows.value.includes(draft)) {
+        ledgerCellEntryMotion.play(ledgerTableCardRef.value, new Set([draft.id]));
+      }
+    });
+  }
 }
 
 function fieldOptions(field: FieldDefinition): string[] {
@@ -3488,7 +3526,7 @@ function rollbackValidationCells(
       || !isValidationSnapshotCurrent(snapshotVersion, cellSaveVersions.get(snapshot.key))
     ) return;
     const record = tableRows.value.find((item) => item.id === snapshot.recordId);
-    const field = fields.value.find((item) => item.id === snapshot.fieldId);
+    const field = fieldById.value.get(snapshot.fieldId);
     if (!record || !field) return;
     setValue(record, field, snapshot.beforeValue, { markDirty: false });
     cellSaveVersions.set(snapshot.key, snapshotVersion + 1);
@@ -3628,6 +3666,7 @@ function replaceRecord(updated: ProjectRecord): void {
   if (selectedIndex >= 0) selectedRecords.value.splice(selectedIndex, 1, updated);
   rememberRecord(updated);
   if (selectedRecordIds.value.has(updated.id)) selectedRecordCache.set(updated.id, updated);
+  scheduleLedgerRangeRefresh(updated.project_id);
 }
 
 function replaceRecordPreservingPending(
@@ -3657,6 +3696,26 @@ function replaceRecordPreservingPending(
   if (selectedIndex >= 0) selectedRecords.value.splice(selectedIndex, 1, merged);
   if (selectedRecordIds.value.has(updated.id)) selectedRecordCache.set(updated.id, merged);
   invalidateProjectRecordCache(updated.project_id);
+  scheduleLedgerRangeRefresh(updated.project_id);
+}
+
+function scheduleLedgerRangeRefresh(projectId: string): void {
+  if (ledgerDisposed || ledgerRangeSaving.value || projectId !== activeProjectId.value
+    || (ledgerRangeSettings.value.mode === "all" && !pendingLedgerRangeApplication)) return;
+  if (rangeRefreshTimer !== undefined) window.clearTimeout(rangeRefreshTimer);
+  rangeRefreshTimer = window.setTimeout(() => {
+    rangeRefreshTimer = undefined;
+    if (ledgerDisposed || ledgerRangeSaving.value || projectId !== activeProjectId.value
+      || (ledgerRangeSettings.value.mode === "all" && !pendingLedgerRangeApplication)) return;
+    if (savingIds.value.size || cellSaveInFlightCounts.size || loading.value) {
+      scheduleLedgerRangeRefresh(projectId);
+      return;
+    }
+    if (editingGridCell.value || dirtyLedgerChanges().length) return;
+    void loadRecords(projectId, {
+      showLoading: false, preserveHistory: true, preserveSelection: true, deferForPendingEdits: true,
+    });
+  }, 100);
 }
 
 function dirtyLedgerChanges(): RecordCellChange[] {
@@ -3683,7 +3742,7 @@ function ledgerCloseState(): { dirty: boolean; busy: boolean } {
     busy: Boolean(closeSaving.value || savingIds.value.size || cellSaveInFlightCounts.size ||
       gridCellEditFinishPromise || gridCutInProgress.value || historyReplayLoading.value ||
       validationCommitLoading.value || findReplaceLoading.value || reorderLoading.value ||
-      highlightLoading.value || loading.value || quickEntryRefreshInProgress.value || projectLoadPromise),
+      highlightLoading.value || loading.value || ledgerRangeSaving.value || quickEntryRefreshInProgress.value || projectLoadPromise),
   };
 }
 
@@ -4092,7 +4151,7 @@ async function persistDraft(record: LedgerRow, notify = true): Promise<boolean> 
 type PersistedRecordLocation = "focused" | "filtered-out" | "skipped" | "failed";
 
 function currentRecordViewHasMembershipFilters(): boolean {
-  return Object.values(ledgerFilters.value).some(Boolean);
+  return ledgerRangeSettings.value.mode !== "all" || Object.values(ledgerFilters.value).some(Boolean);
 }
 
 async function locatePersistedRecord(
@@ -4111,7 +4170,7 @@ async function locatePersistedRecord(
     return "focused";
   }
   try {
-    const result = await queryRecordIds(buildRecordQuery(projectId));
+    const result = await queryLedgerRecordIds(buildRecordQuery(projectId));
     if (activeProjectId.value !== projectId) {
       return "skipped";
     }
@@ -4639,15 +4698,37 @@ async function queryAllRecordBatches(
   const items: ProjectRecord[] = [];
   let total = 0;
   let offset = 0;
+  // The spreadsheet's locale-aware/natural sort is authoritative. SQL ordering
+  // can differ for pathology numbers, text and empty cells, so sorted tails
+  // must be selected after applying that same comparator to the candidates.
+  const sortedTail = Boolean(query.tail_count && query.sort);
+  const transportQuery = sortedTail ? { ...query, tail_count: undefined } : query;
   while (true) {
-    const batch = await queryRecords({ ...query, offset }, signal);
+    const batch = await queryRecords({ ...transportQuery, offset }, signal);
     total = batch.total;
     items.push(...batch.items);
     offset += batch.items.length;
     onProgress?.(items.length, total);
     if (!batch.items.length || offset >= total) break;
   }
+  if (sortedTail) {
+    const projectFields = appStore.projectById(query.project_id)?.fields ?? [];
+    const sort = query.sort
+      ? { fieldId: query.sort.field_id, order: query.sort.direction === "desc" ? "descending" : "ascending" } as const
+      : null;
+    const selected = applyLedgerTableView(items, projectFields, sort, {}, query);
+    onProgress?.(selected.length, selected.length);
+    return { items: selected, total: selected.length, limit: query.limit, offset: 0 };
+  }
   return { items, total, limit: query.limit, offset: 0 };
+}
+
+async function queryLedgerRecordIds(query: RecordComplexQuery) {
+  if (query.tail_count && query.sort) {
+    const result = await queryAllRecordBatches(query);
+    return { record_ids: result.items.map((record) => record.id), total: result.total };
+  }
+  return queryRecordIds(query);
 }
 
 async function loadRecords(
@@ -4658,6 +4739,7 @@ async function loadRecords(
     preserveSelection?: boolean;
     stabilizeTable?: boolean;
     preferCache?: boolean;
+    deferForPendingEdits?: boolean;
   } = {},
 ): Promise<boolean> {
   if (!options.preserveHistory) ledgerHistory.clear();
@@ -4668,11 +4750,14 @@ async function loadRecords(
     return true;
   }
   const showLoading = options.showLoading ?? true;
+  let retryRangeRefresh = false;
   const requestSequence = ++loadSequence;
   recordsAbortController?.abort();
   const controller = new AbortController();
   recordsAbortController = controller;
   const currentQuery = buildRecordQuery(projectId);
+  if (rangeRefreshTimer !== undefined) window.clearTimeout(rangeRefreshTimer);
+  rangeRefreshTimer = undefined;
   const currentQueryKey = ledgerRecordQueryKey(currentQuery);
   const queryCacheGeneration = projectRecordCacheGeneration(projectId);
   const cacheHit = options.preferCache
@@ -4697,7 +4782,10 @@ async function loadRecords(
           recordTotal.value = nextTotal;
         },
       );
-      if (projectRecordCacheGeneration(projectId) !== queryCacheGeneration) return false;
+      if (projectRecordCacheGeneration(projectId) !== queryCacheGeneration) {
+        retryRangeRefresh = Boolean(options.deferForPendingEdits);
+        return false;
+      }
       total = page.total;
       loaded = page.items;
       if (loaded.length <= LEDGER_RECORD_CACHE_MAX_RECORDS) {
@@ -4707,6 +4795,21 @@ async function loadRecords(
       }
     }
     if (requestSequence !== loadSequence || projectId !== activeProjectId.value) return false;
+    if (pendingLedgerRangeApplication && currentQueryKey !== ledgerRecordQueryKey(buildRecordQuery(projectId))) {
+      retryRangeRefresh = true;
+      return false;
+    }
+    if (options.deferForPendingEdits && (editingGridCell.value || savingIds.value.size || dirtyLedgerChanges().length)) {
+      retryRangeRefresh = true;
+      return false;
+    }
+    const stabilizeTable = options.stabilizeTable || pendingLedgerRangeApplication;
+    if (pendingLedgerRangeApplication) {
+      clearBottomScrollTimers();
+      clearSelectionsAfterLedgerViewChange();
+      focusRecordId.value = "";
+      findReplacePreview.value = null;
+    }
     const preserveGridSelection = options.preserveSelection && tableProjectId.value === projectId;
     const activeIdentity = preserveGridSelection ? captureGridIdentity(activeGridCell.value) : null;
     const anchorIdentity = preserveGridSelection ? captureGridIdentity(gridSelectionAnchor.value) : null;
@@ -4714,6 +4817,14 @@ async function loadRecords(
       ? { anchor: captureGridIdentity(gridCellRange.value.anchor), focus: captureGridIdentity(gridCellRange.value.focus) }
       : null;
     records.value = loaded;
+    pendingLedgerRangeApplication = false;
+    if (ledgerRangeSettings.value.mode !== "all" && options.preserveSelection) {
+      const visibleIds = new Set(loaded.map((record) => record.id));
+      selectedRecordIds.value = new Set([...selectedRecordIds.value].filter((id) => visibleIds.has(id)));
+      for (const id of selectedRecordCache.keys()) {
+        if (!visibleIds.has(id)) selectedRecordCache.delete(id);
+      }
+    }
     recordTotal.value = total;
     loadedRecordCount.value = loaded.length;
     tableProjectId.value = projectId;
@@ -4751,7 +4862,7 @@ async function loadRecords(
       && projectId === activeProjectId.value
       && !controller.signal.aborted
     );
-    if (options.stabilizeTable) await refreshTableLayout(requestIsCurrent);
+    if (stabilizeTable) await refreshTableLayout(requestIsCurrent);
     else await nextTick();
     if (!requestIsCurrent()) return false;
     if (options.preserveSelection && selectedRecordIds.value.size) {
@@ -4763,7 +4874,7 @@ async function loadRecords(
       selectedRecords.value = records.value.filter((record) => selectedRecordIds.value.has(record.id));
     }
     const scrolledToFocus = await scrollToFocusedRecord(requestIsCurrent);
-    if (options.stabilizeTable && !scrolledToFocus) {
+    if (stabilizeTable && !scrolledToFocus) {
       await scrollTableToBottomOnce(requestIsCurrent);
     }
     return true;
@@ -4776,6 +4887,7 @@ async function loadRecords(
       loading.value = false;
       if (recordsAbortController === controller) recordsAbortController = null;
     }
+    if (retryRangeRefresh) scheduleLedgerRangeRefresh(projectId);
   }
 }
 
@@ -4784,6 +4896,7 @@ function buildRecordQuery(
   view: {
     filters?: LedgerFilterMap;
     sort?: LedgerSortState;
+    includeDisplayRange?: boolean;
   } = {},
 ): RecordComplexQuery {
   const filters = view.filters ?? ledgerFilters.value;
@@ -4812,6 +4925,7 @@ function buildRecordQuery(
   });
   return {
     project_id: projectId,
+    ...(view.includeDisplayRange === false ? {} : resolveLedgerRecordRange(ledgerRangeSettings.value)),
     include_locked: showLockedRecords.value,
     field_filters: fieldFilters,
     sort: sort
@@ -4834,8 +4948,57 @@ async function ensureProjectLoaded(projectId: string): Promise<void> {
 }
 
 async function handleLockedVisibilityChange(): Promise<void> {
+  focusRecordId.value = "";
   clearSelectionsAfterLedgerViewChange();
-  await loadRecords(activeProjectId.value, { preserveHistory: true });
+  await loadRecords(activeProjectId.value, { preserveHistory: true, stabilizeTable: true });
+}
+
+async function loadLedgerRangeSettings(): Promise<void> {
+  try {
+    const result = await getSetting<unknown>(LEDGER_RANGE_SETTINGS_KEY);
+    persistedLedgerRange = result.value;
+    ledgerRangeSettings.value = normalizeLedgerRangeSettings(result.value);
+    ledgerRangeDraft.value = { ...ledgerRangeSettings.value };
+  } catch (error) {
+    ElMessage.warning(error instanceof Error ? error.message : "记录显示范围读取失败");
+  }
+}
+
+async function saveLedgerRangeSettings(): Promise<void> {
+  if (ledgerRangeSaving.value) return;
+  ledgerRangeSaving.value = true;
+  if (rangeRefreshTimer !== undefined) window.clearTimeout(rangeRefreshTimer);
+  rangeRefreshTimer = undefined;
+  try {
+    if (!await finishGridCellEdit(true, false)) return;
+    if (dirtyLedgerChanges().length || savingIds.value.size || cellSaveInFlightCounts.size || loading.value) {
+      ElMessage.warning("请先完成当前记录的修改，再切换显示范围");
+      return;
+    }
+    const nextSettings = normalizeLedgerRangeSettings(ledgerRangeDraft.value);
+    await putSetting(LEDGER_RANGE_SETTINGS_KEY, nextSettings, { expectedValue: persistedLedgerRange });
+    persistedLedgerRange = nextSettings;
+    ledgerRangeSettings.value = nextSettings;
+    ledgerRangeDraft.value = { ...nextSettings };
+    pendingLedgerRangeApplication = true;
+    ledgerRecordCache.clear();
+    if (editingGridCell.value || dirtyLedgerChanges().length || savingIds.value.size || loading.value) {
+      ElMessage.success("显示范围已保存，完成当前编辑后应用");
+      return;
+    }
+    moreActionsVisible.value = false;
+    if (await loadRecords(activeProjectId.value, {
+      preserveHistory: true, stabilizeTable: true, deferForPendingEdits: true,
+    })) {
+      ElMessage.success(`已设置${ledgerRangeLabel(nextSettings)}`);
+    }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "记录显示范围保存失败");
+    if (error instanceof ApiError && error.status === 409) await loadLedgerRangeSettings();
+  } finally {
+    ledgerRangeSaving.value = false;
+    if (pendingLedgerRangeApplication) scheduleLedgerRangeRefresh(activeProjectId.value);
+  }
 }
 
 function openReorderDialog(): void {
@@ -4992,10 +5155,14 @@ function invertVisibleSelection(): void {
 
 function rowCellStyle(row: LedgerRow, fieldId?: string): CSSProperties {
   const cellColor = fieldId ? row.cell_highlight_colors?.[fieldId] : undefined;
+  const style: CSSProperties = row.highlight_color
+    ? { "--record-highlight-color": row.highlight_color } as CSSProperties : {};
   if (cellColor) {
-    return { "--cell-highlight-color": cellColor } as CSSProperties;
+    style["--cell-highlight-color"] = cellColor;
+  } else if (row.highlight_color) {
+    style.backgroundColor = row.highlight_color;
   }
-  return row.highlight_color ? { backgroundColor: row.highlight_color } : {};
+  return style;
 }
 
 async function selectedTargetRecords(): Promise<ProjectRecord[]> {
@@ -5035,12 +5202,6 @@ function rowClassName({ row }: { row: LedgerRow }): string {
   if (row.highlight_color) classes.push("highlighted-row");
   if (row.id === focusRecordId.value) classes.push("search-focus-row");
   return classes.join(" ");
-}
-
-function rowStyle({ row }: { row: LedgerRow }): CSSProperties {
-  return row.highlight_color
-    ? ({ "--record-highlight-color": row.highlight_color } as CSSProperties)
-    : {};
 }
 
 function collectGridCellHighlightTargets(): CellHighlightTarget[] {
@@ -5247,6 +5408,18 @@ function virtualRowProps({ rowData }: { rowData: LedgerRow }): Record<string, un
   return { "data-row-id": rowData.id };
 }
 
+function ledgerCellRenderState(row: LedgerRow, rowIndex: number, column: LedgerVirtualColumn) {
+  const field = column.field!;
+  const columnIndex = column.fieldIndex ?? -1;
+  return {
+    value: valueFor(row, field),
+    error: fieldErrorFor(row, field),
+    saveState: cellSaveStateFor(row, field),
+    editing: isGridCellEditing({ rowIndex, columnIndex }),
+    fillPreview: gridFillPreviewValue(rowIndex, columnIndex),
+  };
+}
+
 function virtualCellProps({
   rowData,
   rowIndex,
@@ -5256,18 +5429,23 @@ function virtualCellProps({
   rowIndex: number;
   column: LedgerVirtualColumn;
 }): Record<string, unknown> {
-  const baseStyle = rowStyle({ row: rowData });
   if (column.kind === "selection") {
-    return { class: "ledger-selection-column", style: baseStyle };
+    return {
+      class: "ledger-selection-column",
+      style: rowData.highlight_color ? { "--record-highlight-color": rowData.highlight_color } : undefined,
+    };
   }
   if (column.kind === "lock") {
-    return { class: "ledger-lock-column", style: baseStyle };
+    return {
+      class: "ledger-lock-column",
+      style: rowData.highlight_color ? { "--record-highlight-color": rowData.highlight_color } : undefined,
+    };
   }
   const fieldIndex = column.fieldIndex ?? -1;
   const fieldId = column.fieldId;
   return {
     class: ["ledger-editor-column", gridCellClassName(rowData, rowIndex, fieldIndex)],
-    style: { ...baseStyle, ...rowCellStyle(rowData, fieldId) },
+    style: rowCellStyle(rowData, fieldId),
     "data-row-id": rowData.id,
     "data-field-index": fieldIndex,
   };
@@ -5407,7 +5585,7 @@ async function runFindReplacePreview(): Promise<void> {
     let recordIds = selectedRecordIdsForReplace();
     const selected = Boolean(selectedGridCellPositions().length);
     findReplaceScopeLabel.value = selected ? "选中单元格所在记录" : "当前筛选范围全部记录";
-    if (!selected) recordIds = (await queryRecordIds(buildRecordQuery())).record_ids;
+    if (!selected) recordIds = (await queryLedgerRecordIds(buildRecordQuery())).record_ids;
     recordIds = [...new Set(recordIds)];
     findReplaceScopeCount.value = recordIds.length;
     if (!recordIds.length) {
@@ -5752,6 +5930,7 @@ async function pasteGrid(
       }
       if (!viewIsCurrent()) return;
       if (batchResult || committedDraftRecords.length) {
+        scheduleLedgerRangeRefresh(projectId);
         ElMessage.success(`已${operationLabel} ${changedCells} 个单元格`);
       } else if (changedCells) {
         ElMessage.success(`已${operationLabel} ${changedCells} 个单元格，填写病理号后将自动保存`);
@@ -5983,6 +6162,7 @@ async function deleteLedgerRecords(selectedTargets: ProjectRecord[]): Promise<vo
     targets.forEach((record) => invalidateProjectRecordCache(record.project_id));
     records.value = records.value.filter((record) => !deletedIds.has(record.id));
     recordTotal.value = Math.max(0, recordTotal.value - deletedIds.size);
+    scheduleLedgerRangeRefresh(activeProjectId.value);
     clearRecordSelection();
     activeGridCell.value = null;
     clearGridCellSelection();
@@ -6021,7 +6201,7 @@ async function exportCurrentProject(): Promise<void> {
     let offset = 0;
     while (true) {
       const page = await queryRecords({
-        ...buildRecordQuery(),
+        ...buildRecordQuery(activeProjectId.value, { includeDisplayRange: false }),
         include_locked: true,
         limit: 1000,
         offset,
@@ -6155,6 +6335,7 @@ watch(activeProjectId, async (projectId, previousProjectId) => {
 
 async function initializeLedger(): Promise<void> {
   await loadLedgerDisplaySettings();
+  await loadLedgerRangeSettings();
   try {
     await appStore.bootstrap();
   } catch {
@@ -6178,7 +6359,12 @@ async function initializeLedger(): Promise<void> {
   rememberLastLedgerProjectId(initialProjectId);
   await router.replace({ query: { ...route.query, project: initialProjectId } });
   applyLedgerProjectLayout(initialProjectId);
-  await loadRecords(initialProjectId, { stabilizeTable: true });
+  if (await loadRecords(initialProjectId, { stabilizeTable: true })) {
+    await nextTick();
+    if (!ledgerDisposed && activeProjectId.value === initialProjectId) {
+      ledgerCellEntryMotion.play(ledgerTableCardRef.value);
+    }
+  }
 }
 
 function handleLedgerDocumentPointerDown(event: PointerEvent): void {
@@ -6220,6 +6406,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   removeCloseGuard();
   ledgerDisposed = true;
+  ledgerCellEntryMotion.cancel();
+  if (rangeRefreshTimer !== undefined) window.clearTimeout(rangeRefreshTimer);
   ledgerHistory.clear();
   document.removeEventListener("click", handleRecordSelectionClickCapture, true);
   document.removeEventListener("pointerdown", handleLedgerDocumentPointerDown);
@@ -6349,6 +6537,42 @@ onBeforeUnmount(() => {
             <template #reference>
               <el-button size="small" :icon="Setting" data-toolbar-action="more">更多</el-button>
             </template>
+            <div class="ledger-popover-section">
+              <strong class="ledger-popover-title">记录显示范围</strong>
+              <el-radio-group v-model="ledgerRangeDraft.mode" aria-label="记录显示范围" :disabled="ledgerRangeSaving">
+                <el-radio value="all">全部显示</el-radio>
+                <el-radio value="months">近几个月</el-radio>
+                <el-radio value="count">末尾几条</el-radio>
+              </el-radio-group>
+              <template v-if="ledgerRangeDraft.mode === 'months'">
+                <label class="ledger-range-input">
+                  <span>近几个月</span>
+                  <el-input-number
+                    v-model="ledgerRangeDraft.months"
+                    :min="1" :max="LEDGER_RANGE_MONTHS_MAX" :precision="0"
+                    :disabled="ledgerRangeSaving" controls-position="right" aria-label="显示月数"
+                  />
+                </label>
+                <p class="page-description">按台账“日期”：{{ ledgerRangeDates }}</p>
+                <el-checkbox v-model="ledgerRangeDraft.includeUndated" :disabled="ledgerRangeSaving">
+                  包含日期为空的记录
+                </el-checkbox>
+              </template>
+              <template v-else-if="ledgerRangeDraft.mode === 'count'">
+                <label class="ledger-range-input">
+                  <span>显示条数</span>
+                  <el-input-number
+                    v-model="ledgerRangeDraft.count"
+                    :min="1" :max="LEDGER_RANGE_COUNT_MAX" :precision="0"
+                    :disabled="ledgerRangeSaving" controls-position="right" aria-label="显示条数"
+                  />
+                </label>
+                <p class="page-description">按当前排序，从台账底部向上取记录，保留原显示顺序。</p>
+              </template>
+              <el-button type="primary" plain :loading="ledgerRangeSaving" :disabled="loading" @click="saveLedgerRangeSettings">
+                保存显示范围
+              </el-button>
+            </div>
             <div class="ledger-popover-section">
               <strong class="ledger-popover-title">数据与视图</strong>
               <div class="ledger-popover-action-grid">
@@ -6562,7 +6786,7 @@ onBeforeUnmount(() => {
         class="ledger-table-surface"
         :style="ledgerTableStyle"
         :element-loading-text="recordTotal > 0
-          ? `正在读取全部记录… ${loadedRecordCount}/${recordTotal}`
+          ? `正在读取记录… ${loadedRecordCount}/${recordTotal}`
           : '正在切换或读取项目数据…'"
         element-loading-background="var(--app-loading-mask)"
         element-loading-custom-class="ledger-loading-mask"
@@ -6585,7 +6809,7 @@ onBeforeUnmount(() => {
                 : 0"
               :row-height="ledgerVirtualRowHeight"
               :header-height="ledgerVirtualHeaderHeight"
-              :cache="8"
+              :cache="2"
               row-key="id"
               :row-class="virtualRowClass"
               :row-props="virtualRowProps"
@@ -6623,11 +6847,11 @@ onBeforeUnmount(() => {
                 </div>
                 <div v-else-if="column.kind === 'lock'" aria-hidden="true" />
                 <div
-                  v-else-if="virtualColumnField(column)"
+                  v-else-if="column.field"
                   class="ledger-header-label"
                   @click="handleLedgerHeaderClick(column.fieldIndex ?? -1, $event)"
                 >
-                  <span>{{ virtualColumnField(column)?.label }}</span>
+                  <span>{{ column.field?.label }}</span>
                   <button
                     v-if="columnToolsVisible"
                     type="button"
@@ -6637,9 +6861,9 @@ onBeforeUnmount(() => {
                       sorted: ledgerSort?.fieldId === column.fieldId,
                       filtered: Boolean(ledgerFilters[column.fieldId]),
                     }"
-                    :aria-label="`打开${virtualColumnField(column)?.label ?? ''}排序和筛选`"
+                    :aria-label="`打开${column.field?.label ?? ''}排序和筛选`"
                     @pointerdown.stop
-                    @click.stop="openColumnTools(virtualColumnField(column)!, $event)"
+                    @click.stop="openColumnTools(column.field!, $event)"
                     @dblclick.stop
                     @contextmenu.stop.prevent
                   >
@@ -6681,128 +6905,122 @@ onBeforeUnmount(() => {
                     <Lock />
                   </el-icon>
                 </div>
-                <div
-                  v-else-if="virtualColumnField(column)"
-                  class="cell-field"
-                  :class="{
-                    'cell-field-invalid': fieldErrorFor(row, virtualColumnField(column)!),
-                    'cell-field-editing': isGridCellEditing({
+                <template v-else-if="column.field">
+                  <div
+                    v-for="cellData in [ledgerCellRenderState(row, rowIndex, column)]"
+                    :key="column.fieldId"
+                    class="cell-field"
+                    :class="{
+                      'cell-field-invalid': cellData.error,
+                      'cell-field-editing': cellData.editing,
+                    }"
+                    :data-row-id="row.id"
+                    :data-field-index="column.fieldIndex"
+                    :tabindex="cellData.editing ? -1 : 0"
+                    @wheel="handleReadOnlyCellWheel($event, {
                       rowIndex,
                       columnIndex: column.fieldIndex ?? -1,
-                    }),
-                  }"
-                  :data-row-id="row.id"
-                  :data-field-index="column.fieldIndex"
-                  :tabindex="isGridCellEditing({
-                    rowIndex,
-                    columnIndex: column.fieldIndex ?? -1,
-                  }) ? -1 : 0"
-                  @wheel="handleReadOnlyCellWheel($event, {
-                    rowIndex,
-                    columnIndex: column.fieldIndex ?? -1,
-                  })"
-                >
-                  <template v-if="isGridCellEditing({
-                    rowIndex,
-                    columnIndex: column.fieldIndex ?? -1,
-                  })">
-                    <EditableDateInput
-                      v-if="virtualColumnField(column)?.data_type === 'date'
-                        || virtualColumnField(column)?.system_key === 'experiment_date'"
-                      :model-value="valueFor(row, virtualColumnField(column)!)"
-                      :readonly="row.locked"
-                      @update:model-value="setValue(row, virtualColumnField(column)!, $event)"
-                      @change="saveField(row, virtualColumnField(column)!)"
-                    />
-                    <EditableChoiceInput
-                      v-else-if="virtualColumnField(column)!.options.length
-                        || virtualColumnField(column)?.data_type === 'select'"
-                      :model-value="valueFor(row, virtualColumnField(column)!)"
-                      :options="fieldOptions(virtualColumnField(column)!)"
-                      :readonly="row.locked"
-                      @update:model-value="setValue(row, virtualColumnField(column)!, $event)"
-                      @change="saveField(row, virtualColumnField(column)!)"
-                    />
-                    <el-input
-                      v-else-if="!virtualColumnField(column)?.is_core"
-                      :ref="(instance: unknown) => setAutosizeTextareaRef(
-                        instance,
-                        row.id,
-                        virtualColumnField(column)!.id,
-                      )"
-                      type="textarea"
-                      :autosize="{ minRows: 1, maxRows: 1 }"
-                      resize="none"
-                      :model-value="valueFor(row, virtualColumnField(column)!)"
-                      :readonly="row.locked"
-                      :inputmode="virtualColumnField(column)?.data_type === 'number' ? 'decimal' : undefined"
-                      @update:model-value="setValue(row, virtualColumnField(column)!, String($event))"
-                      @change="saveField(row, virtualColumnField(column)!)"
-                    />
-                    <el-input
+                    })"
+                  >
+                    <template v-if="cellData.editing">
+                      <EditableDateInput
+                        v-if="column.field?.data_type === 'date'
+                          || column.field?.system_key === 'experiment_date'"
+                        :model-value="cellData.value"
+                        :readonly="row.locked"
+                        @update:model-value="setValue(row, column.field!, $event)"
+                        @change="saveField(row, column.field!)"
+                      />
+                      <EditableChoiceInput
+                        v-else-if="column.field!.options.length
+                          || column.field?.data_type === 'select'"
+                        :model-value="cellData.value"
+                        :options="fieldOptions(column.field!)"
+                        :readonly="row.locked"
+                        @update:model-value="setValue(row, column.field!, $event)"
+                        @change="saveField(row, column.field!)"
+                      />
+                      <el-input
+                        v-else-if="!column.field?.is_core"
+                        :ref="(instance: unknown) => setAutosizeTextareaRef(
+                          instance,
+                          row.id,
+                          column.field!.id,
+                        )"
+                        type="textarea"
+                        :autosize="{ minRows: 1, maxRows: 1 }"
+                        resize="none"
+                        :model-value="cellData.value"
+                        :readonly="row.locked"
+                        :inputmode="column.field?.data_type === 'number' ? 'decimal' : undefined"
+                        @update:model-value="setValue(row, column.field!, String($event))"
+                        @change="saveField(row, column.field!)"
+                      />
+                      <el-input
+                        v-else
+                        :model-value="cellData.value"
+                        :readonly="row.locked"
+                        :inputmode="column.field?.data_type === 'number' ? 'decimal' : undefined"
+                        @update:model-value="setValue(row, column.field!, String($event))"
+                        @change="saveField(row, column.field!)"
+                      />
+                    </template>
+                    <span
                       v-else
-                      :model-value="valueFor(row, virtualColumnField(column)!)"
-                      :readonly="row.locked"
-                      :inputmode="virtualColumnField(column)?.data_type === 'number' ? 'decimal' : undefined"
-                      @update:model-value="setValue(row, virtualColumnField(column)!, String($event))"
-                      @change="saveField(row, virtualColumnField(column)!)"
+                      class="cell-field-value"
+                      @mouseenter="updateCellTitle($event, cellData.value)"
+                      @mouseleave="clearCellTitle"
+                    >
+                      {{ cellData.value }}
+                    </span>
+                    <span
+                      v-if="cellData.fillPreview !== null"
+                      class="grid-fill-preview-value"
+                    >
+                      {{ cellData.fillPreview || "（空）" }}
+                    </span>
+                    <span
+                      v-if="isGridFillHandleCell(rowIndex, column.fieldIndex ?? -1)"
+                      class="grid-fill-handle"
+                      role="button"
+                      tabindex="-1"
+                      aria-label="拖动或双击自动填充"
+                      title="拖动序列填充；按住 Ctrl 拖动复制；双击向下自动填充"
+                      @pointerdown.stop.prevent="handleGridFillPointerDown"
                     />
-                  </template>
-                  <span
-                    v-else
-                    class="cell-field-value"
-                    @mouseenter="updateCellTitle($event, valueFor(row, virtualColumnField(column)!))"
-                    @mouseleave="clearCellTitle"
-                  >
-                    {{ valueFor(row, virtualColumnField(column)!) }}
-                  </span>
-                  <span
-                    v-if="gridFillPreviewValue(rowIndex, column.fieldIndex ?? -1) !== null"
-                    class="grid-fill-preview-value"
-                  >
-                    {{ gridFillPreviewValue(rowIndex, column.fieldIndex ?? -1) || "（空）" }}
-                  </span>
-                  <span
-                    v-if="isGridFillHandleCell(rowIndex, column.fieldIndex ?? -1)"
-                    class="grid-fill-handle"
-                    role="button"
-                    tabindex="-1"
-                    aria-label="拖动或双击自动填充"
-                    title="拖动序列填充；按住 Ctrl 拖动复制；双击向下自动填充"
-                    @pointerdown.stop.prevent="handleGridFillPointerDown"
-                  />
-                  <span
-                    v-if="fieldErrorFor(row, virtualColumnField(column)!)"
-                    class="cell-field-error"
-                  >
-                    {{ fieldErrorFor(row, virtualColumnField(column)!) }}
-                  </span>
-                  <span
-                    v-if="isDraft(row)
-                      && virtualColumnField(column)?.system_key === 'pathology_number'
-                      && valueFor(row, virtualColumnField(column)!).trim()"
-                    class="cell-save-state is-dirty"
-                    title="这条记录尚未写入台账"
-                  >
-                    未保存
-                  </span>
-                  <span
-                    v-else-if="cellSaveStateFor(row, virtualColumnField(column)!)"
-                    class="cell-save-state"
-                    :class="`is-${cellSaveStateFor(row, virtualColumnField(column)!)?.status}`"
-                    :title="cellSaveStateFor(row, virtualColumnField(column)!)?.message ?? ''"
-                  >
-                    {{
-                      cellSaveStateFor(row, virtualColumnField(column)!)?.status === 'saving'
-                        ? '保存中'
-                        : cellSaveStateFor(row, virtualColumnField(column)!)?.status === 'saved'
-                          ? '已保存'
-                          : cellSaveStateFor(row, virtualColumnField(column)!)?.status === 'error'
-                            ? '失败'
-                            : '未保存'
-                    }}
-                  </span>
-                </div>
+                    <span
+                      v-if="cellData.error"
+                      class="cell-field-error"
+                    >
+                      {{ cellData.error }}
+                    </span>
+                    <span
+                      v-if="isDraft(row)
+                        && column.field?.system_key === 'pathology_number'
+                        && cellData.value.trim()"
+                      class="cell-save-state is-dirty"
+                      title="这条记录尚未写入台账"
+                    >
+                      未保存
+                    </span>
+                    <span
+                      v-else-if="cellData.saveState"
+                      class="cell-save-state"
+                      :class="`is-${cellData.saveState?.status}`"
+                      :title="cellData.saveState?.message ?? ''"
+                    >
+                      {{
+                        cellData.saveState?.status === 'saving'
+                          ? '保存中'
+                          : cellData.saveState?.status === 'saved'
+                            ? '已保存'
+                            : cellData.saveState?.status === 'error'
+                              ? '失败'
+                              : '未保存'
+                      }}
+                    </span>
+                  </div>
+                </template>
               </template>
 
               <template #empty>
@@ -7022,7 +7240,7 @@ onBeforeUnmount(() => {
               <span>状态 {{ cellSaveStatusLabels[selectedGridStats.saveStatus] }}</span>
             </template>
           </div>
-          <span class="ledger-record-total">共 {{ recordTotal }} 条</span>
+          <span class="ledger-record-total">{{ ledgerRangeSummary }} · 共 {{ recordTotal }} 条</span>
           <div class="ledger-zoom-control" aria-label="台账缩放">
             <el-button text :icon="Minus" aria-label="缩小台账" :disabled="historyReplayLoading" @click="zoomOut" />
             <el-slider
@@ -7317,6 +7535,14 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.ledger-range-input {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 10px 0;
+}
+
 .ledger-workspace-heading {
   box-sizing: border-box;
   display: flex;
@@ -8692,12 +8918,6 @@ onBeforeUnmount(() => {
   max-height: var(--ledger-editor-height, 32px);
   overflow: hidden;
   text-overflow: ellipsis;
-  animation: ledger-cell-appear 180ms ease-out;
-}
-
-@keyframes ledger-cell-appear {
-  from { opacity: 0.35; transform: scale(0.96); }
-  to { opacity: 1; transform: scale(1); }
 }
 
 @media (prefers-reduced-motion: reduce) {

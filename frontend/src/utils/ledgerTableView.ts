@@ -1,6 +1,7 @@
 import type { FieldDefinition, ProjectRecord } from "@/types/api";
 import { comparePathologyNumbers } from "@/utils/pathologySort";
 import { getRecordFieldValue } from "@/utils/recordFieldValue";
+import { matchesLedgerRecordRange, type LedgerRecordRange } from "@/utils/ledgerRangeSettings";
 
 export type LedgerDraftPlacement = "before" | "after";
 export type LedgerRow = ProjectRecord & {
@@ -143,13 +144,15 @@ export function applyLedgerTableView(
   fields: FieldDefinition[],
   sortState: LedgerSortState,
   filters: LedgerFilterMap,
+  range: LedgerRecordRange = {},
 ): LedgerRow[] {
   const persisted: LedgerRow[] = [];
   const drafts: LedgerRow[] = [];
   rows.forEach((row) => (row._draft ? drafts : persisted).push(row));
 
-  const filtered = persisted.filter((row) =>
-    fields.every((field) => matchesLedgerFilter(row, field, filters[field.id])),
+  let filtered = persisted.filter((row) =>
+    matchesLedgerRecordRange(row, range)
+      && fields.every((field) => matchesLedgerFilter(row, field, filters[field.id])),
   );
 
   const sortField = sortState
@@ -160,6 +163,8 @@ export function applyLedgerTableView(
   } else {
     filtered.sort((left, right) => left.position - right.position || left.id.localeCompare(right.id));
   }
+
+  if (range.tail_count) filtered = filtered.slice(-range.tail_count);
 
   const visibleIds = new Set(filtered.map((row) => row.id));
   const before = new Map<string, LedgerRow[]>();

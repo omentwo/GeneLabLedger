@@ -628,6 +628,8 @@ class RecordQueryRequest(BaseModel):
     search: str | None = Field(default=None, max_length=500)
     experiment_date_from: date | None = None
     experiment_date_to: date | None = None
+    include_undated: bool = False
+    tail_count: int | None = Field(default=None, ge=1, le=10_000)
     report_generated: bool | None = None
     field_filters: list[RecordFieldFilter] = Field(default_factory=list, max_length=200)
     sort: RecordQuerySort | None = None

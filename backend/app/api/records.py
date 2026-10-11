@@ -267,10 +267,17 @@ def _complex_record_statement(
         report_generated=payload.report_generated,
         include_locked=payload.include_locked,
     )
+    date_filters = []
     if payload.experiment_date_from is not None:
-        filters.append(ProjectRecord.experiment_date >= payload.experiment_date_from)
+        date_filters.append(ProjectRecord.experiment_date >= payload.experiment_date_from)
     if payload.experiment_date_to is not None:
-        filters.append(ProjectRecord.experiment_date <= payload.experiment_date_to)
+        date_filters.append(ProjectRecord.experiment_date <= payload.experiment_date_to)
+    if date_filters:
+        date_range = and_(*date_filters)
+        filters.append(
+            or_(date_range, ProjectRecord.experiment_date.is_(None))
+            if payload.include_undated else date_range
+        )
     for item in payload.field_filters:
         field = fields[item.field_id]
         expression = _query_field_expression(field)
@@ -330,10 +337,20 @@ def _complex_record_statement(
         if sort_field.data_type == "number":
             sort_expression = func.strict_number(sort_expression).collate(STRICT_DECIMAL_COLLATION)
         order = sort_expression.desc() if payload.sort.direction == "desc" else sort_expression.asc()
-        statement = statement.order_by(order, ProjectRecord.position.asc(), ProjectRecord.id.asc())
+        reverse_order = sort_expression.asc() if payload.sort.direction == "desc" else sort_expression.desc()
+        ordering = (order, ProjectRecord.position.asc(), ProjectRecord.id.asc())
+        reverse_ordering = (reverse_order, ProjectRecord.position.desc(), ProjectRecord.id.desc())
     else:
-        statement = statement.order_by(ProjectRecord.position.asc(), ProjectRecord.id.asc())
-    return statement
+        ordering = (ProjectRecord.position.asc(), ProjectRecord.id.asc())
+        reverse_ordering = (ProjectRecord.position.desc(), ProjectRecord.id.desc())
+    if payload.tail_count is not None:
+        tail_ids = (
+            statement.with_only_columns(ProjectRecord.id)
+            .order_by(*reverse_ordering)
+            .limit(payload.tail_count)
+        )
+        statement = select(ProjectRecord).where(ProjectRecord.id.in_(tail_ids))
+    return statement.order_by(*ordering)
 
 
 @router.post("/query", response_model=RecordList)

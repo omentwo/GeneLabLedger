@@ -232,6 +232,8 @@ export interface RecordComplexQuery {
   search?: string | null;
   experiment_date_from?: string | null;
   experiment_date_to?: string | null;
+  include_undated?: boolean;
+  tail_count?: number | null;
   report_generated?: boolean | null;
   field_filters: RecordFieldFilter[];
   sort?: RecordSortState | null;

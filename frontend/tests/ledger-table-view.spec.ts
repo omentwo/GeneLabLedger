@@ -144,6 +144,15 @@ describe("ledger table local sorting and filtering", () => {
         .map((row) => row.id),
     ).toEqual(["r1", "r2", "r3"]);
   });
+
+  it("takes the tail after the current natural sort and leaves drafts outside the limit", () => {
+    expect(applyLedgerTableView(rows, fields, { fieldId: "pathology", order: "ascending" }, {}, { tail_count: 2 })
+      .map((row) => row.id)).toEqual(["r2", "r1", "draft"]);
+    expect(applyLedgerTableView(rows, fields, { fieldId: "pathology", order: "descending" }, {}, { tail_count: 2 })
+      .map((row) => row.id)).toEqual(["r2", "r3", "draft"]);
+    expect(applyLedgerTableView(rows, fields, { fieldId: "amount", order: "ascending" }, {}, { tail_count: 2 })
+      .map((row) => row.id)).toEqual(["r1", "r3", "draft"]);
+  });
 });
 
 function insertedDraft(
