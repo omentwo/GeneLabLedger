@@ -236,6 +236,12 @@ type AutosizeTextareaInstance = { resizeTextarea: () => void };
 const autosizeTextareaRefs = new Map<string, AutosizeTextareaInstance>();
 type GridCellPosition = { rowIndex: number; columnIndex: number };
 type GridCellRange = { anchor: GridCellPosition; focus: GridCellPosition };
+type GridCellSelectionSnapshot = {
+  active: GridCellPosition | null;
+  anchor: GridCellPosition | null;
+  range: GridCellRange | null;
+  selectedKeys: Set<string>;
+};
 type NormalizedGridRange = {
   rowStart: number;
   rowEnd: number;
@@ -304,6 +310,7 @@ const activeGridCell = ref<GridCellPosition | null>(null);
 const gridCellRange = ref<GridCellRange | null>(null);
 const selectedGridCellKeys = ref<Set<string>>(new Set());
 const gridSelectionAnchor = ref<GridCellPosition | null>(null);
+let findReplaceGridSelectionSnapshot: GridCellSelectionSnapshot | null = null;
 const editingGridCell = ref<GridCellPosition | null>(null);
 const editingGridSnapshot = ref<GridCellEditSnapshot | null>(null);
 const gridSelectionDragging = ref(false);
@@ -371,11 +378,15 @@ const ledgerLayoutSettings = ref<LedgerLayoutSettingsDocument>(
   normalizeLedgerLayoutSettings(null),
 );
 const columnWidthSaveQueues = new Map<string, LatestValuePersistence<number>>();
+type FindReplaceMode = "find" | "replace";
 const findReplaceVisible = ref(false);
 const findReplaceLoading = ref(false);
 const findReplacePreview = ref<RecordReplacePreview | null>(null);
 const findReplaceScopeCount = ref<number | null>(null);
 const findReplaceScopeLabel = ref("");
+const findReplaceMode = ref<FindReplaceMode>("replace");
+const findReplaceInputRef = ref<{ focus: () => void } | null>(null);
+const findCurrentMatchIndex = ref(-1);
 const findReplaceForm = reactive({
   fieldId: "",
   find: "",
@@ -762,6 +773,56 @@ const tableRows = computed<LedgerRow[]>(() =>
 const tableRowIndexById = computed(
   () => new Map(tableRows.value.map((row, index) => [row.id, index] as const)),
 );
+const findMatches = computed<number[]>(() => {
+  if (
+    !findReplaceVisible.value ||
+    findReplaceMode.value !== "find" ||
+    !findReplaceForm.find
+  ) return [];
+  const query = findReplaceForm.caseSensitive
+    ? findReplaceForm.find
+    : findReplaceForm.find.toLocaleLowerCase();
+  const searchFields = fields.value
+    .map((field, columnIndex) => ({ field, columnIndex }))
+    .filter(({ field }) => !findReplaceForm.fieldId || field.id === findReplaceForm.fieldId);
+  const fieldCount = fields.value.length;
+  if (!fieldCount) return [];
+  const matches: number[] = [];
+  tableRows.value.forEach((row, rowIndex) => {
+    searchFields.forEach(({ field, columnIndex }) => {
+      const value = valueFor(row, field);
+      const candidate = findReplaceForm.caseSensitive ? value : value.toLocaleLowerCase();
+      const matched = findReplaceForm.matchMode === "whole"
+        ? candidate === query
+        : candidate.includes(query);
+      if (matched) {
+        matches.push(rowIndex * fieldCount + columnIndex);
+      }
+    });
+  });
+  return matches;
+});
+const findCurrentMatch = computed(() => {
+  const encodedMatch = findMatches.value[findCurrentMatchIndex.value];
+  const fieldCount = fields.value.length;
+  if (encodedMatch === undefined || !fieldCount) return null;
+  const rowIndex = Math.floor(encodedMatch / fieldCount);
+  const columnIndex = encodedMatch % fieldCount;
+  const row = tableRows.value[rowIndex];
+  const field = fields.value[columnIndex];
+  return row && field
+    ? { rowId: row.id, fieldId: field.id }
+    : null;
+});
+const findMatchStatus = computed(() => {
+  if (!findReplaceForm.find) return "输入内容以查找";
+  const count = findMatches.value.length;
+  if (!count) return "未找到匹配项";
+  const currentIndex = findCurrentMatchIndex.value;
+  return currentIndex >= 0 && currentIndex < count
+    ? String(currentIndex + 1) + " / " + String(count)
+    : "共 " + String(count) + " 个匹配项";
+});
 const gridCellSelectionCount = computed(() => {
   const range = gridCellRange.value;
   if (!range) return selectedGridCellKeys.value.size;
@@ -1275,6 +1336,34 @@ function selectGridCell(position: GridCellPosition): void {
   );
 }
 
+function captureFindReplaceGridSelection(): void {
+  findReplaceGridSelectionSnapshot = {
+    active: activeGridCell.value ? { ...activeGridCell.value } : null,
+    anchor: gridSelectionAnchor.value ? { ...gridSelectionAnchor.value } : null,
+    range: gridCellRange.value
+      ? {
+          anchor: { ...gridCellRange.value.anchor },
+          focus: { ...gridCellRange.value.focus },
+        }
+      : null,
+    selectedKeys: new Set(selectedGridCellKeys.value),
+  };
+}
+
+function restoreFindReplaceGridSelection(): void {
+  const snapshot = findReplaceGridSelectionSnapshot;
+  if (!snapshot) return;
+  selectedGridCellKeys.value = new Set(snapshot.selectedKeys);
+  activeGridCell.value = snapshot.active ? clampGridCell(snapshot.active) : null;
+  gridSelectionAnchor.value = snapshot.anchor ? clampGridCell(snapshot.anchor) : null;
+  gridCellRange.value = snapshot.range
+    ? {
+        anchor: clampGridCell(snapshot.range.anchor),
+        focus: clampGridCell(snapshot.range.focus),
+      }
+    : null;
+}
+
 function gridColumnPositions(fieldIndex: number): GridCellPosition[] {
   if (fieldIndex < 0 || fieldIndex >= fields.value.length) return [];
   return tableRows.value.map((_, rowIndex) => ({ rowIndex, columnIndex: fieldIndex }));
@@ -1405,6 +1494,10 @@ function gridCellClassName(row: LedgerRow, rowIndex: number, fieldIndex: number)
       || fieldIndex < fillSource.columnStart
       || fieldIndex > fillSource.columnEnd)
   ) classes.push("grid-cell-fill-preview");
+  const currentMatch = findCurrentMatch.value;
+  if (currentMatch?.rowId === row.id && currentMatch.fieldId === field?.id) {
+    classes.push("grid-cell-search-current");
+  }
   return classes.join(" ");
 }
 
@@ -5551,25 +5644,166 @@ function selectedRecordIdsForReplace(): string[] {
   return records.value.map((record) => record.id);
 }
 
-function openFindReplace(): void {
+function focusFindReplaceInput(): void {
+  void nextTick(() => {
+    findReplaceInputRef.value?.focus();
+    const focusedElement = document.activeElement;
+    if (focusedElement instanceof HTMLInputElement) focusedElement.select();
+  });
+}
+
+function setFindReplaceMode(mode: FindReplaceMode): void {
+  if (findReplaceMode.value === mode) return;
+  findCurrentMatchIndex.value = -1;
+  if (mode === "replace") {
+    restoreFindReplaceGridSelection();
+    if (!findReplaceForm.fieldId) {
+      const activeField = activeGridCell.value
+        ? fields.value[activeGridCell.value.columnIndex]
+        : fields.value[0];
+      findReplaceForm.fieldId = activeField?.id ?? "";
+    }
+    findReplacePreview.value = null;
+    findReplaceScopeCount.value = null;
+    findReplaceScopeLabel.value = selectedGridCellPositions().length
+      ? "选中单元格所在记录"
+      : "当前筛选范围全部记录";
+  }
+  findReplaceMode.value = mode;
+  focusFindReplaceInput();
+}
+
+async function navigateFindMatch(direction: -1 | 1): Promise<void> {
+  const matches = findMatches.value;
+  const fieldCount = fields.value.length;
+  if (findReplaceMode.value !== "find" || !matches.length || !fieldCount) return;
+  let nextIndex = -1;
+  if (findCurrentMatchIndex.value >= 0) {
+    nextIndex = (
+      findCurrentMatchIndex.value + direction + matches.length
+    ) % matches.length;
+  } else {
+    const active = activeGridCell.value;
+    if (active && direction > 0) {
+      nextIndex = matches.findIndex((encodedMatch) => {
+        const rowIndex = Math.floor(encodedMatch / fieldCount);
+        const columnIndex = encodedMatch % fieldCount;
+        return rowIndex > active.rowIndex ||
+          (rowIndex === active.rowIndex && columnIndex > active.columnIndex);
+      });
+    } else if (active) {
+      for (let index = matches.length - 1; index >= 0; index -= 1) {
+        const encodedMatch = matches[index];
+        if (encodedMatch === undefined) continue;
+        const rowIndex = Math.floor(encodedMatch / fieldCount);
+        const columnIndex = encodedMatch % fieldCount;
+        if (
+          rowIndex < active.rowIndex ||
+          (rowIndex === active.rowIndex && columnIndex < active.columnIndex)
+        ) {
+          nextIndex = index;
+          break;
+        }
+      }
+    }
+    if (nextIndex < 0) nextIndex = direction > 0 ? 0 : matches.length - 1;
+  }
+
+  const encodedTarget = matches[nextIndex];
+  if (encodedTarget === undefined) return;
+  findCurrentMatchIndex.value = nextIndex;
+  const targetPosition = {
+    rowIndex: Math.floor(encodedTarget / fieldCount),
+    columnIndex: encodedTarget % fieldCount,
+  };
+  const targetRowId = tableRows.value[targetPosition.rowIndex]?.id;
+  const targetFieldId = fields.value[targetPosition.columnIndex]?.id;
+  if (!targetRowId || !targetFieldId) return;
+  selectGridCell(targetPosition);
+  tableRef.value?.scrollToRow(targetPosition.rowIndex, "center");
+  await nextTick();
+
+  if (findReplaceMode.value !== "find") return;
+  const currentMatches = findMatches.value;
+  const currentFieldCount = fields.value.length;
+  const currentRowIndex = tableRowIndexById.value.get(targetRowId);
+  const currentColumnIndex = fields.value.findIndex((field) => field.id === targetFieldId);
+  if (currentRowIndex === undefined || currentColumnIndex < 0 || !currentFieldCount) return;
+  const currentIndex = currentMatches.findIndex(
+    (encodedMatch) =>
+      Math.floor(encodedMatch / currentFieldCount) === currentRowIndex &&
+      encodedMatch % currentFieldCount === currentColumnIndex,
+  );
+  if (currentIndex < 0) return;
+  const currentEncodedMatch = currentMatches[currentIndex];
+  if (currentEncodedMatch === undefined) return;
+  findCurrentMatchIndex.value = currentIndex;
+  const currentPosition = {
+    rowIndex: Math.floor(currentEncodedMatch / currentFieldCount),
+    columnIndex: currentEncodedMatch % currentFieldCount,
+  };
+  tableRef.value?.scrollToRow(currentPosition.rowIndex, "center");
+  await nextTick();
+  gridEditorRoot(currentPosition)
+    ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
+function handleFindReplaceInputEnter(event: KeyboardEvent): void {
+  if (findReplaceMode.value !== "find") return;
+  event.preventDefault();
+  event.stopPropagation();
+  void navigateFindMatch(event.shiftKey ? -1 : 1);
+}
+
+function restoreFindReplaceGridFocus(): void {
+  if (findReplaceVisible.value) return;
+  if (activeGridCell.value) void focusGridCell(activeGridCell.value);
+  findReplaceGridSelectionSnapshot = null;
+}
+
+function openFindReplace(
+  mode: FindReplaceMode = "replace",
+  reset = true,
+): void {
   if (editingGridCell.value) {
     void finishGridCellEdit(true, false).then((saved) => {
-      if (saved) openFindReplace();
+      if (saved) openFindReplace(mode, reset);
     });
     return;
+  }
+  const modeChanged = findReplaceMode.value !== mode;
+  if (!reset && mode === "replace" && modeChanged) {
+    restoreFindReplaceGridSelection();
   }
   const activeField = activeGridCell.value
     ? fields.value[activeGridCell.value.columnIndex]
     : fields.value[0];
-  findReplaceForm.fieldId = activeField?.id ?? "";
-  findReplaceForm.find = "";
-  findReplaceForm.replacement = "";
-  findReplaceForm.matchMode = "substring";
-  findReplaceForm.caseSensitive = false;
-  findReplacePreview.value = null;
-  findReplaceScopeCount.value = null;
-  findReplaceScopeLabel.value = selectedGridCellPositions().length ? "选中单元格所在记录" : "当前筛选范围全部记录";
+  if (reset) {
+    captureFindReplaceGridSelection();
+    findReplaceForm.fieldId = mode === "find" ? "" : activeField?.id ?? "";
+    findReplaceForm.find = "";
+    findReplaceForm.replacement = "";
+    findReplaceForm.matchMode = "substring";
+    findReplaceForm.caseSensitive = false;
+    findReplacePreview.value = null;
+    findReplaceScopeCount.value = null;
+    findReplaceScopeLabel.value = selectedGridCellPositions().length
+      ? "选中单元格所在记录"
+      : "当前筛选范围全部记录";
+  } else if (mode === "replace") {
+    if (!findReplaceForm.fieldId) findReplaceForm.fieldId = activeField?.id ?? "";
+    if (modeChanged) {
+      findReplacePreview.value = null;
+      findReplaceScopeCount.value = null;
+      findReplaceScopeLabel.value = selectedGridCellPositions().length
+        ? "选中单元格所在记录"
+        : "当前筛选范围全部记录";
+    }
+  }
+  findReplaceMode.value = mode;
+  findCurrentMatchIndex.value = -1;
   findReplaceVisible.value = true;
+  focusFindReplaceInput();
 }
 
 async function runFindReplacePreview(): Promise<void> {
@@ -5646,7 +5880,13 @@ function applyFieldWidth(fieldId: string, width: number): void {
   if (field) field.width = width;
 }
 
-watch(findReplaceForm, () => { findReplacePreview.value = null; }, { flush: "sync" });
+watch(findReplaceForm, () => {
+  findReplacePreview.value = null;
+  findCurrentMatchIndex.value = -1;
+}, { flush: "sync" });
+watch(findMatches, () => {
+  findCurrentMatchIndex.value = -1;
+}, { flush: "sync" });
 
 function bestFitColumn(field: FieldDefinition): void {
   const canvas = document.createElement("canvas");
@@ -6376,7 +6616,21 @@ function handleLedgerDocumentPointerDown(event: PointerEvent): void {
 }
 
 function handleLedgerDocumentKeydown(event: KeyboardEvent): void {
-  if (event.key !== "Escape") return;
+  if (
+    !event.isComposing &&
+    (event.ctrlKey || event.metaKey) &&
+    !event.altKey &&
+    !event.shiftKey
+  ) {
+    const key = event.key.toLowerCase();
+    if (key === "f" || key === "h") {
+      event.preventDefault();
+      event.stopPropagation();
+      openFindReplace(key === "f" ? "find" : "replace", !findReplaceVisible.value);
+      return;
+    }
+  }
+  if (event.key !== "Escape" || findReplaceVisible.value) return;
   if (!columnToolsOpenFieldId.value && !ledgerContextMenu.value) return;
   closeLedgerOverlays();
   event.stopPropagation();
@@ -6538,42 +6792,6 @@ onBeforeUnmount(() => {
               <el-button size="small" :icon="Setting" data-toolbar-action="more">更多</el-button>
             </template>
             <div class="ledger-popover-section">
-              <strong class="ledger-popover-title">记录显示范围</strong>
-              <el-radio-group v-model="ledgerRangeDraft.mode" aria-label="记录显示范围" :disabled="ledgerRangeSaving">
-                <el-radio value="all">全部显示</el-radio>
-                <el-radio value="months">近几个月</el-radio>
-                <el-radio value="count">末尾几条</el-radio>
-              </el-radio-group>
-              <template v-if="ledgerRangeDraft.mode === 'months'">
-                <label class="ledger-range-input">
-                  <span>近几个月</span>
-                  <el-input-number
-                    v-model="ledgerRangeDraft.months"
-                    :min="1" :max="LEDGER_RANGE_MONTHS_MAX" :precision="0"
-                    :disabled="ledgerRangeSaving" controls-position="right" aria-label="显示月数"
-                  />
-                </label>
-                <p class="page-description">按台账“日期”：{{ ledgerRangeDates }}</p>
-                <el-checkbox v-model="ledgerRangeDraft.includeUndated" :disabled="ledgerRangeSaving">
-                  包含日期为空的记录
-                </el-checkbox>
-              </template>
-              <template v-else-if="ledgerRangeDraft.mode === 'count'">
-                <label class="ledger-range-input">
-                  <span>显示条数</span>
-                  <el-input-number
-                    v-model="ledgerRangeDraft.count"
-                    :min="1" :max="LEDGER_RANGE_COUNT_MAX" :precision="0"
-                    :disabled="ledgerRangeSaving" controls-position="right" aria-label="显示条数"
-                  />
-                </label>
-                <p class="page-description">按当前排序，从台账底部向上取记录，保留原显示顺序。</p>
-              </template>
-              <el-button type="primary" plain :loading="ledgerRangeSaving" :disabled="loading" @click="saveLedgerRangeSettings">
-                保存显示范围
-              </el-button>
-            </div>
-            <div class="ledger-popover-section">
               <strong class="ledger-popover-title">数据与视图</strong>
               <div class="ledger-popover-action-grid">
                 <el-button @click="moreActionsVisible = false; openReorderDialog()">按日期重排</el-button>
@@ -6624,6 +6842,42 @@ onBeforeUnmount(() => {
                 :disabled="!nativeEngineAvailable(previewEngine)"
                 @click="moreActionsVisible = false; openLedgerNative()"
               >使用 {{ nativeEngineLabel() }} 打开</el-button>
+            </div>
+            <div class="ledger-popover-section">
+              <strong class="ledger-popover-title">记录显示范围</strong>
+              <el-radio-group v-model="ledgerRangeDraft.mode" aria-label="记录显示范围" :disabled="ledgerRangeSaving">
+                <el-radio value="all">全部显示</el-radio>
+                <el-radio value="months">近几个月</el-radio>
+                <el-radio value="count">末尾几条</el-radio>
+              </el-radio-group>
+              <template v-if="ledgerRangeDraft.mode === 'months'">
+                <label class="ledger-range-input">
+                  <span>近几个月</span>
+                  <el-input-number
+                    v-model="ledgerRangeDraft.months"
+                    :min="1" :max="LEDGER_RANGE_MONTHS_MAX" :precision="0"
+                    :disabled="ledgerRangeSaving" controls-position="right" aria-label="显示月数"
+                  />
+                </label>
+                <p class="page-description">按台账“日期”：{{ ledgerRangeDates }}</p>
+                <el-checkbox v-model="ledgerRangeDraft.includeUndated" :disabled="ledgerRangeSaving">
+                  包含日期为空的记录
+                </el-checkbox>
+              </template>
+              <template v-else-if="ledgerRangeDraft.mode === 'count'">
+                <label class="ledger-range-input">
+                  <span>显示条数</span>
+                  <el-input-number
+                    v-model="ledgerRangeDraft.count"
+                    :min="1" :max="LEDGER_RANGE_COUNT_MAX" :precision="0"
+                    :disabled="ledgerRangeSaving" controls-position="right" aria-label="显示条数"
+                  />
+                </label>
+                <p class="page-description">按当前排序，从台账底部向上取记录，保留原显示顺序。</p>
+              </template>
+              <el-button type="primary" plain :loading="ledgerRangeSaving" :disabled="loading" @click="saveLedgerRangeSettings">
+                保存显示范围
+              </el-button>
             </div>
           </el-popover>
         </div>
@@ -7333,19 +7587,45 @@ onBeforeUnmount(() => {
     </template>
   </el-dialog>
 
-  <el-dialog class="ledger-dialog" v-model="findReplaceVisible" title="查找替换" width="660px" :close-on-click-modal="!findReplaceLoading" :close-on-press-escape="!findReplaceLoading" :show-close="!findReplaceLoading">
-    <p class="muted">{{ findReplaceScopeLabel }}；单次最多 {{ FIND_REPLACE_RECORD_LIMIT.toLocaleString('zh-CN') }} 条记录。</p>
+  <el-dialog class="ledger-dialog" v-model="findReplaceVisible" title="查找替换" width="660px" :close-on-click-modal="!findReplaceLoading" :close-on-press-escape="!findReplaceLoading" :show-close="!findReplaceLoading" @opened="focusFindReplaceInput" @closed="restoreFindReplaceGridFocus">
+    <div class="find-replace-mode-switch" role="group" aria-label="查找模式">
+      <el-button
+        size="small"
+        :type="findReplaceMode === 'find' ? 'primary' : undefined"
+        :aria-pressed="findReplaceMode === 'find'"
+        @click="setFindReplaceMode('find')"
+      >查找</el-button>
+      <el-button
+        size="small"
+        :type="findReplaceMode === 'replace' ? 'primary' : undefined"
+        :aria-pressed="findReplaceMode === 'replace'"
+        @click="setFindReplaceMode('replace')"
+      >替换</el-button>
+    </div>
+    <p class="muted" v-if="findReplaceMode === 'find'">
+      在当前台账的筛选结果中查找，共 {{ tableRows.length.toLocaleString('zh-CN') }} 条记录。Enter 查找下一个，Shift+Enter 查找上一个。
+    </p>
+    <p class="muted" v-else>
+      {{ findReplaceScopeLabel }}；单次最多 {{ FIND_REPLACE_RECORD_LIMIT.toLocaleString('zh-CN') }} 条记录。
+    </p>
     <el-form label-position="top" :disabled="findReplaceLoading">
-      <el-form-item label="指定表头">
+      <el-form-item :label="findReplaceMode === 'find' ? '查找表头' : '指定表头'">
         <el-select v-model="findReplaceForm.fieldId" filterable>
+          <el-option v-if="findReplaceMode === 'find'" label="全部表头" value="" />
           <el-option v-for="field in fields" :key="field.id" :label="field.label" :value="field.id" />
         </el-select>
       </el-form-item>
-      <div class="two-column-dialog-form">
+      <div :class="{ 'two-column-dialog-form': findReplaceMode === 'replace' }">
         <el-form-item label="查找内容">
-          <el-input v-model="findReplaceForm.find" />
+          <el-input
+            ref="findReplaceInputRef"
+            v-model="findReplaceForm.find"
+            clearable
+            aria-label="查找内容"
+            @keydown.enter="handleFindReplaceInputEnter"
+          />
         </el-form-item>
-        <el-form-item label="替换为">
+        <el-form-item v-if="findReplaceMode === 'replace'" label="替换为">
           <el-input v-model="findReplaceForm.replacement" />
         </el-form-item>
       </div>
@@ -7361,7 +7641,16 @@ onBeforeUnmount(() => {
         </el-form-item>
       </div>
     </el-form>
-    <div v-if="findReplaceScopeCount !== null" class="replace-preview-panel" aria-live="polite">
+    <div v-if="findReplaceMode === 'find'" class="ledger-find-navigation">
+      <span class="ledger-find-status" role="status" aria-live="polite">{{ findMatchStatus }}</span>
+      <div>
+        <el-button :disabled="!findMatches.length" @click="navigateFindMatch(-1)">上一个</el-button>
+        <el-button type="primary" :disabled="!findMatches.length" @click="navigateFindMatch(1)">
+          下一个
+        </el-button>
+      </div>
+    </div>
+    <div v-else-if="findReplaceScopeCount !== null" class="replace-preview-panel" aria-live="polite">
       <strong>范围 {{ findReplaceScopeCount.toLocaleString('zh-CN') }} 条记录</strong>
       <template v-if="findReplacePreview">
         <span>，可替换 {{ findReplacePreview.matched_count }} 个单元格</span>
@@ -7376,15 +7665,17 @@ onBeforeUnmount(() => {
     </div>
     <template #footer>
       <el-button :disabled="findReplaceLoading" @click="findReplaceVisible = false">取消</el-button>
-      <el-button :loading="findReplaceLoading" @click="runFindReplacePreview">预览</el-button>
-      <el-button
-        type="primary"
-        :loading="findReplaceLoading"
-        :disabled="!findReplacePreview?.matched_count || findReplacePreview.issues.some((issue) => issue.severity === 'error')"
-        @click="commitFindReplace"
-      >
-        确认替换
-      </el-button>
+      <template v-if="findReplaceMode === 'replace'">
+        <el-button :loading="findReplaceLoading" @click="runFindReplacePreview">预览</el-button>
+        <el-button
+          type="primary"
+          :loading="findReplaceLoading"
+          :disabled="!findReplacePreview?.matched_count || findReplacePreview.issues.some((issue) => issue.severity === 'error')"
+          @click="commitFindReplace"
+        >
+          确认替换
+        </el-button>
+      </template>
     </template>
   </el-dialog>
 
@@ -8644,6 +8935,25 @@ onBeforeUnmount(() => {
   background: var(--app-surface-soft);
 }
 
+.find-replace-mode-switch {
+  display: flex;
+  gap: var(--app-space-1);
+  margin-bottom: var(--app-space-3);
+}
+
+.ledger-find-navigation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-3);
+  margin-top: var(--app-space-2);
+}
+
+.ledger-find-status {
+  color: var(--app-muted);
+  font-size: 13px;
+}
+
 .reorder-preview-panel {
   display: grid;
   gap: var(--app-space-2);
@@ -8860,6 +9170,11 @@ onBeforeUnmount(() => {
 .ledger-table-surface :deep(.el-table-v2__row-cell.grid-cell-active),
 .ledger-table-surface :deep(.el-table-v2__row-cell.grid-cell-editing) {
   box-shadow: inset 0 0 0 2px var(--app-primary);
+}
+
+.ledger-table-surface :deep(.el-table-v2__row-cell.grid-cell-search-current) {
+  background: var(--app-primary-soft) !important;
+  box-shadow: inset 0 0 0 2px var(--app-primary) !important;
 }
 
 .ledger-table-surface :deep(.el-table-v2__row-cell.grid-cell-editing) {
