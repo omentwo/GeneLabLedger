@@ -387,6 +387,9 @@ const findReplaceScopeLabel = ref("");
 const findReplaceMode = ref<FindReplaceMode>("replace");
 const findReplaceInputRef = ref<{ focus: () => void } | null>(null);
 const findCurrentMatchIndex = ref(-1);
+const FIND_TERM_DEBOUNCE_MS = 250;
+const debouncedFindTerm = ref("");
+let findTermDebounceTimer: number | undefined;
 const findReplaceForm = reactive({
   fieldId: "",
   find: "",
@@ -824,14 +827,15 @@ const tableRowIndexById = computed(
   () => new Map(tableRows.value.map((row, index) => [row.id, index] as const)),
 );
 const findMatches = computed<number[]>(() => {
+  const term = debouncedFindTerm.value;
   if (
     !findReplaceVisible.value ||
     findReplaceMode.value !== "find" ||
-    !findReplaceForm.find
+    !term
   ) return [];
   const query = findReplaceForm.caseSensitive
-    ? findReplaceForm.find
-    : findReplaceForm.find.toLocaleLowerCase();
+    ? term
+    : term.toLocaleLowerCase();
   const searchFields = fields.value
     .map((field, columnIndex) => ({ field, columnIndex }))
     .filter(({ field }) => !findReplaceForm.fieldId || field.id === findReplaceForm.fieldId);
@@ -1291,17 +1295,32 @@ function gridCellPositionsForRange(range: GridCellRange): GridCellPosition[] {
   return positions;
 }
 
+function splitGridCellKey(key: string): [rowId: string, fieldId: string] | null {
+  const separatorIndex = key.indexOf(GRID_CELL_KEY_SEPARATOR);
+  if (separatorIndex < 0) return null;
+  return [
+    key.slice(0, separatorIndex),
+    key.slice(separatorIndex + GRID_CELL_KEY_SEPARATOR.length),
+  ];
+}
+
 function selectedGridCellPositions(): GridCellPosition[] {
   const selectedKeys = selectedGridCellKeys.value;
   if (!selectedKeys.size) return [];
+  const rowIndexById = tableRowIndexById.value;
+  const columnIndexByFieldId = new Map(
+    fields.value.map((field, index) => [field.id, index] as const),
+  );
   const positions: GridCellPosition[] = [];
-  for (let rowIndex = 0; rowIndex < tableRows.value.length; rowIndex += 1) {
-    for (let columnIndex = 0; columnIndex < fields.value.length; columnIndex += 1) {
-      if (selectedKeys.has(gridCellKey({ rowIndex, columnIndex }))) {
-        positions.push({ rowIndex, columnIndex });
-      }
-    }
+  for (const key of selectedKeys) {
+    const parts = splitGridCellKey(key);
+    if (!parts) continue;
+    const rowIndex = rowIndexById.get(parts[0]);
+    const columnIndex = columnIndexByFieldId.get(parts[1]);
+    if (rowIndex === undefined || columnIndex === undefined) continue;
+    positions.push({ rowIndex, columnIndex });
   }
+  positions.sort((left, right) => left.rowIndex - right.rowIndex || left.columnIndex - right.columnIndex);
   return positions;
 }
 
@@ -1424,15 +1443,18 @@ const gridHeaderSelectionState = computed(() => {
   const currentRows = tableRows.value;
   if (!currentRows.length) return states;
 
-  for (const field of fields.value) {
-    let selectedCount = 0;
-    for (const row of currentRows) {
-      if (selectedGridCellKeys.value.has(`${row.id}${GRID_CELL_KEY_SEPARATOR}${field.id}`)) {
-        selectedCount += 1;
-      }
-    }
-    if (selectedCount === currentRows.length) states.set(field.id, "selected");
-    else if (selectedCount > 0) states.set(field.id, "partial");
+  const visibleRowIds = new Set(currentRows.map((row) => row.id));
+  const visibleFieldIds = new Set(fields.value.map((field) => field.id));
+  const selectedCountByField = new Map<string, number>();
+  for (const key of selectedGridCellKeys.value) {
+    const parts = splitGridCellKey(key);
+    if (!parts) continue;
+    if (!visibleRowIds.has(parts[0]) || !visibleFieldIds.has(parts[1])) continue;
+    selectedCountByField.set(parts[1], (selectedCountByField.get(parts[1]) ?? 0) + 1);
+  }
+  for (const [fieldId, selectedCount] of selectedCountByField) {
+    if (selectedCount === currentRows.length) states.set(fieldId, "selected");
+    else states.set(fieldId, "partial");
   }
   return states;
 });
@@ -5861,6 +5883,7 @@ function openFindReplace(
   }
   findReplaceMode.value = mode;
   findCurrentMatchIndex.value = -1;
+  applyFindTermImmediately();
   findReplaceVisible.value = true;
   focusFindReplaceInput();
 }
@@ -5938,6 +5961,22 @@ function applyFieldWidth(fieldId: string, width: number): void {
   const field = fieldDefinitionById(fieldId);
   if (field) field.width = width;
 }
+
+function applyFindTermImmediately(): void {
+  if (findTermDebounceTimer !== undefined) {
+    window.clearTimeout(findTermDebounceTimer);
+    findTermDebounceTimer = undefined;
+  }
+  debouncedFindTerm.value = findReplaceForm.find;
+}
+
+watch(() => findReplaceForm.find, (term) => {
+  if (findTermDebounceTimer !== undefined) window.clearTimeout(findTermDebounceTimer);
+  findTermDebounceTimer = window.setTimeout(() => {
+    findTermDebounceTimer = undefined;
+    debouncedFindTerm.value = term;
+  }, FIND_TERM_DEBOUNCE_MS);
+});
 
 watch(findReplaceForm, () => {
   findReplacePreview.value = null;
@@ -6546,14 +6585,13 @@ function selectedPreviewCells(): Array<{ record_id: string; field_id: string }> 
 }
 
 watch(
-  () => appStore.projects,
-  (projects) => {
-    if (!ledgerInitialized || !projects.length) return;
-    if (!projects.some((project) => project.id === activeProjectId.value)) {
-      activeProjectId.value = projects[0]?.id ?? "";
+  () => appStore.projects.map((project) => project.id).join(","),
+  () => {
+    if (!ledgerInitialized || !appStore.projects.length) return;
+    if (!appStore.projects.some((project) => project.id === activeProjectId.value)) {
+      activeProjectId.value = appStore.projects[0]?.id ?? "";
     }
   },
-  { deep: true },
 );
 const selectedGridStats = computed(() => {
   const positions = selectedGridCellPositions();
@@ -6723,6 +6761,7 @@ onBeforeUnmount(() => {
   if (quickEntryRetryTimer !== undefined) window.clearTimeout(quickEntryRetryTimer);
   quickEntryRetryTimer = undefined;
   quickEntryRetryPending.clear();
+  if (findTermDebounceTimer !== undefined) window.clearTimeout(findTermDebounceTimer);
   ledgerHistory.clear();
   document.removeEventListener("click", handleRecordSelectionClickCapture, true);
   document.removeEventListener("pointerdown", handleLedgerDocumentPointerDown);
