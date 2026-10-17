@@ -23,6 +23,7 @@ from app.services.field_validation import (
 from app.services.record_operations import snapshot_record
 from app.services.records import (
     allocate_record_position,
+    core_record_value,
     count_project_pathology_number_duplicates,
     duplicate_pathology_warning_message,
     next_record_position,
@@ -150,16 +151,9 @@ def _field_and_record_maps(
 
 
 def current_cell_value(record: ProjectRecord, field: FieldDefinition) -> str:
-    if field.system_key == "pathology_number":
-        return record.pathology_number
-    if field.system_key == "block_number":
-        return record.block_number or ""
-    if field.system_key == "status":
-        return record.status
-    if field.system_key == "experiment_date":
-        return record.experiment_date.isoformat() if record.experiment_date else ""
-    if field.system_key == "experiment_number":
-        return record.experiment_number or ""
+    core = core_record_value(record, field)
+    if core is not None:
+        return core
     return next(
         (value.value_text for value in record.values if value.field_id == field.id),
         "",
@@ -402,7 +396,6 @@ def _apply_core_value(record: ProjectRecord, field: FieldDefinition, value: str)
 
 
 def _apply_custom_values(
-    session: Session,
     record: ProjectRecord,
     values: dict[str, str],
 ) -> None:
@@ -410,14 +403,14 @@ def _apply_custom_values(
     for field_id, text in values.items():
         row = existing.get(field_id)
         if not text:
+            # Dropping the row from the relationship is enough: the collection
+            # uses delete-orphan, so calling session.delete() as well would
+            # delete the same instance twice.
             if row is not None:
-                session.delete(row)
                 record.values.remove(row)
             continue
         if row is None:
-            row = RecordValue(record_id=record.id, field_id=field_id, value_text=text)
-            session.add(row)
-            record.values.append(row)
+            record.values.append(RecordValue(record_id=record.id, field_id=field_id, value_text=text))
         else:
             row.value_text = text
 
@@ -532,7 +525,7 @@ def _commit_claimed_cell_batch(
                 }
             )
         for record_id, values in custom_by_record.items():
-            _apply_custom_values(session, records[record_id], values)
+            _apply_custom_values(records[record_id], values)
         has_anchors = any(
             row.insert_before_record_id or row.insert_after_record_id for row in normalized_new_rows
         )
@@ -577,7 +570,7 @@ def _commit_claimed_cell_batch(
                 after_anchor_tails[row.insert_after_record_id] = created.id
             if next_position is not None:
                 next_position += 1
-            _apply_custom_values(session, created, dict(row.values))
+            _apply_custom_values(created, dict(row.values))
             created_records.append(created)
         session.flush()
         audit(

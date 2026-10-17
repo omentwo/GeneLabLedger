@@ -6,11 +6,11 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.database import get_session
-from app.models import FieldDefinition, Project, ProjectRecord, RecordValue
+from app.models import FieldDefinition, Project, ProjectRecord
 from app.schemas import (
     LedgerNativePreviewCreate,
     NativePreviewRead,
@@ -18,6 +18,7 @@ from app.schemas import (
 )
 from app.services.filenames import safe_filename
 from app.services.office_preview import OfficePreviewError, OfficePreviewService
+from app.services.records import core_record_value, record_search_filter
 from app.services.workbooks import build_xlsx
 
 router = APIRouter(tags=["ledger-preview"])
@@ -27,18 +28,9 @@ def preview_service_from(request: Request) -> OfficePreviewService:
     return request.app.state.preview_service
 
 
-def _display_value(record: ProjectRecord, field: FieldDefinition, values: dict[str, str]) -> object:
-    if field.system_key == "experiment_date":
-        return record.experiment_date.isoformat() if record.experiment_date else ""
-    if field.system_key == "pathology_number":
-        return record.pathology_number
-    if field.system_key == "block_number":
-        return record.block_number or ""
-    if field.system_key == "experiment_number":
-        return record.experiment_number or ""
-    if field.system_key == "status":
-        return record.status
-    return values.get(field.id, "")
+def _display_value(record: ProjectRecord, field: FieldDefinition, values: dict[str, str]) -> str:
+    core = core_record_value(record, field)
+    return core if core is not None else values.get(field.id, "")
 
 
 def _search_filters(project_id: str, payload: LedgerNativePreviewCreate) -> list[Any]:
@@ -52,20 +44,9 @@ def _search_filters(project_id: str, payload: LedgerNativePreviewCreate) -> list
     if payload.report_generated is not None:
         filters.append(ProjectRecord.report_generated == payload.report_generated)
     if payload.search and payload.search.strip():
-        term = f"%{payload.search.strip()}%"
-        value_match = (
-            select(RecordValue.id)
-            .where(RecordValue.record_id == ProjectRecord.id, RecordValue.value_text.like(term))
-            .exists()
-        )
-        filters.append(
-            or_(
-                ProjectRecord.pathology_number.like(term),
-                ProjectRecord.block_number.like(term),
-                ProjectRecord.experiment_number.like(term),
-                value_match,
-            )
-        )
+        search_clause = record_search_filter(payload.search)
+        if search_clause is not None:
+            filters.append(search_clause)
     return filters
 
 
@@ -122,7 +103,7 @@ def _build_ledger_sheet(
     if payload.scope == "selection":
         if not selected_targets:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Select at least one cell to preview.",
             )
         record_by_id = {record.id: record for record in all_records}
@@ -134,7 +115,7 @@ def _build_ledger_sheet(
         }
         if not selected_targets:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="The selected cells are not part of this ledger.",
             )
         selected_record_ids = {record_id for record_id, _ in selected_targets}

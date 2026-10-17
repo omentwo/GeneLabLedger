@@ -115,7 +115,7 @@ async def read_docx_upload(file: UploadFile, settings: Settings) -> bytes:
     filename = file.filename or ""
     if Path(filename).suffix.lower() != ".docx":
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="只允许上传 .docx 模板",
         )
     size_limit = settings.max_template_size_mb * 1024 * 1024
@@ -129,12 +129,12 @@ async def read_docx_upload(file: UploadFile, settings: Settings) -> bytes:
         placeholders = extract_placeholders(content)
     except InvalidDocxTemplate as error:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(error),
         ) from error
     if not placeholders:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="模板中没有识别到 {{占位符}}",
         )
     return content
@@ -193,7 +193,7 @@ async def create_report_template(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在")
     clean_name = name.strip()
     if not clean_name:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="模板名称不能为空")
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="模板名称不能为空")
     duplicate = session.scalar(
         select(ReportTemplate).where(
             ReportTemplate.project_id == project_id,
@@ -343,13 +343,13 @@ def replace_report_mappings(
     provided = {mapping.placeholder: mapping for mapping in payload.mappings}
     if len(provided) != len(payload.mappings):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="同一占位符不能重复配置",
         )
     unknown = set(provided) - set(version.placeholders)
     if unknown:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"模板中不存在这些占位符：{', '.join(sorted(unknown))}",
         )
     existing = {mapping.placeholder: mapping for mapping in version.mappings}
@@ -368,7 +368,7 @@ def replace_report_mappings(
             field = session.get(FieldDefinition, incoming.field_id) if incoming.field_id else None
             if not field or field.project_id != version.template.project_id:
                 raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail=f"占位符 {placeholder} 选择了无效的台账字段",
                 )
         mapping.source_type = incoming.source_type
@@ -431,7 +431,7 @@ def resolve_mapping_values(
                 replacements[mapping.placeholder] = values_by_field.get(field.id, "")
     if invalid:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"模板存在未映射或已失效的占位符：{', '.join(invalid)}",
         )
     return replacements
@@ -452,7 +452,7 @@ def render_report_documents(
         record = load_report_record(session, item.project_record_id)
         if record.project_id != version.template.project_id:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="模板所属项目与台账记录不一致",
             )
         replacements = resolve_mapping_values(version, record)
@@ -538,7 +538,7 @@ def native_preview_report(
 ) -> dict[str, object]:
     if payload.template_version_id != version_id:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Template version does not match the preview path.",
         )
     version = load_version(session, version_id)

@@ -837,6 +837,37 @@ def test_lower_date_bound_alone_keeps_future_dated_records(
     ]
 
 
+def test_search_matches_project_name_and_custom_cell_values(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    """The shared search predicate must still cover project name and cell values."""
+    project = seeded_projects["TB"]
+    project_id = project["id"]
+    note = create_custom_field(client, project_id, label="搜索备注", data_type="text")
+    create_record(client, project_id, "SEARCH-HIT", values={note["id"]: "荧光原位杂交"})
+    create_record(client, project_id, "SEARCH-MISS", values={note["id"]: "常规染色"})
+
+    def query(search: str) -> list[str]:
+        response = client.post(
+            "/api/records/query",
+            json={
+                "project_id": project_id,
+                "search": search,
+                "field_filters": [],
+                "limit": 100,
+                "offset": 0,
+            },
+        )
+        assert response.status_code == 200, response.text
+        return sorted(item["pathology_number"] for item in response.json()["items"])
+
+    assert query("荧光原位杂交") == ["SEARCH-HIT"]
+    assert query("SEARCH-HIT") == ["SEARCH-HIT"]
+    assert query(project["name"]) == ["SEARCH-HIT", "SEARCH-MISS"]
+    assert query("   ") == ["SEARCH-HIT", "SEARCH-MISS"]
+
+
 def test_numeric_query_preserves_decimal_precision(
     client: TestClient,
     seeded_projects: dict[str, dict],

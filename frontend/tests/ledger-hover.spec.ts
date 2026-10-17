@@ -121,58 +121,42 @@ describe("ledger cell native title", () => {
     expect(span.title).toBe("");
   });
 
-  it("renders distant rows immediately without replaying entry motion and keeps cell state reactive", async () => {
-    const animate = vi.fn(() => ({ cancel: vi.fn(), onfinish: null, oncancel: null }) as unknown as Animation);
-    const previousAnimate = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "animate");
-    Object.defineProperty(HTMLElement.prototype, "animate", { configurable: true, value: animate });
-    try {
-      const rows = Array.from({ length: 80 }, (_, index) => record(`26-${index}`, { position: index }));
-      const container = await mountLedger(rows);
-      await settle();
-      expect(animate).toHaveBeenCalled();
-      animate.mockClear();
-      const state = (mountedApps.at(-1)!._instance as any).setupState;
-      state.tableRef.scrollToRow(30, "start");
-      await nextTick();
-      await nextTick();
-      const cell = container.querySelector<HTMLElement>('.el-table-v2__main .cell-field[data-row-id="26-30"]')!;
-      expect(cell.textContent).toContain(longValue);
-      expect(animate).not.toHaveBeenCalled();
-      expect(container.querySelectorAll(".el-table-v2__main .el-table-v2__row").length).toBeLessThan(30);
+  it("renders distant rows immediately and keeps cell state reactive", async () => {
+    const rows = Array.from({ length: 80 }, (_, index) => record(`26-${index}`, { position: index }));
+    const container = await mountLedger(rows);
+    await settle();
+    const state = (mountedApps.at(-1)!._instance as any).setupState;
+    state.tableRef.scrollToRow(30, "start");
+    await nextTick();
+    await nextTick();
+    const cell = container.querySelector<HTMLElement>('.el-table-v2__main .cell-field[data-row-id="26-30"]')!;
+    expect(cell.textContent).toContain(longValue);
+    expect(container.querySelectorAll(".el-table-v2__main .el-table-v2__row").length).toBeLessThan(30);
 
-      state.setValue(state.records[30], state.fields[0], "新备注");
-      await nextTick();
-      expect(cell.querySelector(".cell-field-value")?.textContent?.trim()).toBe("新备注");
-      expect(cell.querySelector(".cell-save-state")?.textContent?.trim()).toBe("未保存");
-      state.records[30].highlight_color = "#fff2cc";
-      state.records[30].cell_highlight_colors = { note: "#92d050" };
-      await nextTick();
-      const wrapper = cell.closest<HTMLElement>(".el-table-v2__row-cell")!;
-      expect(wrapper.classList.contains("cell-highlighted")).toBe(true);
-      expect(wrapper.style.getPropertyValue("--cell-highlight-color")).toBe("#92d050");
-      expect(wrapper.style.getPropertyValue("--record-highlight-color")).toBe("#fff2cc");
+    state.setValue(state.records[30], state.fields[0], "新备注");
+    await nextTick();
+    expect(cell.querySelector(".cell-field-value")?.textContent?.trim()).toBe("新备注");
+    expect(cell.querySelector(".cell-save-state")?.textContent?.trim()).toBe("未保存");
+    state.records[30].highlight_color = "#fff2cc";
+    state.records[30].cell_highlight_colors = { note: "#92d050" };
+    await nextTick();
+    const wrapper = cell.closest<HTMLElement>(".el-table-v2__row-cell")!;
+    expect(wrapper.classList.contains("cell-highlighted")).toBe(true);
+    expect(wrapper.style.getPropertyValue("--cell-highlight-color")).toBe("#92d050");
+    expect(wrapper.style.getPropertyValue("--record-highlight-color")).toBe("#fff2cc");
 
-      state.enterGridCellEdit({ rowIndex: 30, columnIndex: 0 }, undefined, false);
-      await nextTick();
-      expect(cell.querySelector("textarea")?.value).toBe("新备注");
-      expect(container.querySelectorAll(".cell-field-editing")).toHaveLength(1);
-      // Let Element Plus finish the editor's deferred textarea measurement.
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      await state.finishGridCellEdit(false, false);
-      await nextTick();
-      expect(cell.querySelector(".cell-field-value")).not.toBeNull();
-      expect(animate).not.toHaveBeenCalled();
+    state.enterGridCellEdit({ rowIndex: 30, columnIndex: 0 }, undefined, false);
+    await nextTick();
+    expect(cell.querySelector("textarea")?.value).toBe("新备注");
+    expect(container.querySelectorAll(".cell-field-editing")).toHaveLength(1);
+    // Let Element Plus finish the editor's deferred textarea measurement.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await state.finishGridCellEdit(false, false);
+    await nextTick();
+    expect(cell.querySelector(".cell-field-value")).not.toBeNull();
 
-      state.appendDraftRow();
-      await new Promise((resolve) => setTimeout(resolve, 60));
-      expect(animate).toHaveBeenCalled();
-      animate.mockClear();
-      state.tableRef.scrollToRow(0, "start");
-      await nextTick();
-      expect(animate).not.toHaveBeenCalled();
-    } finally {
-      if (previousAnimate) Object.defineProperty(HTMLElement.prototype, "animate", previousAnimate);
-      else Reflect.deleteProperty(HTMLElement.prototype, "animate");
-    }
+    state.appendDraftRow();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(state.draftRows).toHaveLength(1);
   });
 });

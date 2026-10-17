@@ -44,7 +44,7 @@ def update_database_backup_settings(
     try:
         saved = save_backup_settings(request.app.state.database, request.app.state.settings, payload)
     except BackupError as error:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)) from error
     _scheduler(request).refresh_schedule()
     return saved
 
@@ -86,7 +86,7 @@ async def restore_database_backup(
     source = Path(payload.path).expanduser()
     if not source.is_absolute():
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="恢复文件必须使用绝对路径",
         )
     scheduler = _scheduler(request)
@@ -96,7 +96,7 @@ async def restore_database_backup(
     except BackupBusyError as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
     except BackupError as error:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)) from error
     return {
         "restart_required": True,
         "safety_backup_path": safety_backup["path"],

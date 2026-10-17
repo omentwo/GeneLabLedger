@@ -27,7 +27,7 @@ CORE_FIELD_BY_SYSTEM_KEY = {str(field["system_key"]): field for field in CORE_FI
 def _clean_fields(values: list[LedgerTemplateField]) -> list[dict[str, Any]]:
     if not values:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="A ledger template must contain at least one field.",
         )
     # Saved templates from versions before 蜡块号 became a fixed core field do
@@ -73,20 +73,21 @@ def _clean_fields(values: list[LedgerTemplateField]) -> list[dict[str, Any]]:
         key = field.key.strip()
         if key in seen_keys:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Template field keys must be unique."
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Template field keys must be unique.",
             )
         seen_keys.add(key)
         label = field.label.strip()
         if label in seen_labels:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="模板中的表头名称不能重复",
             )
         seen_labels.add(label)
         system_key = field.system_key.strip() if field.system_key else None
         if system_key and system_key in seen_system_keys:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Template system keys must be unique.",
             )
         if system_key:
@@ -97,14 +98,14 @@ def _clean_fields(values: list[LedgerTemplateField]) -> list[dict[str, Any]]:
         reserved = identifiers & RESERVED_WORKBOOK_HEADERS
         if reserved:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="模板表头不能使用 系统保留字段",
             )
         conflicts = identifiers & seen_import_identifiers
         if conflicts:
             names = "、".join(sorted(conflicts))
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=f"模板表头存在字段命名冲突：{names}",
             )
         seen_import_identifiers.update(identifiers)
@@ -112,28 +113,28 @@ def _clean_fields(values: list[LedgerTemplateField]) -> list[dict[str, Any]]:
         if core_definition:
             if not field.is_core:
                 raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail=f"核心字段“{label}”不能转换为普通字段",
                 )
             if field.key != core_definition["key"] or field.data_type != core_definition["data_type"]:
                 raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail=f"核心字段“{label}”的标识或类型不能修改",
                 )
             expected_options = ["待实验", "已完成"] if system_key == "status" else []
             if field.options != expected_options:
                 raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail=f"核心字段“{label}”的备选项不能修改",
                 )
             if field.default_value is not None:
                 raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail=f"核心字段“{label}”不能设置新记录默认值",
                 )
         elif field.is_core or system_key:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=f"字段“{label}”使用了未知的核心字段标识",
             )
         item = field.model_dump(mode="json")
@@ -161,7 +162,7 @@ def _clean_fields(values: list[LedgerTemplateField]) -> list[dict[str, Any]]:
             if issues:
                 messages = "；".join(dict.fromkeys(issue.message for issue in issues))
                 raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail=f"字段“{label}”的新记录默认值无效：{messages}",
                 )
             item["default_value"] = normalized_default
@@ -174,7 +175,7 @@ def _clean_fields(values: list[LedgerTemplateField]) -> list[dict[str, Any]]:
             if system_key in missing_core
         ]
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"模板缺少核心字段：{', '.join(labels)}",
         )
     result.sort(key=lambda item: (item["sort_order"], item["key"]))

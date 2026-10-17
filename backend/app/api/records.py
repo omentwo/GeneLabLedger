@@ -16,7 +16,7 @@ from app.database import (
     get_session,
     strict_decimal_text,
 )
-from app.models import FieldDefinition, Project, ProjectRecord, RecordValue
+from app.models import FieldDefinition, ProjectRecord, RecordValue
 from app.schemas import (
     RecordCellBatchCommit,
     RecordCellBatchCommitRead,
@@ -61,6 +61,7 @@ from app.services.records import (
     date_reorder_plan,
     duplicate_pathology_warning_message,
     parse_combined_pathology_number,
+    record_search_filter,
     records_for_date_reorder,
     replace_record_values,
     require_project,
@@ -147,24 +148,9 @@ def record_filters(
     if not include_locked:
         filters.append(ProjectRecord.locked.is_(False))
     if search and search.strip():
-        term = f"%{search.strip()}%"
-        value_match = (
-            select(RecordValue.id)
-            .where(
-                RecordValue.record_id == ProjectRecord.id,
-                RecordValue.value_text.like(term),
-            )
-            .exists()
-        )
-        filters.append(
-            or_(
-                ProjectRecord.project.has(Project.name.like(term)),
-                ProjectRecord.pathology_number.like(term),
-                ProjectRecord.block_number.like(term),
-                ProjectRecord.experiment_number.like(term),
-                value_match,
-            )
-        )
+        search_clause = record_search_filter(search, include_project_name=True)
+        if search_clause is not None:
+            filters.append(search_clause)
     return filters
 
 
@@ -617,7 +603,7 @@ def validate_new_record(
     }
     if invalid_value_fields:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="新增记录包含无效的自定义表头",
         )
     issues = []
@@ -961,7 +947,7 @@ def update_cell_highlights(
     field_ids = list(dict.fromkeys(field_id for _, field_id in targets))
     if not targets:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="记录 ID 和字段 ID 不能为空",
         )
     records = list(

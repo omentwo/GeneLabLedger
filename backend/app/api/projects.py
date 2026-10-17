@@ -76,7 +76,7 @@ def _validated_default(field: FieldDefinition, raw_value: str | None) -> str | N
     if issues:
         messages = "；".join(dict.fromkeys(issue.message for issue in issues))
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"新记录默认值无效：{messages}",
         )
     return normalized
@@ -374,7 +374,7 @@ def force_delete_project(
     project = require_project(session, project_id)
     if payload.confirm_name != project.name:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="必须输入完全匹配的台账名称才能强制删除",
         )
 
@@ -806,7 +806,7 @@ def reorder_fields(
     )
     if {field.id for field in fields} != set(payload.field_ids) or len(fields) != len(payload.field_ids):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="排序必须包含当前项目的全部表头，且不能重复",
         )
     by_id = {field.id: field for field in fields}

@@ -189,7 +189,6 @@ import {
   type RecordSelectionScope,
 } from "@/utils/ledgerRecordSelection";
 import { exportWorkbook } from "@/utils/workbook";
-import { LedgerCellEntryMotion } from "@/utils/ledgerCellMotion";
 import {
   DEFAULT_LEDGER_RANGE_SETTINGS,
   LEDGER_RANGE_SETTINGS_KEY,
@@ -231,8 +230,6 @@ const ledgerRangeDates = computed(() => {
 const ledgerTableCardRef = ref<HTMLElement | null>(null);
 const projectStripRef = ref<HTMLElement | null>(null);
 const tableRef = ref<TableV2Instance | null>(null);
-const ledgerCellEntryMotion = new LedgerCellEntryMotion();
-let ledgerMotionScrollTop = 0;
 const ledgerHorizontalScrollbarRef = ref<HTMLElement | null>(null);
 const LEDGER_HORIZONTAL_SCROLLBAR_HEIGHT = 10;
 type AutosizeTextareaInstance = { resizeTextarea: () => void };
@@ -1118,10 +1115,6 @@ type LedgerTableScrollPosition = {
 };
 
 function handleLedgerTableScroll(position: { scrollLeft?: number; scrollTop?: number }): void {
-  if (typeof position.scrollTop === "number" && position.scrollTop !== ledgerMotionScrollTop) {
-    ledgerMotionScrollTop = position.scrollTop;
-    ledgerCellEntryMotion.cancel();
-  }
   const scrollbar = ledgerHorizontalScrollbarRef.value;
   if (!scrollbar || typeof position.scrollLeft !== "number") return;
   if (Math.abs(scrollbar.scrollLeft - position.scrollLeft) > 0.5) {
@@ -3336,9 +3329,7 @@ function insertDraftRowsAt(
     if (rowIndex >= 0 && columnIndex >= 0) {
       const position = { rowIndex, columnIndex };
       selectGridCell(position);
-      void focusGridCell(position).then(() => {
-        if (!ledgerDisposed) ledgerCellEntryMotion.play(ledgerTableCardRef.value, new Set(inserted.map((row) => row.id)));
-      });
+      void focusGridCell(position);
     }
   });
   return true;
@@ -3551,12 +3542,6 @@ function appendDraftRow(scrollToBottom = true): void {
   draftRows.value.push(draft);
   if (scrollToBottom) {
     scrollTableToBottom();
-    void nextTick(async () => {
-      await nextAnimationFrame();
-      if (!ledgerDisposed && draftRows.value.includes(draft)) {
-        ledgerCellEntryMotion.play(ledgerTableCardRef.value, new Set([draft.id]));
-      }
-    });
   }
 }
 
@@ -6702,12 +6687,7 @@ async function initializeLedger(): Promise<void> {
   rememberLastLedgerProjectId(initialProjectId);
   await router.replace({ query: { ...route.query, project: initialProjectId } });
   applyLedgerProjectLayout(initialProjectId);
-  if (await loadRecords(initialProjectId, { stabilizeTable: true })) {
-    await nextTick();
-    if (!ledgerDisposed && activeProjectId.value === initialProjectId) {
-      ledgerCellEntryMotion.play(ledgerTableCardRef.value);
-    }
-  }
+  await loadRecords(initialProjectId, { stabilizeTable: true });
 }
 
 function handleLedgerDocumentPointerDown(event: PointerEvent): void {
@@ -6763,7 +6743,6 @@ onMounted(() => {
 onBeforeUnmount(() => {
   removeCloseGuard();
   ledgerDisposed = true;
-  ledgerCellEntryMotion.cancel();
   if (rangeRefreshTimer !== undefined) window.clearTimeout(rangeRefreshTimer);
   if (quickEntryRetryTimer !== undefined) window.clearTimeout(quickEntryRetryTimer);
   quickEntryRetryTimer = undefined;
@@ -9346,7 +9325,6 @@ onBeforeUnmount(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ledger-table-surface :deep(.cell-field-value) { animation: none; }
   .ledger-table-surface :deep(.el-table-v2__row-cell) { transition: none; }
 }
 

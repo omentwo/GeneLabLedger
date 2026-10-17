@@ -7,8 +7,9 @@ from collections import defaultdict
 from datetime import date
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.models import (
     FieldDefinition,
@@ -48,6 +49,64 @@ def count_project_pathology_number_duplicates(
 
 def duplicate_pathology_warning_message(pathology_number: str, duplicate_count: int) -> str:
     return f"当前项目已存在 {duplicate_count} 条病理号“{pathology_number}”的记录，请确认是否重复录入"
+
+
+def core_record_value(record: ProjectRecord, field: FieldDefinition) -> str | None:
+    """Return a core column value, or ``None`` when the field is custom.
+
+    The ledger table, the cell batch preview and the native preview all read
+    core columns through this one mapping, so adding a core field cannot leave
+    one of them behind.
+    """
+    system_key = field.system_key
+    if system_key == "pathology_number":
+        return record.pathology_number
+    if system_key == "block_number":
+        return record.block_number or ""
+    if system_key == "status":
+        return record.status
+    if system_key == "experiment_date":
+        return record.experiment_date.isoformat() if record.experiment_date else ""
+    if system_key == "experiment_number":
+        return record.experiment_number or ""
+    return None
+
+
+def record_search_filter(
+    search: str,
+    *,
+    include_project_name: bool = False,
+) -> ColumnElement[bool] | None:
+    """Match ledger columns and custom cell values with one shared predicate.
+
+    The ledger search and the native-preview search must agree on what a
+    keyword matches, otherwise the same query returns different rows in the
+    table and in the printed sheet.
+    """
+    text = search.strip()
+    if not text:
+        return None
+    term = f"%{text}%"
+    value_match = (
+        select(RecordValue.id)
+        .where(
+            RecordValue.record_id == ProjectRecord.id,
+            RecordValue.value_text.like(term),
+        )
+        .exists()
+    )
+    clauses: list[ColumnElement[bool]] = []
+    if include_project_name:
+        clauses.append(ProjectRecord.project.has(Project.name.like(term)))
+    clauses.extend(
+        [
+            ProjectRecord.pathology_number.like(term),
+            ProjectRecord.block_number.like(term),
+            ProjectRecord.experiment_number.like(term),
+            value_match,
+        ]
+    )
+    return or_(*clauses)
 
 
 def require_record(session: Session, record_id: str, *, include_values: bool = False) -> ProjectRecord:
@@ -250,13 +309,13 @@ def validate_record_values(
     missing = set(values) - set(by_id)
     if missing:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"存在不属于当前项目的字段：{', '.join(sorted(missing))}",
         )
     core_fields = [field.label for field in fields if field.is_core]
     if core_fields:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"核心字段必须通过专用属性修改：{', '.join(core_fields)}",
         )
     normalized: dict[str, str] = {}
@@ -270,7 +329,7 @@ def validate_record_values(
         errors.extend(issue.message for issue in issues if issue.severity == "error")
     if errors:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="；".join(dict.fromkeys(errors)),
         )
     return normalized
@@ -299,7 +358,7 @@ def validate_core_record_values(
     missing = set(values) - set(by_system_key)
     if missing:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"核心表头不存在：{', '.join(sorted(missing))}",
         )
     normalized: dict[str, str] = {}
@@ -310,7 +369,7 @@ def validate_core_record_values(
         errors.extend(issue.message for issue in issues if issue.severity == "error")
     if errors:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="；".join(dict.fromkeys(errors)),
         )
     return normalized
