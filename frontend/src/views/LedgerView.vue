@@ -223,7 +223,10 @@ let pendingLedgerRangeApplication = false;
 const ledgerRangeSummary = computed(() => ledgerRangeLabel(ledgerRangeSettings.value));
 const ledgerRangeDates = computed(() => {
   const range = resolveLedgerRecordRange(ledgerRangeDraft.value);
-  return range.experiment_date_from ? `${range.experiment_date_from} 至 ${range.experiment_date_to}` : "";
+  if (!range.experiment_date_from) return "";
+  return range.experiment_date_to
+    ? `${range.experiment_date_from} 至 ${range.experiment_date_to}`
+    : `${range.experiment_date_from} 起`;
 });
 const ledgerTableCardRef = ref<HTMLElement | null>(null);
 const projectStripRef = ref<HTMLElement | null>(null);
@@ -6967,6 +6970,12 @@ onBeforeUnmount(() => {
                 <el-checkbox v-model="ledgerRangeDraft.includeUndated" :disabled="ledgerRangeSaving">
                   包含日期为空的记录
                 </el-checkbox>
+                <el-checkbox v-model="ledgerRangeDraft.includeFuture" :disabled="ledgerRangeSaving">
+                  包含未来日期的记录
+                </el-checkbox>
+                <p v-if="!ledgerRangeDraft.includeFuture" class="page-description">
+                  关闭后，日期晚于今天的记录会被移出当前视图。
+                </p>
               </template>
               <template v-else-if="ledgerRangeDraft.mode === 'count'">
                 <label class="ledger-range-input">

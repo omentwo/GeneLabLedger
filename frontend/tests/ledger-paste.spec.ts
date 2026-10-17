@@ -794,12 +794,21 @@ describe("ledger range settings", () => {
 
   it("loads a saved month range using the ledger date", async () => {
     vi.mocked(getSetting).mockImplementation(async (key) => ({ key, value: key === LEDGER_RANGE_SETTINGS_KEY
-      ? { ...DEFAULT_LEDGER_RANGE_SETTINGS, mode: "months", months: 6, includeUndated: false } : null }));
+      ? { ...DEFAULT_LEDGER_RANGE_SETTINGS, mode: "months", months: 6, includeUndated: false, includeFuture: false } : null }));
     await mountLedger();
     expect(mocks.queryRecords).toHaveBeenLastCalledWith(expect.objectContaining({
       experiment_date_from: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
       experiment_date_to: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), include_undated: false,
     }), expect.any(AbortSignal));
+  });
+
+  it("leaves the upper date bound open so future-dated records stay visible", async () => {
+    vi.mocked(getSetting).mockImplementation(async (key) => ({ key, value: key === LEDGER_RANGE_SETTINGS_KEY
+      ? { ...DEFAULT_LEDGER_RANGE_SETTINGS, mode: "months", months: 6 } : null }));
+    await mountLedger();
+    const query = mocks.queryRecords.mock.calls.at(-1)?.[0];
+    expect(query.experiment_date_from).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(query.experiment_date_to).toBeUndefined();
   });
 
   it("retains pending cell edits when switching display range", async () => {

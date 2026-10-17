@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -14,6 +15,7 @@ from app.api import records as records_api
 from app.database import Database, begin_immediate_write
 from app.models import ProjectRecord, RecordValue
 from app.services import cell_batches
+from app.timezones import ASIA_SHANGHAI
 
 
 def project_fields(project: dict) -> dict[str, dict]:
@@ -761,6 +763,78 @@ def test_record_queries_can_exclude_locked_records(
     )
     assert default_query.status_code == 200, default_query.text
     assert default_query.json()["total"] == 2
+
+
+def test_lower_date_bound_alone_keeps_future_dated_records(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    """The ledger date is a business date, so an open upper bound must stay open.
+
+    The desktop frontend omits ``experiment_date_to`` when "包含未来日期的记录"
+    is checked, and the API must then return planned experiments as well.
+    """
+    project_id = seeded_projects["TB"]["id"]
+    today = datetime.now(ASIA_SHANGHAI).date()
+    past = (today - timedelta(days=40)).isoformat()
+    future = (today + timedelta(days=10)).isoformat()
+    lower_bound = (today - timedelta(days=60)).isoformat()
+
+    create_record(client, project_id, "BOUND-PAST", experiment_date=past)
+    create_record(client, project_id, "BOUND-TODAY", experiment_date=today.isoformat())
+    create_record(client, project_id, "BOUND-FUTURE", experiment_date=future)
+    create_record(client, project_id, "BOUND-UNDATED")
+
+    base_query = {
+        "project_id": project_id,
+        "search": "BOUND-",
+        "field_filters": [],
+        "limit": 100,
+        "offset": 0,
+    }
+
+    open_ended = client.post(
+        "/api/records/query",
+        json={**base_query, "experiment_date_from": lower_bound, "include_undated": True},
+    )
+    assert open_ended.status_code == 200, open_ended.text
+    assert sorted(item["pathology_number"] for item in open_ended.json()["items"]) == [
+        "BOUND-FUTURE",
+        "BOUND-PAST",
+        "BOUND-TODAY",
+        "BOUND-UNDATED",
+    ]
+
+    closed = client.post(
+        "/api/records/query",
+        json={
+            **base_query,
+            "experiment_date_from": lower_bound,
+            "experiment_date_to": today.isoformat(),
+            "include_undated": True,
+        },
+    )
+    assert closed.status_code == 200, closed.text
+    assert sorted(item["pathology_number"] for item in closed.json()["items"]) == [
+        "BOUND-PAST",
+        "BOUND-TODAY",
+        "BOUND-UNDATED",
+    ]
+
+    closed_without_undated = client.post(
+        "/api/records/query",
+        json={
+            **base_query,
+            "experiment_date_from": lower_bound,
+            "experiment_date_to": today.isoformat(),
+            "include_undated": False,
+        },
+    )
+    assert closed_without_undated.status_code == 200, closed_without_undated.text
+    assert sorted(item["pathology_number"] for item in closed_without_undated.json()["items"]) == [
+        "BOUND-PAST",
+        "BOUND-TODAY",
+    ]
 
 
 def test_numeric_query_preserves_decimal_precision(

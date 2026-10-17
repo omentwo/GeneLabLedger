@@ -11,6 +11,8 @@ export interface LedgerRangeSettings {
   months: number;
   count: number;
   includeUndated: boolean;
+  /** Keep records dated after today; without it a future date hides the row. */
+  includeFuture: boolean;
 }
 
 export type LedgerRecordRange = Pick<RecordComplexQuery,
@@ -18,7 +20,7 @@ export type LedgerRecordRange = Pick<RecordComplexQuery,
 >;
 
 export const DEFAULT_LEDGER_RANGE_SETTINGS: LedgerRangeSettings = {
-  version: 1, mode: "all", months: 3, count: 50, includeUndated: true,
+  version: 1, mode: "all", months: 3, count: 50, includeUndated: true, includeFuture: true,
 };
 
 export function normalizeLedgerRangeSettings(value: unknown): LedgerRangeSettings {
@@ -32,6 +34,7 @@ export function normalizeLedgerRangeSettings(value: unknown): LedgerRangeSetting
     months: positiveInteger(source.months, 3, LEDGER_RANGE_MONTHS_MAX),
     count: positiveInteger(source.count, 50, LEDGER_RANGE_COUNT_MAX),
     includeUndated: typeof source.includeUndated === "boolean" ? source.includeUndated : true,
+    includeFuture: typeof source.includeFuture === "boolean" ? source.includeFuture : true,
   };
 }
 
@@ -48,11 +51,16 @@ export function resolveLedgerRecordRange(
   settings: LedgerRangeSettings, today = shanghaiDateKey(),
 ): LedgerRecordRange {
   if (settings.mode === "count") return { tail_count: settings.count };
-  if (settings.mode === "months") return {
-    experiment_date_from: ledgerMonthStart(today, settings.months),
-    experiment_date_to: today,
-    include_undated: settings.includeUndated,
-  };
+  if (settings.mode === "months") {
+    const range: LedgerRecordRange = {
+      experiment_date_from: ledgerMonthStart(today, settings.months),
+      include_undated: settings.includeUndated,
+    };
+    // An omitted upper bound keeps future-dated rows; the ledger date is a
+    // business date, so a planned experiment must not vanish from the view.
+    if (!settings.includeFuture) range.experiment_date_to = today;
+    return range;
+  }
   return {};
 }
 
@@ -64,7 +72,11 @@ export function matchesLedgerRecordRange(record: ProjectRecord, range: LedgerRec
 }
 
 export function ledgerRangeLabel(settings: LedgerRangeSettings): string {
-  if (settings.mode === "months") return `近 ${settings.months} 个月`;
+  if (settings.mode === "months") {
+    return settings.includeFuture
+      ? `近 ${settings.months} 个月及以后`
+      : `近 ${settings.months} 个月`;
+  }
   if (settings.mode === "count") return `末尾 ${settings.count} 条`;
   return "全部显示";
 }
