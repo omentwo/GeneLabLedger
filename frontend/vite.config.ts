@@ -14,6 +14,11 @@ import { defineConfig, type Plugin } from "vite";
  */
 function echartsStackedBarWholeColumnAnimation(): Plugin {
   const target = "rectShape[animateProperty] = 0;";
+  // 只有真正的 BarView 实现文件才包含注入锚点。开发模式下 echarts 被
+  // optimizeDeps 预打包成单一依赖块，插件不会命中；生产构建会逐个处理
+  // 原始模块，因此只要求「命中 BarView 且找不到锚点」时报错。
+  const barViewModule = /[/\\]chart[/\\]bar[/\\]BarView\.(?:js|mjs)$/;
+  let patchedFiles = 0;
   const addition = [
     "rectShape[animateProperty] = 0;",
     "var isStacked = seriesModel.get('stack') != null;",
@@ -31,8 +36,23 @@ function echartsStackedBarWholeColumnAnimation(): Plugin {
   return {
     name: "echarts-stacked-bar-whole-column-animation",
     transform(code, id) {
-      if (!id.includes("echarts") || !id.includes("BarView") || !code.includes(target)) return null;
+      if (!id.includes("echarts") || !id.includes("BarView")) return null;
+      if (!code.includes(target)) {
+        if (barViewModule.test(id)) {
+          this.error(
+            "echarts BarView 的动画锚点已变化，堆叠柱整列生长补丁未生效；" +
+              "请对照 apache/echarts#20862 重新确认注入位置，或升级 echarts 后删除该插件。",
+          );
+        }
+        return null;
+      }
+      patchedFiles += 1;
       return { code: code.replace(target, addition), map: null };
+    },
+    buildEnd() {
+      if (patchedFiles === 0) {
+        this.warn("echarts 堆叠柱动画补丁未命中任何 BarView 模块，可能是依赖未参与构建。");
+      }
     },
   };
 }
@@ -55,6 +75,8 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
-    sourcemap: true,
+    // 桌面安装包不发布 sourcemap：它只会增大 asar 体积并暴露源码。
+    // 需要排障时用 `vite build --sourcemap` 单独构建。
+    sourcemap: false,
   },
 });

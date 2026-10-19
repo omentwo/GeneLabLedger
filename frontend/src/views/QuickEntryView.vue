@@ -38,6 +38,7 @@ import type { FieldDefinition, ProjectRecord, RecordValidationIssue } from "@/ty
 import type { ClipboardFollowEvent, QuickEntryOpenContext } from "@/types/electron";
 import { ClipboardFollowSession } from "@/utils/clipboardFollow";
 import { desktopBridge } from "@/utils/desktop";
+import { logError } from "@/utils/logger";
 import { registerWindowCloseGuard } from "@/utils/windowCloseGuard";
 import { fieldDropTargetIndex, moveArrayItem } from "@/utils/fieldOrder";
 import { gridAutoScrollVector, nextGridScrollOffset } from "@/utils/gridAutoScroll";
@@ -160,7 +161,6 @@ const projectFields = computed(() =>
   (currentProject.value?.fields ?? []).slice().sort((left, right) => left.sort_order - right.sort_order),
 );
 const selectedFieldIdSet = computed(() => new Set(fieldSettings.value.selectedFieldIds));
-const pinnedFieldIdSet = computed(() => new Set(fieldSettings.value.pinnedFieldIds));
 const fieldById = computed(() => new Map(projectFields.value.map((field) => [field.id, field])));
 const entryFields = computed(() =>
   fieldSettings.value.selectedFieldIds.flatMap((fieldId) => {
@@ -431,7 +431,7 @@ async function copyPathologyNumber(pathologyNumber: string): Promise<boolean> {
     await clipboard.writeText(pathologyNumber);
     return true;
   } catch (error) {
-    console.error("下一条病理号自动复制失败", error);
+    logError("quick-entry", "下一条病理号自动复制失败", error);
     ElMessage.warning("已进入下一条记录，但无法自动复制病理号，请手动复制");
     return false;
   }
@@ -461,20 +461,10 @@ function loadRecordIntoForm(record: ProjectRecord): void {
   replaceValues(baselineValues, values);
 }
 
-function resetCreateForm(preservePinned = false): void {
+function resetCreateForm(): void {
   resetClipboardFollow();
-  const previous = { ...entryValues };
   const values = Object.fromEntries(
-    projectFields.value.map((field) => {
-      const preserve =
-        preservePinned &&
-        pinnedFieldIdSet.value.has(field.id) &&
-        field.system_key !== "pathology_number";
-      return [
-        field.id,
-        preserve ? previous[field.id] ?? quickEntryDefaultValue(field) : quickEntryDefaultValue(field),
-      ];
-    }),
+    projectFields.value.map((field) => [field.id, quickEntryDefaultValue(field)]),
   );
   activeRecord.value = null;
   combinedPathologyInput.value = "";
@@ -536,7 +526,7 @@ async function startCreate(): Promise<void> {
     return;
   }
   if (!(await confirmDiscardChanges("新建记录"))) return;
-  resetCreateForm(false);
+  resetCreateForm();
 }
 
 async function loadSettings(): Promise<void> {
@@ -597,7 +587,7 @@ async function loadUnreportedRecords(projectId: string): Promise<void> {
       return;
     }
     if (!isDirty.value) {
-      resetCreateForm(false);
+      resetCreateForm();
     } else if (!activeRecordUnavailable.value) {
       activeRecordUnavailable.value = true;
       ElMessage.warning("当前记录已锁定或已生成报告并移出侧栏，未保存内容仍保留但不能再提交");
@@ -689,7 +679,7 @@ async function activateProject(
   unreportedRecords.value = [];
   fieldSettings.value = resolveFieldSettings(projectId);
   clipboardEnabled.value = clipboardAvailable && fieldSettings.value.clipboardEnabled;
-  resetCreateForm(false);
+  resetCreateForm();
   await router.replace({ name: "quick-entry", query: { project: projectId } });
   await loadUnreportedRecords(projectId);
 }
@@ -1078,7 +1068,7 @@ async function notifyMain(recordId: string, action: "create" | "update"): Promis
   try {
     await bridge.notifyQuickEntryChanged({ projectId: activeProjectId.value, recordId, action });
   } catch (error) {
-    console.error("快速录入变更通知失败", error);
+    logError("quick-entry", "快速录入变更通知失败", error);
   }
 }
 
@@ -1110,7 +1100,7 @@ async function saveNewRecord(): Promise<ProjectRecord | undefined> {
   ]);
   recordSearch.value = "";
   await notifyMain(created.id, "create");
-  resetCreateForm(false);
+  resetCreateForm();
   await scrollRecordIntoView(created.id);
   ElMessage.success("记录已保存，可继续录入下一条");
   return created;
@@ -1211,7 +1201,7 @@ async function saveEntry(): Promise<void> {
 function restoreEntry(): void {
   resetClipboardFollow();
   if (activeRecord.value) replaceValues(entryValues, { ...baselineValues });
-  else resetCreateForm(false);
+  else resetCreateForm();
 }
 
 function handleEntryKeydown(event: KeyboardEvent, field: FieldDefinition): void {
@@ -1393,7 +1383,7 @@ onMounted(() => {
   void initialize().finally(() => {
     if (bridge?.windowKind === "quick-entry") {
       void bridge.quickEntryReady().catch((error) => {
-        console.error("快速录入窗口就绪通知失败", error);
+        logError("quick-entry", "快速录入窗口就绪通知失败", error);
       });
     }
   });
@@ -1669,12 +1659,6 @@ onBeforeUnmount(() => {
                   </span>
                   <span v-if="clipboardEnabled && clipboardNextField?.id === field.id" class="clipboard-field-mark">当前项</span>
                   <span v-if="isMandatoryQuickEntryField(field)" class="required-mark">必填</span>
-                  <span
-                    v-if="!activeRecord && pinnedFieldIdSet.has(field.id)"
-                    class="pinned-mark"
-                  >
-                    连续保留
-                  </span>
                 </span>
               </template>
               <div class="entry-field" :data-entry-field="field.id">
@@ -2432,8 +2416,7 @@ onBeforeUnmount(() => {
   font-weight: 500;
 }
 
-.required-mark,
-.pinned-mark {
+.required-mark {
   border-radius: var(--app-radius-pill);
   padding: var(--app-space-optical) var(--app-space-2);
   font-size: calc(var(--quick-entry-font-size, 14px) - 2px);
@@ -2443,11 +2426,6 @@ onBeforeUnmount(() => {
 .required-mark {
   background: var(--app-danger-soft);
   color: var(--app-danger-text);
-}
-
-.pinned-mark {
-  background: var(--app-primary-soft);
-  color: var(--app-primary-text);
 }
 
 .entry-field {
@@ -2769,7 +2747,7 @@ onBeforeUnmount(() => {
 .entry-footer > span, .quick-entry-brand span, .field-selector-head {
   font-size: calc(var(--quick-entry-font-size, 14px) - 1px);
 }
-.required-mark, .pinned-mark, .field-selector-name small {
+.required-mark, .field-selector-name small {
   font-size: calc(var(--quick-entry-font-size, 14px) - 2px);
 }
 .record-pane-note, .record-meta, .entry-footer > span, .record-list-empty { color: var(--app-muted); }

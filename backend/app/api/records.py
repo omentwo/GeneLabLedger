@@ -24,6 +24,8 @@ from app.schemas import (
     RecordCellBatchPreviewRead,
     RecordCellChange,
     RecordCellHighlightUpdate,
+    RecordCellUpdate,
+    RecordCellUpdateRead,
     RecordCreate,
     RecordCreateValidationRead,
     RecordExperimentNumberBatch,
@@ -48,6 +50,7 @@ from app.schemas import (
 )
 from app.services.cell_batches import (
     commit_cell_batch,
+    commit_single_cell,
     current_cell_value,
     preview_cell_changes,
     preview_dict,
@@ -411,6 +414,23 @@ def commit_record_cell_batch(
         token=payload.token,
         accept_warnings=payload.accept_warnings,
         include_snapshots=payload.include_snapshots,
+    )
+
+
+@router.put("/{record_id}/cell", response_model=RecordCellUpdateRead)
+def update_record_cell(
+    record_id: str,
+    payload: RecordCellUpdate,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Save one cell atomically (grid typing fast path)."""
+    return commit_single_cell(
+        session,
+        record_id=record_id,
+        field_id=payload.field_id,
+        value=payload.value,
+        expected_value=payload.expected_value,
+        accept_warnings=payload.accept_warnings,
     )
 
 

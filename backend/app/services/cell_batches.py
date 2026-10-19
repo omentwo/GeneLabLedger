@@ -639,3 +639,129 @@ def commit_cell_batch(
         )
     finally:
         _release_preview_claim(token)
+
+
+def commit_single_cell(
+    session: Session,
+    *,
+    record_id: str,
+    field_id: str,
+    value: str,
+    expected_value: str | None,
+    accept_warnings: bool,
+) -> dict:
+    """Save one cell in a single round trip.
+
+    This is the hot path for grid typing.  It applies exactly the same rules as
+    the batch preview/commit pair (lock check, expected value, field validation,
+    duplicate pathology warning) but without minting a preview token.
+    """
+
+    begin_immediate_write(session)
+    record = session.scalar(
+        select(ProjectRecord)
+        .where(ProjectRecord.id == record_id)
+        .options(
+            selectinload(ProjectRecord.project),
+            selectinload(ProjectRecord.values),
+        )
+    )
+    if not record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="台账记录不存在")
+    field = session.get(FieldDefinition, field_id, options=[selectinload(FieldDefinition.options)])
+    if not field or field.project_id != record.project_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="表头不存在")
+    if record.locked:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="记录已锁定，不能修改",
+        )
+    current = current_cell_value(record, field)
+    if expected_value is not None and expected_value != current:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="单元格内容已变化，请刷新后重试",
+        )
+
+    normalized, issues = validate_field_value(field, value)
+    errors = [issue for issue in issues if issue.severity == "error"]
+    if errors:
+        # 结构化返回，前端可直接渲染"无法保存"面板，不必再发一次 preview。
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "validation_error",
+                "message": "；".join(dict.fromkeys(issue.message for issue in errors)),
+                "issues": [
+                    {
+                        "record_id": record.id,
+                        "field_id": field.id,
+                        "severity": issue.severity,
+                        "message": issue.message,
+                    }
+                    for issue in errors
+                ],
+            },
+        )
+
+    warnings: list[dict[str, str]] = []
+    if field.system_key == "pathology_number":
+        warnings = _duplicate_pathology_issues(
+            session,
+            record.project_id,
+            [StoredCellChange(record.id, field.id, normalized, current)],
+            [],
+        )
+    if warnings and not accept_warnings:
+        # The client falls back to the preview/commit pair to show its
+        # confirmation panel, so the warning payload is machine readable.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "duplicate_warning",
+                "message": "病理号重复，请确认后继续",
+                "warnings": warnings,
+            },
+        )
+
+    if normalized == current:
+        return {"record": record_dict(record), "change": None}
+
+    if field.is_core:
+        _apply_core_value(record, field, normalized)
+    else:
+        _apply_custom_values(record, {field.id: normalized})
+    audit(
+        session,
+        "record.cell.commit",
+        "project_record",
+        record.id,
+        {
+            "project_id": record.project_id,
+            "field_id": field.id,
+            "before": current,
+            "after": normalized,
+        },
+    )
+    session.commit()
+
+    refreshed = session.scalar(
+        select(ProjectRecord)
+        .where(ProjectRecord.id == record.id)
+        .options(
+            selectinload(ProjectRecord.project),
+            selectinload(ProjectRecord.values),
+        )
+        .execution_options(populate_existing=True)
+    )
+    if refreshed is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="台账记录不存在")
+    return {
+        "record": record_dict(refreshed),
+        "change": {
+            "record_id": record.id,
+            "field_id": field.id,
+            "before": current,
+            "after": normalized,
+        },
+    }

@@ -737,6 +737,25 @@ class RecordCellBatchCommitRead(BaseModel):
     after: list[RecordOperationSnapshot] = Field(default_factory=list)
 
 
+class RecordCellUpdate(BaseModel):
+    """One cell saved on its own.
+
+    The preview/commit pair exists for batches that need a confirmation panel.
+    A single edited cell has no such panel, so it gets one atomic request that
+    still compares ``expected_value`` before writing.
+    """
+
+    field_id: str = Field(min_length=1, max_length=36)
+    value: str = Field(default="", max_length=10000)
+    expected_value: str | None = Field(default=None, max_length=10000)
+    accept_warnings: bool = False
+
+
+class RecordCellUpdateRead(BaseModel):
+    record: RecordRead
+    change: RecordCommittedCellChange | None = None
+
+
 class RecordReplacePreview(BaseModel):
     project_id: str = Field(min_length=1, max_length=36)
     field_id: str = Field(min_length=1, max_length=36)

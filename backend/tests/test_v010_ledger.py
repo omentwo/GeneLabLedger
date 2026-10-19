@@ -1349,3 +1349,120 @@ def test_desktop_schema_upgrade_backs_up_and_removes_retired_auto_export_tables(
     finally:
         second_start.dispose()
     assert len(list((tmp_path / "backups").glob("ledger-before-auto-export-removal-*.db"))) == 1
+
+
+def test_single_cell_update_saves_one_cell_and_returns_the_change(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    project_id = seeded_projects["TB"]["id"]
+    field = create_custom_field(client, project_id, label="单格备注")
+    record = create_record(client, project_id, "CELL-1", values={field["id"]: "old"})
+
+    response = client.put(
+        f"/api/records/{record['id']}/cell",
+        json={"field_id": field["id"], "value": "new", "expected_value": "old"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["change"] == {
+        "record_id": record["id"],
+        "field_id": field["id"],
+        "before": "old",
+        "after": "new",
+    }
+    assert body["record"]["values"][field["id"]] == "new"
+
+    stored = client.get(f"/api/records/{record['id']}").json()
+    assert stored["values"][field["id"]] == "new"
+    actions = [item["action"] for item in client.get("/api/audit-logs").json()["items"]]
+    assert "record.cell.commit" in actions
+
+
+def test_single_cell_update_rejects_a_stale_expected_value(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    project_id = seeded_projects["TB"]["id"]
+    field = create_custom_field(client, project_id, label="并发备注")
+    record = create_record(client, project_id, "CELL-2", values={field["id"]: "current"})
+
+    response = client.put(
+        f"/api/records/{record['id']}/cell",
+        json={"field_id": field["id"], "value": "mine", "expected_value": "stale"},
+    )
+    assert response.status_code == 409
+    assert "已变化" in response.json()["detail"]
+    assert client.get(f"/api/records/{record['id']}").json()["values"][field["id"]] == "current"
+
+
+def test_single_cell_update_rejects_a_locked_record(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    project_id = seeded_projects["TB"]["id"]
+    field = create_custom_field(client, project_id, label="锁定备注")
+    record = create_record(client, project_id, "CELL-3", values={field["id"]: "before"})
+    assert client.put(f"/api/records/{record['id']}/lock", json={"locked": True}).status_code == 200
+
+    response = client.put(
+        f"/api/records/{record['id']}/cell",
+        json={"field_id": field["id"], "value": "after"},
+    )
+    assert response.status_code == 409
+    assert "锁定" in response.json()["detail"]
+
+
+def test_single_cell_update_returns_structured_validation_issues(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    project_id = seeded_projects["TB"]["id"]
+    fields = project_fields(seeded_projects["TB"])
+    record = create_record(client, project_id, "CELL-4")
+
+    response = client.put(
+        f"/api/records/{record['id']}/cell",
+        json={"field_id": fields["status"]["id"], "value": "不存在"},
+    )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "validation_error"
+    assert detail["issues"][0]["field_id"] == fields["status"]["id"]
+    assert "状态" in detail["issues"][0]["message"]
+
+
+def test_single_cell_update_requires_confirmation_for_duplicate_pathology(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    project_id = seeded_projects["TB"]["id"]
+    fields = project_fields(seeded_projects["TB"])
+    create_record(client, project_id, "DUP-SOURCE")
+    target = create_record(client, project_id, "DUP-TARGET")
+
+    rejected = client.put(
+        f"/api/records/{target['id']}/cell",
+        json={
+            "field_id": fields["pathology_number"]["id"],
+            "value": "DUP-SOURCE",
+            "expected_value": "DUP-TARGET",
+        },
+    )
+    assert rejected.status_code == 409
+    detail = rejected.json()["detail"]
+    assert detail["code"] == "duplicate_warning"
+    assert detail["warnings"]
+    assert client.get(f"/api/records/{target['id']}").json()["pathology_number"] == "DUP-TARGET"
+
+    accepted = client.put(
+        f"/api/records/{target['id']}/cell",
+        json={
+            "field_id": fields["pathology_number"]["id"],
+            "value": "DUP-SOURCE",
+            "expected_value": "DUP-TARGET",
+            "accept_warnings": True,
+        },
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["record"]["pathology_number"] == "DUP-SOURCE"

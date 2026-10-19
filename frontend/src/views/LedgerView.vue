@@ -75,6 +75,7 @@ import {
   setRecordsHighlight,
   setRecordsReportGenerated,
   updateRecord,
+  updateRecordCell,
   validateNewRecord,
 } from "@/api/records";
 import EditableChoiceInput from "@/components/EditableChoiceInput.vue";
@@ -94,7 +95,6 @@ import type {
   FieldDefinition,
   ProjectRecord,
   RecordStatus,
-  RecordUpdateInput,
   NativePreviewTask,
   PreviewCapabilities,
   PrintEngine,
@@ -130,6 +130,7 @@ import {
 } from "@/utils/ledgerColumnWidth";
 import { shanghaiDateKey } from "@/utils/datetime";
 import { desktopBridge } from "@/utils/desktop";
+import { logError } from "@/utils/logger";
 import { registerWindowCloseGuard } from "@/utils/windowCloseGuard";
 import {
   LEDGER_GRID_CLIPBOARD_MIME,
@@ -567,6 +568,15 @@ const highlightPalette = [
   ),
 ];
 const persistedValues = new Map<string, string>();
+/**
+ * 已修改但尚未写回服务端的单元格 key（`recordId:fieldId`）。
+ *
+ * 只用于"是否存在未保存修改"这类高频判断（100ms 范围刷新、关闭前置检查），
+ * 避免每次都对 records × fields 做全量 diff。真正的保存载荷仍然由
+ * `dirtyLedgerChanges()` 全量扫描生成，因此即使这个集合过期，也只会让
+ * 刷新时机略微保守，不会丢失任何修改。
+ */
+const dirtyCellKeys = new Set<string>();
 const insertedGroupRegistry: LedgerInsertedGroupRegistry = new Map();
 const LEDGER_RECORD_CACHE_MAX_RECORDS = 10_000;
 let draftSequence = 0;
@@ -624,7 +634,7 @@ async function acknowledgeQuickEntryChanges(changes: QuickEntryProjectChange[]):
   try {
     await bridge.acknowledgeQuickEntryChanges(acknowledged);
   } catch (error) {
-    console.error("快速录入变更确认失败", error);
+    logError("ledger", "快速录入变更确认失败", error);
   }
 }
 
@@ -634,7 +644,7 @@ function hasPendingLedgerEdits(): boolean {
     || editingGridCell.value
     || savingIds.value.size
     || cellSaveInFlightCounts.size
-    || dirtyLedgerChanges().length,
+    || hasDirtyLedgerChanges(),
   );
 }
 
@@ -715,7 +725,7 @@ function queueQuickEntryChanges(changes: QuickEntryProjectChange[]): void {
       finally { quickEntryRefreshInProgress.value = false; }
     });
   quickEntryRefreshPromise = task.catch((error) => {
-    console.error("快速录入变更刷新失败", error);
+    logError("ledger", "快速录入变更刷新失败", error);
   });
 }
 
@@ -733,7 +743,7 @@ async function requestPendingQuickEntryChanges(): Promise<void> {
     const pending = await bridge.getPendingQuickEntryChanges();
     queueQuickEntryChanges(pending);
   } catch (error) {
-    console.error("读取快速录入待刷新项目失败", error);
+    logError("ledger", "读取快速录入待刷新项目失败", error);
   }
 }
 
@@ -1161,7 +1171,7 @@ function setLedgerSort(field: FieldDefinition, order: "ascending" | "descending"
   ledgerSort.value = order ? { fieldId: field.id, order } : null;
   void persistLedgerProjectLayout();
   closeColumnTools();
-  if (!draftRows.value.length || (ledgerRangeSettings.value.mode !== "all" && !dirtyLedgerChanges().length)) {
+  if (!draftRows.value.length || (ledgerRangeSettings.value.mode !== "all" && !hasDirtyLedgerChanges())) {
     void loadRecords(activeProjectId.value, { preserveHistory: true });
     return;
   }
@@ -3608,6 +3618,11 @@ function setValue(
       setCellSaveState(record.id, field.id, { status: "dirty" });
     }
   }
+  if (!isDraft(record)) {
+    const key = persistedKey(record.id, field.id);
+    if (valueFor(record, field) === (persistedValues.get(key) ?? "")) dirtyCellKeys.delete(key);
+    else dirtyCellKeys.add(key);
+  }
 }
 
 function persistedKey(recordId: string, fieldId: string): string {
@@ -3765,43 +3780,43 @@ function clearFieldError(record: LedgerRow, field: FieldDefinition): void {
 
 function rememberRecord(record: ProjectRecord): void {
   fields.value.forEach((field) => {
-    persistedValues.set(persistedKey(record.id, field.id), valueFor(record, field));
+    const key = persistedKey(record.id, field.id);
+    persistedValues.set(key, valueFor(record, field));
+    dirtyCellKeys.delete(key);
   });
 }
 
 function rememberAll(): void {
   persistedValues.clear();
+  dirtyCellKeys.clear();
   records.value.forEach(rememberRecord);
 }
 
-function payloadForField(
+/**
+ * Validate one cell locally before it reaches the server.
+ *
+ * This used to build a `RecordUpdateInput` payload that every caller discarded,
+ * so only the side effects (date normalization and the thrown messages) were
+ * ever used.  It now says what it does: validate, normalize, or throw.
+ */
+function validateCellInput(
   record: ProjectRecord,
   field: FieldDefinition,
   rawValue: string,
-): RecordUpdateInput {
+): void {
   const value = rawValue.trim();
   if (field.system_key === "pathology_number") {
     if (!value) throw new Error("病理号不能为空");
-    return { pathology_number: value };
-  }
-  if (field.system_key === "block_number") {
-    return { block_number: value || null };
+    return;
   }
   if (field.system_key === "experiment_date") {
     const normalized = normalizeDate(value);
     record.experiment_date = normalized || null;
-    return { experiment_date: normalized || null };
+    return;
   }
-  if (field.system_key === "experiment_number") {
-    return { experiment_number: value || null };
+  if (field.system_key === "status" && value !== "待实验" && value !== "已完成") {
+    throw new Error("状态只能是“待实验”或“已完成”");
   }
-  if (field.system_key === "status") {
-    if (value !== "待实验" && value !== "已完成") {
-      throw new Error("状态只能是“待实验”或“已完成”");
-    }
-    return { status: value };
-  }
-  return { values: { [field.id]: value } };
 }
 
 function setSaving(recordId: string, saving: boolean): void {
@@ -3864,7 +3879,7 @@ function scheduleLedgerRangeRefresh(projectId: string): void {
       scheduleLedgerRangeRefresh(projectId);
       return;
     }
-    if (editingGridCell.value || dirtyLedgerChanges().length) return;
+    if (editingGridCell.value || hasDirtyLedgerChanges()) return;
     void loadRecords(projectId, {
       showLoading: false, preserveHistory: true, preserveSelection: true, deferForPendingEdits: true,
     });
@@ -3880,6 +3895,36 @@ function dirtyLedgerChanges(): RecordCellChange[] {
       ? [{ record_id: record.id, field_id: field.id, value, expected_value: before }]
       : [];
   }));
+}
+
+/**
+ * 高频路径专用的"是否有未保存修改"判断。
+ *
+ * `dirtyLedgerChanges()` 需要遍历 records × fields（1 万行 × 20 列就是 20 万次
+ * 比较），而范围刷新、编辑前置检查这类调用只关心"有没有"。这里用增量维护的
+ * key 集合直接回答，并顺带剔除已经回到原值的过期条目。
+ */
+function hasDirtyLedgerChanges(): boolean {
+  if (!dirtyCellKeys.size) return false;
+  const rows = tableRows.value;
+  const rowIndexById = tableRowIndexById.value;
+  for (const key of dirtyCellKeys) {
+    const separator = key.indexOf(":");
+    if (separator < 0) {
+      dirtyCellKeys.delete(key);
+      continue;
+    }
+    const rowIndex = rowIndexById.get(key.slice(0, separator));
+    const field = fieldById.value.get(key.slice(separator + 1));
+    const record = rowIndex === undefined ? undefined : rows[rowIndex];
+    if (!record || !field) {
+      dirtyCellKeys.delete(key);
+      continue;
+    }
+    if (valueFor(record, field) !== (persistedValues.get(key) ?? "")) return true;
+    dirtyCellKeys.delete(key);
+  }
+  return false;
 }
 
 function dirtyLedgerDrafts(): LedgerRow[] {
@@ -4456,7 +4501,7 @@ async function saveField(
     return false;
   }
   try {
-    payloadForField(record, field, current);
+    validateCellInput(record, field, current);
     clearFieldError(record, field);
   } catch (error) {
     if (field.system_key === "experiment_date") {
@@ -4482,91 +4527,35 @@ async function saveField(
   setCellSaveState(record.id, field.id, { status: "saving" });
   setSaving(record.id, true);
   try {
-    const result = await enqueueRecordSave(record.id, async () => {
+    const changes = await enqueueRecordSave(record.id, async () => {
       const expectedValue = persistedValues.get(key) ?? initialBefore;
-      const preview = await previewCellBatch(record.project_id, [
-        {
-          record_id: record.id,
+      try {
+        const updated = await updateRecordCell(record.id, {
           field_id: field.id,
           value: current,
           expected_value: expectedValue,
-        },
-      ]);
-      const errors = preview.issues.filter((issue) => issue.severity === "error");
-      const warnings = preview.issues.filter((issue) => issue.severity === "warning");
-      if (errors.length || warnings.length) {
-        const prompt = errors.length
-          ? {
-              title: "无法保存",
-              outcomeText: "当前修改尚未保存，请按提示调整后重试。",
-              cancelText: "返回修改",
-              continueText: "",
-            }
-          : buildValidationPromptCopy(warnings, {
-              context: "edit",
-              cancelBehavior: "discard",
-              originalValue: initialBefore,
-            });
-        pendingValidationAction = null;
-        pendingValidationCancel = errors.length
-          ? null
-          : () => {
-              rollbackValidationCells([
-                {
-                  key,
-                  recordId: record.id,
-                  fieldId: field.id,
-                  beforeValue: initialBefore,
-                  previousSaveState: null,
-                  previousFieldError: null,
-                },
-              ], { [key]: version });
-              ElMessage.info("已取消修改并恢复原值");
-            };
-        validationPanel.value = {
-          token: preview.token,
-          projectId: record.project_id,
-          ...prompt,
-          label: `编辑 ${field.label}`,
-          issues: preview.issues,
-          affectedCount: preview.affected_count,
-          skippedLocked: preview.skipped_locked,
-          cellKeys: [key],
-          cellVersions: { [key]: version },
-          canContinue: !errors.length,
-        };
-        throw new Error(errors[0]?.message ?? "存在警告，请在验证面板中确认后继续");
+        });
+        const currentVersion = cellSaveVersions.get(key) === version;
+        replaceRecordPreservingPending(updated.record, currentVersion ? key : new Set<string>());
+        return updated.change ? [updated.change] : [];
+      } catch (error) {
+        // 字段校验失败：直接用接口返回的问题列表渲染面板，不再多发一次预检查。
+        if (apiDetailCode(error) === "validation_error") {
+          const issues = validationIssuesFromError(error);
+          showCellErrorPanel(record, field, issues, key, version);
+          throw new Error(issues[0]?.message ?? "单元格保存失败");
+        }
+        // 需要用户确认的警告（病理号重复）退回两段式，复用同一个确认面板。
+        if (apiDetailCode(error) === "duplicate_warning") {
+          return await saveFieldWithPreview(record, field, current, expectedValue, key, initialBefore, version);
+        }
+        throw error;
       }
-      if (preview.issues.length) {
-        pendingValidationAction = null;
-        pendingValidationCancel = null;
-        validationPanel.value = {
-          token: "",
-          projectId: record.project_id,
-          title: "操作提示",
-          label: `编辑 ${field.label}`,
-          outcomeText: "修改已经通过校验并将继续保存。",
-          cancelText: "我知道了",
-          continueText: "",
-          issues: preview.issues,
-          affectedCount: preview.affected_count,
-          skippedLocked: preview.skipped_locked,
-          cellKeys: [key],
-          cellVersions: { [key]: version },
-          canContinue: false,
-        };
-      }
-      const committed = await commitCellBatch(preview.token);
-      const currentVersion = cellSaveVersions.get(key) === version;
-      committed.records.forEach((updated) =>
-        replaceRecordPreservingPending(updated, currentVersion ? key : new Set<string>()),
-      );
-      return committed;
     });
     if (cellSaveVersions.get(key) === version) {
       setCellSaveState(record.id, field.id, { status: "saved" });
-      if (recordHistory) {
-        pushCellHistory(`编辑 ${field.label}`, result.changes, record.project_id);
+      if (recordHistory && changes.length) {
+        pushCellHistory(`编辑 ${field.label}`, changes, record.project_id);
       }
     }
     return true;
@@ -4577,7 +4566,7 @@ async function saveField(
         message: error instanceof Error ? error.message : "单元格保存失败",
       });
     }
-    if (!validationPanel.value?.token) {
+    if (!validationPanel.value) {
       ElMessage.error(error instanceof Error ? error.message : "单元格保存失败");
     }
     return false;
@@ -4586,6 +4575,151 @@ async function saveField(
     endCellSave(key);
     reconcileCellAfterCompletedSave(record.id, field.id, version, recordHistory);
   }
+}
+
+
+/**
+ * 带确认面板的单格保存（病理号重复警告等场景）。
+ *
+ * 与原子接口的差别只是"先把预检查结果显示给用户"，提交仍然走同一个
+ * cell-batch 通道，因此两条路径的校验规则完全一致。
+ */
+async function saveFieldWithPreview(
+  record: LedgerRow,
+  field: FieldDefinition,
+  current: string,
+  expectedValue: string,
+  key: string,
+  initialBefore: string,
+  version: number,
+): Promise<Array<{ record_id: string; field_id: string; before: string; after: string }>> {
+  const preview = await previewCellBatch(record.project_id, [
+    {
+      record_id: record.id,
+      field_id: field.id,
+      value: current,
+      expected_value: expectedValue,
+    },
+  ]);
+  const errors = preview.issues.filter((issue) => issue.severity === "error");
+  const warnings = preview.issues.filter((issue) => issue.severity === "warning");
+  if (errors.length || warnings.length) {
+    const prompt = errors.length
+      ? {
+          title: "无法保存",
+          outcomeText: "当前修改尚未保存，请按提示调整后重试。",
+          cancelText: "返回修改",
+          continueText: "",
+        }
+      : buildValidationPromptCopy(warnings, {
+          context: "edit",
+          cancelBehavior: "discard",
+          originalValue: initialBefore,
+        });
+    pendingValidationAction = null;
+    pendingValidationCancel = errors.length
+      ? null
+      : () => {
+          rollbackValidationCells([
+            {
+              key,
+              recordId: record.id,
+              fieldId: field.id,
+              beforeValue: initialBefore,
+              previousSaveState: null,
+              previousFieldError: null,
+            },
+          ], { [key]: version });
+          ElMessage.info("已取消修改并恢复原值");
+        };
+    validationPanel.value = {
+      token: preview.token,
+      projectId: record.project_id,
+      ...prompt,
+      label: `编辑 ${field.label}`,
+      issues: preview.issues,
+      affectedCount: preview.affected_count,
+      skippedLocked: preview.skipped_locked,
+      cellKeys: [key],
+      cellVersions: { [key]: version },
+      canContinue: !errors.length,
+    };
+    throw new Error(errors[0]?.message ?? "存在警告，请在验证面板中确认后继续");
+  }
+  if (preview.issues.length) {
+    pendingValidationAction = null;
+    pendingValidationCancel = null;
+    validationPanel.value = {
+      token: "",
+      projectId: record.project_id,
+      title: "操作提示",
+      label: `编辑 ${field.label}`,
+      outcomeText: "修改已经通过校验并将继续保存。",
+      cancelText: "我知道了",
+      continueText: "",
+      issues: preview.issues,
+      affectedCount: preview.affected_count,
+      skippedLocked: preview.skipped_locked,
+      cellKeys: [key],
+      cellVersions: { [key]: version },
+      canContinue: false,
+    };
+  }
+  const committed = await commitCellBatch(preview.token);
+  const currentVersion = cellSaveVersions.get(key) === version;
+  committed.records.forEach((updated) =>
+    replaceRecordPreservingPending(updated, currentVersion ? key : new Set<string>()),
+  );
+  return committed.changes;
+}
+
+/** 读取 `ApiError.detail` 里的机器可读错误码（后端 HTTPException.detail）。 */
+function apiDetailCode(error: unknown): string | null {
+  if (!(error instanceof ApiError)) return null;
+  const body = error.detail;
+  if (!body || typeof body !== "object") return null;
+  const inner = (body as { detail?: unknown }).detail;
+  const candidate = inner && typeof inner === "object" ? inner : body;
+  const code = (candidate as { code?: unknown }).code;
+  return typeof code === "string" ? code : null;
+}
+
+/** 从 `validation_error` 响应里取出可直接渲染的问题列表。 */
+function validationIssuesFromError(error: unknown): RecordValidationIssue[] {
+  if (!(error instanceof ApiError) || !error.detail || typeof error.detail !== "object") return [];
+  const inner = (error.detail as { detail?: unknown }).detail;
+  const issues = (inner as { issues?: unknown } | undefined)?.issues;
+  if (!Array.isArray(issues)) return [];
+  return issues.filter((issue): issue is RecordValidationIssue => (
+    Boolean(issue) && typeof issue === "object" && typeof (issue as { message?: unknown }).message === "string"
+  ));
+}
+
+/** 单格保存被服务端拒绝时展示"无法保存"面板（不提供继续按钮）。 */
+function showCellErrorPanel(
+  record: LedgerRow,
+  field: FieldDefinition,
+  issues: RecordValidationIssue[],
+  key: string,
+  version: number,
+): void {
+  pendingValidationAction = null;
+  pendingValidationCancel = null;
+  validationPanel.value = {
+    token: "",
+    projectId: record.project_id,
+    title: "无法保存",
+    label: `编辑 ${field.label}`,
+    outcomeText: "当前修改尚未保存，请按提示调整后重试。",
+    cancelText: "返回修改",
+    continueText: "",
+    issues,
+    affectedCount: issues.length,
+    skippedLocked: 0,
+    cellKeys: [key],
+    cellVersions: { [key]: version },
+    canContinue: false,
+  };
 }
 
 async function loadLedgerDisplaySettings(): Promise<void> {
@@ -4961,7 +5095,7 @@ async function loadRecords(
       retryRangeRefresh = true;
       return false;
     }
-    if (options.deferForPendingEdits && (editingGridCell.value || savingIds.value.size || dirtyLedgerChanges().length)) {
+    if (options.deferForPendingEdits && (editingGridCell.value || savingIds.value.size || hasDirtyLedgerChanges())) {
       retryRangeRefresh = true;
       return false;
     }
@@ -5530,7 +5664,7 @@ async function handleManagerChanged(): Promise<void> {
   if (bridge?.windowKind === "main" && changedProjectId) {
     void bridge
       .notifyQuickEntryFieldsChanged({ projectId: changedProjectId })
-      .catch((error) => console.error("快速录入表头刷新通知失败", error));
+      .catch((error) => logError("ledger", "快速录入表头刷新通知失败", error));
   }
   const currentProjectId = activeProjectId.value;
   applyLedgerProjectLayout(currentProjectId);

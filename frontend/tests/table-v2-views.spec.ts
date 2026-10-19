@@ -95,7 +95,20 @@ afterEach(() => {
 });
 
 async function mountView(view: Component, rows: ProjectRecord[], query = ""): Promise<HTMLElement> {
-  vi.mocked(listRecords).mockResolvedValue({ items: rows, total: rows.length, limit: 1000, offset: 0 });
+  // 报告页和实验编排都改为服务端过滤（report_generated / status），
+  // mock 需要按查询参数裁剪，否则测不出"过滤确实交给了服务端"。
+  vi.mocked(listRecords).mockImplementation(async (recordQuery = {}) => {
+    const matching = rows.filter((row) => (
+      (recordQuery.status ? row.status === recordQuery.status : true)
+      && (recordQuery.report_generated === undefined
+        ? true
+        : row.report_generated === recordQuery.report_generated)
+      && (recordQuery.include_locked === false ? !row.locked : true)
+    ));
+    const offset = recordQuery.offset ?? 0;
+    const limit = recordQuery.limit ?? matching.length;
+    return { items: matching.slice(offset, offset + limit), total: matching.length, limit, offset };
+  });
   vi.mocked(assignExperimentNumbers).mockImplementation(async (ids, prefix) =>
     ids.map((id, index) => ({ ...rows.find((row) => row.id === id)!, experiment_number: `${prefix}-${index + 1}` })),
   );
@@ -202,7 +215,8 @@ describe("report Table V2 interactions", () => {
     expect(button(container, /直接打印\s*1\s*份/).disabled).toBe(false);
     expect(table.textContent).not.toContain("26-3");
     button(container, "刷新记录").click();
-    await vi.waitFor(() => expect(listRecords).toHaveBeenCalledTimes(2));
+    // 1 次深链首屏 + 1 次取消"显示已生成报告"后的服务端重载 + 1 次手动刷新
+    await vi.waitFor(() => expect(listRecords).toHaveBeenCalledTimes(3));
     await nextTick();
     expect(button(container, "Office/WPS 原生预览").disabled).toBe(false);
     button(container, "Office/WPS 原生预览").click();

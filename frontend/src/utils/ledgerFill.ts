@@ -1,4 +1,5 @@
 import type { FieldDefinition, ProjectRecord } from "@/types/api";
+import { normalizeDateInput } from "@/utils/datetime";
 
 type NormalizedGridRange = { rowStart: number; rowEnd: number; columnStart: number; columnEnd: number };
 type GridPasteEntry = { rowOffset: number; columnOffset: number; value: string };
@@ -235,24 +236,8 @@ export function buildGridFillEntries(
 }
 
 
+/** @deprecated 使用 `normalizeDateInput`；保留此别名以兼容现有调用点。 */
 export function normalizeDate(value: string): string {
-  const cleaned = value.trim().replace(/[/.]/g, "-");
-  if (!cleaned) return "";
-  const match = cleaned.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
-  if (!match) throw new Error("日期格式应为 YYYY-MM-DD，例如 2026-07-27");
-  const [, year, month, day] = match;
-  const normalized = `${year}-${String(Number(month)).padStart(2, "0")}-${String(
-    Number(day),
-  ).padStart(2, "0")}`;
-  const date = new Date(`${normalized}T00:00:00`);
-  if (
-    Number.isNaN(date.getTime()) ||
-    date.getFullYear() !== Number(year) ||
-    date.getMonth() + 1 !== Number(month) ||
-    date.getDate() !== Number(day)
-  ) {
-    throw new Error("日期无效，请重新输入");
-  }
-  return normalized;
+  return normalizeDateInput(value);
 }
 

@@ -17,6 +17,7 @@ import { RouterLink, RouterView } from "vue-router";
 
 import { useAppStore } from "@/stores/app";
 import { desktopBridge } from "@/utils/desktop";
+import { logError } from "@/utils/logger";
 
 const appStore = useAppStore();
 const bridge = desktopBridge();
@@ -55,7 +56,7 @@ async function syncWindowState(): Promise<void> {
     alwaysOnTop.value = state.alwaysOnTop;
     isMaximized.value = state.isMaximized;
   } catch (error) {
-    console.error("窗口状态读取失败", error);
+    logError("window", "窗口状态读取失败", error);
   }
 }
 

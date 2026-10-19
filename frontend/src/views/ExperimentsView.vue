@@ -267,7 +267,9 @@ async function loadAllRecords(): Promise<void> {
   const loaded: ProjectRecord[] = [];
   let offset = 0;
   while (true) {
-    const page = await listRecords({ include_locked: false, limit: 1000, offset });
+    // 候选池只需要"待实验且未锁定"的记录；把状态交给服务端过滤，
+    // 避免把历史上已完成的记录全部拉进浏览器再丢弃。
+    const page = await listRecords({ include_locked: false, status: "待实验", limit: 1000, offset });
     loaded.push(...page.items);
     offset += page.items.length;
     if (offset >= page.total || page.items.length === 0) break;

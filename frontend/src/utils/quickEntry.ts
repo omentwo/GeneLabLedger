@@ -3,6 +3,7 @@ import type {
   ProjectRecord,
   RecordCellChange,
 } from "@/types/api";
+import { normalizeDateInput } from "@/utils/datetime";
 import { getRecordFieldValue } from "@/utils/recordFieldValue";
 
 export const QUICK_ENTRY_SETTINGS_KEY = "quick_entry_settings";
@@ -222,25 +223,9 @@ export function quickEntryDefaultValue(field: FieldDefinition): string {
   return field.default_value ?? "";
 }
 
+/** @deprecated 使用 `normalizeDateInput`；保留此别名以兼容现有调用点。 */
 export function normalizeQuickEntryDate(value: string): string {
-  const cleaned = value.trim().replace(/[/.]/g, "-");
-  if (!cleaned) return "";
-  const match = cleaned.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
-  if (!match) throw new Error("日期格式应为 YYYY-MM-DD，例如 2026-07-27");
-  const [, year, month, day] = match;
-  const normalized = `${year}-${String(Number(month)).padStart(2, "0")}-${String(
-    Number(day),
-  ).padStart(2, "0")}`;
-  const parsed = new Date(`${normalized}T00:00:00`);
-  if (
-    Number.isNaN(parsed.getTime()) ||
-    parsed.getFullYear() !== Number(year) ||
-    parsed.getMonth() + 1 !== Number(month) ||
-    parsed.getDate() !== Number(day)
-  ) {
-    throw new Error("日期无效，请重新输入");
-  }
-  return normalized;
+  return normalizeDateInput(value);
 }
 
 export function normalizeQuickEntryFieldValue(

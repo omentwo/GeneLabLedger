@@ -41,6 +41,7 @@ AUDIT_ACTION_SEARCH_LABELS = {
     "record.lock": "锁定台账记录",
     "record.unlock": "解锁台账记录",
     "record.experiment_number.update": "回写实验编号",
+    "record.cell.commit": "保存单元格",
     "record.position.reorder_by_date": "按日期重排台账",
     "record.bulk_delete": "按日期批量删除台账记录",
     "record.import.create": "导入新增台账记录",

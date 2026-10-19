@@ -43,3 +43,6 @@ release/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Local agent workspace data
+.workbuddy-ai/

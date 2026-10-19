@@ -109,6 +109,13 @@ const someRecordsSelected = computed(() =>
 );
 
 watch(recordSearch, () => { selectedRecords.value = []; }, { flush: "sync" });
+// "显示已生成报告"现在由服务端过滤，用户切换开关时重新拉取当前模板的记录。
+// 这里刻意不用 watch(showGenerated)：深链自动勾选该开关时列表已经是全量的，
+// 再触发一次加载纯属浪费。
+function handleShowGeneratedChange(): void {
+  if (!activeTemplate.value) return;
+  void loadRecordsForTemplate();
+}
 watch(filteredRecords, (visible) => {
   const recordsById = new Map(visible.map((record) => [record.id, record]));
   selectedRecords.value = selectedRecords.value.flatMap((record) => {
@@ -201,6 +208,19 @@ function setActiveVersion(versionId: string): void {
   });
 }
 
+/** 台账页跳转过来时携带的记录 ID（`?record=` 或 `?records=a,b`）。 */
+function requestedRouteRecordIds(): Set<string> {
+  const queryRecords = Array.isArray(route.query.records)
+    ? route.query.records.join(",")
+    : typeof route.query.records === "string"
+      ? route.query.records
+      : "";
+  const queryRecord = typeof route.query.record === "string" ? route.query.record : "";
+  return new Set(
+    [queryRecord, ...queryRecords.split(",")].map((id) => id.trim()).filter(Boolean),
+  );
+}
+
 async function loadRecordsForTemplate(): Promise<void> {
   const template = activeTemplate.value;
   const generation = ++recordRequestGeneration;
@@ -208,12 +228,19 @@ async function loadRecordsForTemplate(): Promise<void> {
     records.value = [];
     return;
   }
+  // 深链可能指向"已生成报告"的记录；首次消费深链时必须拉全量，
+  // 否则下面的自动勾选逻辑会因为记录不在列表里而失效。
+  const pendingRouteSelection = !querySelectionConsumed && requestedRouteRecordIds().size > 0;
   const loaded: ProjectRecord[] = [];
   let offset = 0;
   while (true) {
     const page = await listRecords({
       project_id: template.project_id,
       include_locked: false,
+      // 默认只取未生成报告的记录：报告页的常态是"挑还没打的记录"，
+      // 让服务端先过滤可以把整表加载量降下来。勾选"显示已生成报告"后
+      // 才重新拉取全量。
+      ...(showGenerated.value || pendingRouteSelection ? {} : { report_generated: false }),
       limit: 1000,
       offset,
     });
@@ -226,15 +253,7 @@ async function loadRecordsForTemplate(): Promise<void> {
   const previousSelection = new Set(selectedRecords.value.map((record) => record.id));
   records.value = loaded;
   selectedRecords.value = [];
-  const queryRecords = Array.isArray(route.query.records)
-    ? route.query.records.join(",")
-    : typeof route.query.records === "string"
-      ? route.query.records
-      : "";
-  const queryRecord = typeof route.query.record === "string" ? route.query.record : "";
-  const requestedIds = new Set(
-    [queryRecord, ...queryRecords.split(",")].map((id) => id.trim()).filter(Boolean),
-  );
+  const requestedIds = requestedRouteRecordIds();
   const ids = querySelectionConsumed ? previousSelection : requestedIds;
   querySelectionConsumed = true;
   const requested = records.value.filter((record) => ids.has(record.id));
@@ -720,7 +739,7 @@ onMounted(() => {
             placeholder="搜索病理号或任意台账内容"
             style="width: 300px"
           />
-          <el-checkbox v-model="showGenerated">显示已生成报告</el-checkbox>
+          <el-checkbox v-model="showGenerated" @change="handleShowGeneratedChange">显示已生成报告</el-checkbox>
           <el-button :icon="Refresh" @click="loadRecordsForTemplate">刷新记录</el-button>
           <el-select
             v-model="selectedPrintEngine"

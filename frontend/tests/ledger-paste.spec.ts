@@ -1,6 +1,8 @@
 import { createApp, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ApiError } from "@/api/client";
+
 import type {
   FieldDefinition,
   Project,
@@ -25,6 +27,7 @@ const mocks = vi.hoisted(() => ({
   queryRecords: vi.fn(),
   previewCellBatch: vi.fn(),
   commitCellBatch: vi.fn(),
+  updateRecordCell: vi.fn(),
   createRecord: vi.fn(),
   queryRecordIds: vi.fn(),
   previewReplace: vi.fn(),
@@ -48,6 +51,7 @@ vi.mock("@/api/records", async (importOriginal) => ({
   queryRecords: mocks.queryRecords,
   previewCellBatch: mocks.previewCellBatch,
   commitCellBatch: mocks.commitCellBatch,
+  updateRecordCell: mocks.updateRecordCell,
   createRecord: mocks.createRecord,
   queryRecordIds: mocks.queryRecordIds,
   previewReplace: mocks.previewReplace,
@@ -206,6 +210,41 @@ beforeEach(() => {
   });
   mocks.createRecord.mockImplementation(async () => record("A", "unexpected-create"));
   mocks.putSetting.mockImplementation(async (key, value) => ({ key, value }));
+  // 单格原子保存是 preview+commit 的薄封装：这里复用上面两个 mock，
+  // 让"预检查报错/警告""提交在途"这些场景继续覆盖同一条校验链。
+  mocks.updateRecordCell.mockImplementation(async (
+    recordId: string,
+    payload: { field_id: string; value: string; expected_value?: string | null; accept_warnings?: boolean },
+  ) => {
+    const rows = [...database.values()].flat();
+    const row = rows.find((item) => item.id === recordId)!;
+    const preview = await mocks.previewCellBatch(row.project_id, [{
+      record_id: recordId,
+      field_id: payload.field_id,
+      value: payload.value,
+      expected_value: payload.expected_value ?? null,
+    }]) as RecordCellBatchPreview;
+    const errors = preview.issues.filter((issue) => issue.severity === "error");
+    if (errors.length) {
+      throw new ApiError(422, errors[0]!.message, {
+        detail: { code: "validation_error", message: errors[0]!.message, issues: errors },
+      });
+    }
+    const warnings = preview.issues.filter((issue) => issue.severity === "warning");
+    if (warnings.length && !payload.accept_warnings) {
+      throw new ApiError(409, "病理号重复，请确认后继续", {
+        detail: { code: "duplicate_warning", message: "病理号重复，请确认后继续", warnings },
+      });
+    }
+    const committed = await mocks.commitCellBatch(preview.token) as RecordCellBatchCommitResult;
+    const updated = committed.records.find((item) => item.id === recordId)!;
+    return {
+      record: updated,
+      change: committed.changes.find(
+        (change) => change.record_id === recordId && change.field_id === payload.field_id,
+      ) ?? null,
+    };
+  });
 });
 
 afterEach(() => {

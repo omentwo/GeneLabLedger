@@ -110,7 +110,7 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 | 系统 | `GET /api/health`；`GET /api/audit-logs`；`GET/PUT /api/settings/{key}` | 健康检查、审计查询、通用设置 |
 | 项目 | `GET/POST /api/projects`；`PATCH/DELETE /api/projects/{project_id}` | 项目列表、创建、编辑、删除 |
 | 表头 | `GET/POST /api/projects/{project_id}/fields`；`POST /api/projects/{project_id}/fields/batch`；`PATCH/DELETE /api/projects/fields/{field_id}`；`PUT /api/projects/fields/{field_id}/options`；`PUT /api/projects/{project_id}/fields/reorder` | 动态字段、批量表头及选项管理 |
-| 台账 | `GET/POST /api/records`；`GET/PATCH/DELETE /api/records/{record_id}`；`PUT /api/records/{record_id}/lock`；`PUT /api/records/report-status` | 记录查询、CRUD、相对目标行插入、锁定、报告标记 |
+| 台账 | `GET/POST /api/records`；`GET/PATCH/DELETE /api/records/{record_id}`；`PUT /api/records/{record_id}/lock`；`PUT /api/records/report-status`；`PUT /api/records/{record_id}/cell` | 记录查询、CRUD、相对目标行插入、锁定、报告标记、单格原子保存 |
 | 动态查询与批量单元格 | `POST /api/records/query`；`POST /api/records/query/ids`；`POST /api/records/cell-batches/preview`；`POST /api/records/cell-batches/commit`；`POST /api/records/replace/preview`；`POST /api/records/replace/commit` | 动态字段分批筛选排序、完整结果 ID、粘贴/填充与查找替换的预检查和原子提交 |
 | 编号 | `POST /api/records/experiment-numbers` | 实验编号原子回写 |
 | 报告 | `GET/POST /api/report-templates`；`POST /api/report-templates/{template_id}/versions`；`PUT /api/report-template-versions/{version_id}/mappings`；`DELETE /api/report-templates/{template_id}`；`GET /api/printers`；`GET /api/print-engines`；`POST /api/reports/print`；`POST /api/report-template-versions/{version_id}/native-preview` | 模板版本、映射、打印机、直接打印和 Word/WPS 原生预览；前端默认按台账列表倒序提交所选记录，后端保持请求顺序逐份打印 |
@@ -122,6 +122,8 @@ SQLite 连接建立时执行 `PRAGMA foreign_keys=ON`，未启用 WAL。删除�
 显示范围通过独立的 `AppSetting` 键 `ledger_range_settings` 保存 `{version: 1, mode, months, count, includeUndated}`，默认 `mode="all"`，月份与条数上限分别为 120 和 10,000。`ledgerRangeSettings.ts` 按上海当天计算含边界的业务日期范围并处理月末钳位。复杂查询的 `include_undated` 仅扩展日期区间条件；`tail_count` 在所有筛选后、分页前生效，以反向排序取 ID 的子查询选择末尾集合，再恢复原排序，`total` 和 `/query/ids` 使用同一集合。字段排序的台账尾部选择以 `applyLedgerTableView` 的自然排序比较器为准：前端移除运输查询的 `tail_count`，分批读取全部匹配候选，再排序并截取末尾，避免 SQL 文本排序及空值顺序与显示不一致。因此启用字段排序后的 N 条限制目前只减少最终保留与显示记录，不减少候选传输量；默认固定行序及月份模式可在后端限制候选。
 
 范围内记录修改后以 100ms 合并查询刷新；刷新等待保存和活动编辑完成，并在响应应用前再次检查待保存输入及缓存代次。切换范围设置具有独立的待应用状态，包括从限制范围切回全部显示，防止保存设置或查询期间的新编辑被覆盖；成功应用会清理选择并滚到末尾。本地草稿不参与截尾。手动 Excel 导出构造查询时省略显示范围，保留列筛选及独立导出日期范围。
+
+网格逐格编辑使用 `PUT /records/{record_id}/cell` 一次往返完成"校验 + 旧值比对 + 写入"，写入前仍按 `expected_value` 做乐观并发校验。只有字段校验失败（422，返回结构化 `validation_error` 与问题列表）和病理号重复警告（409，`duplicate_warning`）需要用户处理：前者直接渲染"无法保存"面板，后者退回 `cell-batches` 预检查/提交以复用同一个确认面板。批量粘贴、填充、查找替换和快速录入仍走预检查/提交两段式。
 
 主台账的 Table V2 行缓存为 2，与实验编排的默认值一致。虚拟列携带字段引用，按 ID 定位字段使用 computed Map；每格一次生成值、错误、保存状态、编辑标记和填充预览，复用于插槽。编辑器仍仅为活动编辑单元格挂载。文字取消无条件 CSS 入场动画，由 `LedgerCellEntryMotion` 使用 Web Animations API 对显式操作完成后的当前 DOM 快照播放 180ms 动画；它不注册滚动挂载回调，也不保留全表待播放 ID，纵向滚动及卸载会取消活动动画。首屏播放等待初始读取及底部定位结束；新增/插入草稿仅播放当时渲染的目标行，草稿转 UUID 不再次触发。隔离性能对比及边界见 [台账滚动性能验证](ledger-scroll-performance.md)。
 

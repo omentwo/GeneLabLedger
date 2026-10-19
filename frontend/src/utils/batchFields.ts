@@ -24,7 +24,8 @@ export interface BatchFieldPreview {
   hasErrors: boolean;
 }
 
-export function parseBatchFieldLabels(value: string): string[] {
+/** 仅本模块使用：把多行输入拆成去空白的表头名称列表。 */
+function parseBatchFieldLabels(value: string): string[] {
   return value
     .split(/\r?\n/)
     .map((label) => label.trim())

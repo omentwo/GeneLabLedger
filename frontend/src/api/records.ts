@@ -5,6 +5,8 @@ import type {
   RecordCellBatchCommitResult,
   RecordCellBatchPreview,
   RecordCellChange,
+  RecordCellUpdateInput,
+  RecordCellUpdateResult,
   RecordComplexQuery,
   RecordCreateInput,
   RecordList,
@@ -104,6 +106,23 @@ export function commitCellBatch(
       accept_warnings: acceptWarnings,
       include_snapshots: includeSnapshots,
     }),
+  });
+}
+
+/**
+ * 保存单个单元格。
+ *
+ * 网格逐格编辑没有批量确认面板，用这个接口一次往返完成
+ * "校验 + 旧值比对 + 写入"；只有需要用户确认的警告（病理号重复）
+ * 才会返回 409，由调用方退回 preview/commit 两段式。
+ */
+export function updateRecordCell(
+  recordId: string,
+  payload: RecordCellUpdateInput,
+): Promise<RecordCellUpdateResult> {
+  return apiRequest<RecordCellUpdateResult>(`/records/${recordId}/cell`, {
+    method: "PUT",
+    body: jsonBody(payload),
   });
 }
 

@@ -294,6 +294,23 @@ export interface RecordCellBatchCommitResult {
   after: ProjectRecord[];
 }
 
+export interface RecordCellUpdateInput {
+  field_id: string;
+  value: string;
+  expected_value?: string | null;
+  accept_warnings?: boolean;
+}
+
+export interface RecordCellUpdateResult {
+  record: ProjectRecord;
+  change: {
+    record_id: string;
+    field_id: string;
+    before: string;
+    after: string;
+  } | null;
+}
+
 export interface RecordReplacePreview {
   token: string;
   matched_count: number;

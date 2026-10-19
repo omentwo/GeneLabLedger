@@ -6,13 +6,13 @@ import multiprocessing
 import os
 import threading
 import time
-import winreg
 from ctypes import wintypes
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Literal
 
+from app.services.office_engines import is_progid_registered
 from app.services.printers import list_windows_printers
 
 PrintEngine = Literal["auto", "wps", "word"]
@@ -32,16 +32,10 @@ class OfficeEngineUnavailable(OfficePrintError):
 
 
 def _engine_registered(engine: str) -> bool:
-    if os.name != "nt":
-        return False
     progid = ENGINE_PROGIDS.get(engine)
     if not progid:
         return False
-    try:
-        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, rf"{progid}\CLSID"):
-            return True
-    except OSError:
-        return False
+    return is_progid_registered(progid)
 
 
 def _application_process_id(application: object) -> int | None:

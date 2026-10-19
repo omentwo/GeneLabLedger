@@ -7,7 +7,6 @@ import os
 import shutil
 import threading
 import time
-import winreg
 from contextlib import suppress
 from ctypes import wintypes
 from dataclasses import dataclass, field
@@ -15,6 +14,8 @@ from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
+
+from app.services.office_engines import is_progid_registered
 
 PreviewEngine = Literal["auto", "wps", "word"]
 NativePreviewAction = Literal["preview", "open"]
@@ -57,13 +58,7 @@ class NativePreviewJob:
 
 
 def _registered(progid: str) -> bool:
-    if os.name != "nt":
-        return False
-    try:
-        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, rf"{progid}\CLSID"):
-            return True
-    except OSError:
-        return False
+    return is_progid_registered(progid)
 
 
 def _resolve_progid(engine: str, document_type: str = "xlsx") -> str | None:

@@ -41,3 +41,32 @@ export function shanghaiDateKey(value = new Date()): string {
   );
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
+
+/**
+ * Normalize a hand-typed business date to `YYYY-MM-DD`.
+ *
+ * Accepts `2026-7-27`, `2026/07/27` and `2026.07.27`, and rejects values that
+ * do not exist in the calendar (`2026-02-30`).  The ledger grid, the quick
+ * entry window and the fill helper all share this single implementation so a
+ * date typed in one place cannot be accepted by another and rejected here.
+ */
+export function normalizeDateInput(value: string): string {
+  const cleaned = value.trim().replace(/[/.]/g, "-");
+  if (!cleaned) return "";
+  const match = cleaned.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (!match) throw new Error("日期格式应为 YYYY-MM-DD，例如 2026-07-27");
+  const [, year, month, day] = match;
+  const normalized = `${year}-${String(Number(month)).padStart(2, "0")}-${String(
+    Number(day),
+  ).padStart(2, "0")}`;
+  const date = new Date(`${normalized}T00:00:00`);
+  if (
+    Number.isNaN(date.getTime()) ||
+    date.getFullYear() !== Number(year) ||
+    date.getMonth() + 1 !== Number(month) ||
+    date.getDate() !== Number(day)
+  ) {
+    throw new Error("日期无效，请重新输入");
+  }
+  return normalized;
+}
