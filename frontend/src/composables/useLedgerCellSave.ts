@@ -56,7 +56,6 @@ export interface LedgerCellSaveDeps {
   records: Ref<ProjectRecord[]>;
   fields: ComputedRef<FieldDefinition[]>;
   tableRows: ComputedRef<LedgerRow[]>;
-  tableRowIndexById: ComputedRef<Map<string, number>>;
   fieldById: ComputedRef<Map<string, FieldDefinition>>;
   recordSelection: {
     selectedRecords: Ref<ProjectRecord[]>;
@@ -67,7 +66,8 @@ export interface LedgerCellSaveDeps {
   isDraft: (record: LedgerRow) => boolean;
   persistDraft: (record: LedgerRow) => Promise<boolean>;
   replaceRecord: (updated: ProjectRecord) => void;
-  invalidateProjectRecordCache: (projectId: string) => void;
+  /** 单格保存后原地更新记录缓存（整体失效会让项目切换的 preferCache 永远落空）。 */
+  updateCachedRecord: (projectId: string, record: ProjectRecord) => void;
   scheduleLedgerRangeRefresh: (projectId: string) => void;
 }
 
@@ -140,19 +140,26 @@ export function useLedgerCellSave(deps: LedgerCellSaveDeps): {
     dismissValidationPanel,
     hasPendingValidationAction,
   } = deps.panel;
-  const { records, fields, tableRows, tableRowIndexById, fieldById } = deps;
+  const { records, fields, tableRows, fieldById } = deps;
   const { selectedRecords, selectedRecordIds, selectedRecordCache } = deps.recordSelection;
 
   const savingIds = ref(new Set<string>());
   const fieldErrors = ref<Record<string, string>>({});
   const persistedValues = new Map<string, string>();
   const dirtyCellKeys = new Set<string>();
+  /** setSaving 的引用计数：同一记录多个保存排队时，前一个完成不得提前摘掉标记。 */
+  const savingCounts = new Map<string, number>();
 
   function setSaving(recordId: string, saving: boolean): void {
-    const next = new Set(savingIds.value);
-    if (saving) next.add(recordId);
-    else next.delete(recordId);
-    savingIds.value = next;
+    const current = savingCounts.get(recordId) ?? 0;
+    const next = saving ? current + 1 : Math.max(0, current - 1);
+    if (next === current) return;
+    if (next > 0) savingCounts.set(recordId, next);
+    else savingCounts.delete(recordId);
+    const ids = new Set(savingIds.value);
+    if (next > 0) ids.add(recordId);
+    else ids.delete(recordId);
+    savingIds.value = ids;
   }
 
   function fieldErrorFor(record: LedgerRow, field: FieldDefinition): string {
@@ -328,21 +335,23 @@ export function useLedgerCellSave(deps: LedgerCellSaveDeps): {
    * `dirtyLedgerChanges()` 需要遍历 records × fields（1 万行 × 20 列就是 20 万次
    * 比较），而范围刷新、编辑前置检查这类调用只关心"有没有"。这里用增量维护的
    * key 集合直接回答，并顺带剔除已经回到原值的过期条目。
+   *
+   * 查找基座必须是未筛选的 `records`：行被本地筛出视图不代表编辑已保存，
+   * 按视图索引查找会漏判并把这类编辑暴露给刷新闸门（数据丢失）。
    */
   function hasDirtyLedgerChanges(): boolean {
     if (!dirtyCellKeys.size) return false;
-    const rows = tableRows.value;
-    const rowIndexById = tableRowIndexById.value;
+    const recordById = new Map(records.value.map((record) => [record.id, record]));
     for (const key of dirtyCellKeys) {
       const separator = key.indexOf(":");
       if (separator < 0) {
         dirtyCellKeys.delete(key);
         continue;
       }
-      const rowIndex = rowIndexById.get(key.slice(0, separator));
+      const record = recordById.get(key.slice(0, separator));
       const field = fieldById.value.get(key.slice(separator + 1));
-      const record = rowIndex === undefined ? undefined : rows[rowIndex];
       if (!record || !field) {
+        // 记录/字段已从数据源消失（重载或换项目后的残留），才是真正的过期。
         dirtyCellKeys.delete(key);
         continue;
       }
@@ -378,7 +387,7 @@ export function useLedgerCellSave(deps: LedgerCellSaveDeps): {
     const selectedIndex = selectedRecords.value.findIndex((record) => record.id === updated.id);
     if (selectedIndex >= 0) selectedRecords.value.splice(selectedIndex, 1, merged);
     if (selectedRecordIds.value.has(updated.id)) selectedRecordCache.set(updated.id, merged);
-    deps.invalidateProjectRecordCache(updated.project_id);
+    deps.updateCachedRecord(updated.project_id, merged);
     deps.scheduleLedgerRangeRefresh(updated.project_id);
   }
 
@@ -493,6 +502,10 @@ export function useLedgerCellSave(deps: LedgerCellSaveDeps): {
       }
       return false;
     }
+    // validateCellInput 会原地规范化日期（record.experiment_date）；
+    // 载荷必须取规范化后的值，否则后端收到原文必然拒收，
+    // 而单元格显示的却是规范化结果（自相矛盾）。
+    const payloadValue = valueFor(record, field);
 
     const version = nextCellSaveVersion(key);
     beginCellSave(key);
@@ -504,7 +517,7 @@ export function useLedgerCellSave(deps: LedgerCellSaveDeps): {
         try {
           const updated = await updateRecordCell(record.id, {
             field_id: field.id,
-            value: current,
+            value: payloadValue,
             expected_value: expectedValue,
           });
           const currentVersion = peekCellSaveVersion(key) === version;
@@ -519,7 +532,7 @@ export function useLedgerCellSave(deps: LedgerCellSaveDeps): {
           }
           // 需要用户确认的警告（病理号重复）退回两段式，复用同一个确认面板。
           if (apiDetailCode(error) === "duplicate_warning") {
-            return await saveFieldWithPreview(record, field, current, expectedValue, key, initialBefore, version);
+            return await saveFieldWithPreview(record, field, payloadValue, expectedValue, key, initialBefore, version);
           }
           throw error;
         }

@@ -133,6 +133,22 @@ export class LedgerRecordCache {
     });
   }
 
+  /**
+   * 单条记录更新后原地替换各快照中的同 id 记录（单格保存的热路径）。
+   *
+   * 与 `invalidateProject` 的差别：不清缓存、不延长新鲜期——过期节奏
+   * 保持原样，只是在窗口期内让切换项目的 `preferCache` 命中拿到新值，
+   * 而不是被迫重新拉取整个项目。
+   */
+  updateRecord(projectId: string, record: ProjectRecord): void {
+    this.entries.forEach((entry) => {
+      if (entry.projectId !== projectId) return;
+      const index = entry.snapshot.records.findIndex((item) => item.id === record.id);
+      if (index < 0) return;
+      entry.snapshot.records.splice(index, 1, cloneRecord(record));
+    });
+  }
+
   clear(): void {
     this.entries.clear();
   }

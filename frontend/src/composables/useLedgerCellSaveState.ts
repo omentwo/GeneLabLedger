@@ -87,7 +87,16 @@ export function useLedgerCellSaveState(): {
     cellSaveClearTimers.forEach((timer) => window.clearTimeout(timer));
     cellSaveClearTimers.clear();
     cellSaveStates.value = new Map();
-    cellSaveVersions.clear();
+    // 在途保存的版本必须保留：重载（loadRecords）会清状态，但请求仍在飞；
+    // 清掉版本会让完成路径的 `peekCellSaveVersion === version` 恒为 false，
+    // 跳过撤销历史入栈（服务端已写入而撤销栈缺失）。
+    if (cellSaveInFlightCounts.size) {
+      for (const key of [...cellSaveVersions.keys()]) {
+        if (!cellSaveInFlightCounts.has(key)) cellSaveVersions.delete(key);
+      }
+    } else {
+      cellSaveVersions.clear();
+    }
   }
 
   function peekCellSaveVersion(key: string): number | undefined {

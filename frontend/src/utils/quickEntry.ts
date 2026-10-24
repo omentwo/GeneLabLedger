@@ -20,7 +20,6 @@ export const QUICK_ENTRY_INPUT_HEIGHT_DEFAULT = 32;
 
 export interface QuickEntryProjectSettings {
   selectedFieldIds: string[];
-  pinnedFieldIds: string[];
   fieldWidth: number;
   quickCreateFieldWidth: number;
   fontSize: number;
@@ -39,7 +38,6 @@ export interface QuickEntrySettingsDocument {
 
 export interface QuickEntryFieldDefaults {
   selectedFieldIds?: string[];
-  pinnedFieldIds?: string[];
 }
 
 function stringList(value: unknown): string[] {
@@ -83,7 +81,6 @@ export function normalizeQuickEntrySettings(value: unknown): QuickEntrySettingsD
         projectId,
         {
           selectedFieldIds: stringList(settings.selectedFieldIds),
-          pinnedFieldIds: stringList(settings.pinnedFieldIds),
           fieldWidth: clampedDimension(
             settings.fieldWidth ?? legacyLayoutValue(settings, "width"),
             QUICK_ENTRY_FIELD_WIDTH_DEFAULT,
@@ -148,20 +145,8 @@ export function resolveQuickEntryProjectSettings(
   });
   const selectedSet = new Set(selectedFieldIds);
 
-  const defaultPinned = defaults.pinnedFieldIds !== undefined
-    ? defaults.pinnedFieldIds
-    : orderedFields
-        .filter((field) => field.system_key === "experiment_date" || field.system_key === "status")
-        .map((field) => field.id);
-  const requestedPinned = saved?.pinnedFieldIds ?? defaultPinned;
-  const pinnedSet = new Set(requestedPinned);
-  const pinnedFieldIds = stringList(requestedPinned).filter((fieldId) => {
-    const field = orderedFields.find((item) => item.id === fieldId);
-    return Boolean(field && selectedSet.has(fieldId) && pinnedSet.has(fieldId) && field.system_key !== "pathology_number");
-  });
   return {
     selectedFieldIds,
-    pinnedFieldIds,
     fieldWidth: clampedDimension(
       saved?.fieldWidth,
       QUICK_ENTRY_FIELD_WIDTH_DEFAULT,

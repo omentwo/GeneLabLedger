@@ -91,7 +91,6 @@ const entryValues = reactive<Record<string, string>>({});
 const baselineValues = reactive<Record<string, string>>({});
 const fieldDialogVisible = ref(false);
 const selectedFieldDraft = ref<string[]>([]);
-const pinnedFieldDraft = ref<string[]>([]);
 const fieldWidthDraft = ref(QUICK_ENTRY_FIELD_WIDTH_DEFAULT);
 const quickCreateFieldWidthDraft = ref(QUICK_ENTRY_CREATE_FIELD_WIDTH_DEFAULT);
 const fontSizeDraft = ref(QUICK_ENTRY_FONT_SIZE_DEFAULT);
@@ -116,7 +115,6 @@ const combinedPathologyInputRef = ref<{ focus: () => void } | null>(null);
 const settingsDocument = ref<QuickEntrySettingsDocument>(normalizeQuickEntrySettings(null));
 const fieldSettings = ref<QuickEntryProjectSettings>({
   selectedFieldIds: [],
-  pinnedFieldIds: [],
   fieldWidth: QUICK_ENTRY_FIELD_WIDTH_DEFAULT,
   quickCreateFieldWidth: QUICK_ENTRY_CREATE_FIELD_WIDTH_DEFAULT,
   fontSize: QUICK_ENTRY_FONT_SIZE_DEFAULT,
@@ -147,12 +145,10 @@ function queryIdList(value: unknown): string[] {
 const initialContext: QuickEntryOpenContext = {
   projectId: typeof route.query.project === "string" ? route.query.project : "",
   selectedFieldIds: queryIdList(route.query.fields),
-  pinnedFieldIds: queryIdList(route.query.pinned),
 };
 if (initialContext.projectId) {
   contextDefaults.set(initialContext.projectId, {
     selectedFieldIds: initialContext.selectedFieldIds,
-    pinnedFieldIds: initialContext.pinnedFieldIds,
   });
 }
 
@@ -703,7 +699,6 @@ async function handleOpenRequest(context: QuickEntryOpenContext): Promise<void> 
   if (context.projectId) {
     contextDefaults.set(context.projectId, {
       selectedFieldIds: context.selectedFieldIds,
-      pinnedFieldIds: context.pinnedFieldIds,
     });
   }
   if (!context.projectId || context.projectId === activeProjectId.value) {
@@ -713,7 +708,6 @@ async function handleOpenRequest(context: QuickEntryOpenContext): Promise<void> 
   await refreshProjectData(context.projectId);
   await activateProject(context.projectId, {
     selectedFieldIds: context.selectedFieldIds,
-    pinnedFieldIds: context.pinnedFieldIds,
   });
 }
 
@@ -721,7 +715,6 @@ function openFieldSettings(): void {
   if (saving.value || settingsSaving.value) return;
   pauseClipboardFollow("正在设置表头，接收已暂停");
   selectedFieldDraft.value = [...fieldSettings.value.selectedFieldIds];
-  pinnedFieldDraft.value = [...fieldSettings.value.pinnedFieldIds];
   fieldWidthDraft.value = fieldSettings.value.fieldWidth;
   quickCreateFieldWidthDraft.value = fieldSettings.value.quickCreateFieldWidth;
   fontSizeDraft.value = fieldSettings.value.fontSize;
@@ -745,7 +738,6 @@ function setDraftFieldSelected(field: FieldDefinition, selected: boolean): void 
   } else if (!selected) {
     selectedFieldDraft.value = selectedFieldDraft.value.filter((id) => id !== field.id);
   }
-  if (!selected) pinnedFieldDraft.value = pinnedFieldDraft.value.filter((id) => id !== field.id);
   if (!selected) clipboardFieldDraft.value = clipboardFieldDraft.value.filter((id) => id !== field.id);
 }
 
@@ -961,7 +953,6 @@ function restoreRecommendedFields(): void {
     defaultsForProject(activeProjectId.value),
   );
   selectedFieldDraft.value = recommended.selectedFieldIds;
-  pinnedFieldDraft.value = recommended.pinnedFieldIds;
 }
 
 async function saveFieldSettings(): Promise<void> {
@@ -971,7 +962,6 @@ async function saveFieldSettings(): Promise<void> {
     projectFields.value,
     {
       selectedFieldIds: selectedFieldDraft.value,
-      pinnedFieldIds: pinnedFieldDraft.value,
       fieldWidth: fieldWidthDraft.value,
       quickCreateFieldWidth: quickCreateFieldWidthDraft.value,
       fontSize: fontSizeDraft.value,

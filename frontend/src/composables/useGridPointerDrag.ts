@@ -54,7 +54,8 @@ export interface GridPointerDragDeps {
   isEditingCell: (position: GridCellPosition | null) => boolean;
   /** 拖拽开始前提交处于编辑中的单元格（如有）。 */
   commitActiveEdit: () => void;
-  focusCell: (position: GridCellPosition) => void;
+  /** options.scroll 为 false 时不得滚动视口（松手回焦路径，指针已在视口内）。 */
+  focusCell: (position: GridCellPosition, options?: { scroll?: boolean }) => void;
   dragThreshold: number;
 }
 
@@ -288,6 +289,11 @@ export function useGridPointerDrag(deps: GridPointerDragDeps): {
       event.preventDefault();
       flushDragFrame();
       if (dragState.mode !== "add") selection.materializeGridCellRangeSelection();
+      // 自动滚动可能把焦点行滚出虚拟窗口，DOM 焦点已落回 body；
+      // 必须把焦点放回选区端点，否则网格快捷键（Ctrl+D/C/V、方向键）全部失效。
+      // 指针此时就在视口内，不滚动——nearest 会把半裁的端点行整行拉进视口。
+      const focus = selection.activeGridCell.value;
+      if (focus) deps.focusCell(focus, { scroll: false });
     }
     stopGridCellDrag();
   }

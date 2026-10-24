@@ -41,7 +41,7 @@ Electron 负责桌面边界和文件对话框，Vue 前端只通过 HTTP API 和
 | 测试与质量 | pytest、HTTPX、Vitest/jsdom、vue-tsc、Ruff、node:test |
 | Windows 发布 | GitHub Actions、PyInstaller sidecar、Electron 安装包 |
 
-前端和后端版本号保持一致（当前 2.3.5），分别位于 `frontend/package.json` 与 `backend/pyproject.toml`，后端 `/api/health` 返回同一版本。
+前端和后端版本号保持一致（当前 2.4.0），分别位于 `frontend/package.json` 与 `backend/pyproject.toml`，后端 `/api/health` 返回同一版本。
 
 ## 3. 启动模式与目录布局
 
@@ -228,10 +228,10 @@ frontend/electron/preload.cjs           IPC 白名单桥接
 frontend/electron/clipboard-follow.cjs  剪贴板 helper 进程与会话管理
 frontend/src/router/index.ts            页面路由
 frontend/src/views/QuickEntryView.vue   独立快速录入、病理号列表与剪贴板跟随
-frontend/src/views/LedgerView.vue       台账容器：网格渲染、单元格编辑会话与加载编排
+frontend/src/views/LedgerView.vue       台账容器：网格渲染、单元格编辑会话、粘贴提交与校验门禁
 frontend/src/composables/               台账机制按关注点拆分的 composables：
                                         useLedgerContext（共享状态底座）、
-                                        useLedgerRecords（分页拉取、缓存世代与请求票据）、
+                                        useLedgerRecords（分页拉取、缓存世代、请求票据与 loadRecords 编排）、
                                         useLedgerGridSelection（选区状态与操作）、
                                         useGridPointerDrag（拖拽、rAF 帧合并与边缘自动滚动）、
                                         useGridFillDrag（填充柄拖拽与预览）、

@@ -90,8 +90,6 @@ import type {
   RecordCellBatchCommitResult,
   RecordBatchNewRecord,
   RecordCellChange,
-  RecordComplexQuery,
-  RecordFieldFilter,
   RecordReorderByDatePreview,
 } from "@/types/api";
 import type {
@@ -102,6 +100,12 @@ import {
   buildGridFillEntries,
   type GridFillMode,
 } from "@/utils/ledgerFill";
+import {
+  buildBatchNewRecords,
+  countMissingPasteRows,
+  parsePasteEntries,
+  resolvePasteTargets,
+} from "@/utils/ledgerPaste";
 import { normalizeDateInput, shanghaiDateKey } from "@/utils/datetime";
 import {
   nextGridScrollOffset,
@@ -179,7 +183,6 @@ import {
 } from "@/utils/ledgerTableView";
 import { getRecordFieldValue as valueFor } from "@/utils/recordFieldValue";
 import { summarizeLedgerSelection } from "@/utils/ledgerSelectionStats";
-import { ledgerRecordQueryKey } from "@/utils/ledgerRecordCache";
 import {
   readLastLedgerProjectId,
   rememberLastLedgerProjectId,
@@ -219,7 +222,6 @@ const ledgerContext = useLedgerContext();
 const {
   activeProjectId,
   currentProject,
-  tableProjectId,
   fields,
   fieldById,
   records,
@@ -355,16 +357,48 @@ const {
   baseTableRows,
   tableRows,
   tableRowIndexById,
-  queryAllRecordBatches,
   queryLedgerRecordIds,
   ledgerRecordCache,
-  LEDGER_RECORD_CACHE_MAX_RECORDS,
-  projectRecordCacheGeneration,
   invalidateProjectRecordCache,
-  beginRecordsRequest,
-  finishRecordsRequest,
+  updateCachedRecord,
   disposeRecords,
-} = useLedgerRecords(ledgerContext, { draftRows, ledgerSort, ledgerFilters });
+  loadRecords,
+  buildRecordQuery,
+} = useLedgerRecords(ledgerContext, { draftRows, ledgerSort, ledgerFilters }, () => ({
+  ledgerHistory,
+  ledgerRangeSettings,
+  showLockedRecords: () => showLockedRecords.value,
+  loadBatchSize: () => loadBatchSize.value,
+  pendingLedgerRangeApplication,
+  cancelLedgerRangeRefresh: () => cancelLedgerRangeRefresh(),
+  scheduleLedgerRangeRefresh: (projectId: string) => scheduleLedgerRangeRefresh(projectId),
+  savingIds: () => savingIds.value,
+  hasDirtyLedgerChanges: () => hasDirtyLedgerChanges(),
+  editingGridCell: () => editingGridCell.value,
+  clearAllCellSaveStates,
+  fieldErrors,
+  findReplacePreview,
+  focusRecordId,
+  activeGridCell,
+  gridSelectionAnchor: () => gridSelectionAnchor.value,
+  gridCellRange: () => gridCellRange.value,
+  selectedGridCellKeys: () => selectedGridCellKeys.value,
+  captureGridIdentity,
+  restoreGridIdentity,
+  selectedGridCellPositions,
+  replaceGridCellSelection,
+  clearGridCellSelection,
+  selectedRecords,
+  selectedRecordIds,
+  selectedRecordCache,
+  clearRecordSelection,
+  rememberAll,
+  clearBottomScrollTimers,
+  clearSelectionsAfterLedgerViewChange,
+  refreshTableLayout,
+  scrollToFocusedRecord,
+  scrollTableToBottomOnce,
+}));
 const {
   activeGridCell,
   gridCellRange,
@@ -469,7 +503,6 @@ const {
   records,
   fields,
   tableRows,
-  tableRowIndexById,
   fieldById,
   recordSelection: {
     selectedRecords,
@@ -480,7 +513,7 @@ const {
   isDraft: (record) => isDraft(record),
   persistDraft: (record) => persistDraft(record),
   replaceRecord,
-  invalidateProjectRecordCache,
+  updateCachedRecord,
   scheduleLedgerRangeRefresh: (projectId) => scheduleLedgerRangeRefresh(projectId),
 });
 const {
@@ -1195,8 +1228,8 @@ const {
   commitActiveEdit: () => {
     if (editingGridCell.value) void finishGridCellEdit(true, false);
   },
-  focusCell: (position) => {
-    void focusGridCell(position);
+  focusCell: (position, options) => {
+    void focusGridCell(position, options);
   },
   dragThreshold: pointerDragThreshold,
 });
@@ -1425,17 +1458,18 @@ function gridFillPreviewValue(rowIndex: number, columnIndex: number): string | n
     : null;
 }
 
+/** 属性选择器引号内仅需转义反斜杠与双引号；不依赖 jsdom 未实现的 CSS.escape。 */
+function cssAttrValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
 function gridEditorRoot(position: GridCellPosition): HTMLElement | null {
   const root = ledgerTableCardRef.value;
   if (!root) return null;
   const rowId = tableRows.value[position.rowIndex]?.id;
   if (!rowId) return null;
-  const fieldIndex = String(position.columnIndex);
-  return (
-    [...root.querySelectorAll<HTMLElement>("[data-row-id][data-field-index]")].find(
-      (element) =>
-        element.dataset.rowId === rowId && element.dataset.fieldIndex === fieldIndex,
-    ) ?? null
+  return root.querySelector<HTMLElement>(
+    `[data-row-id="${cssAttrValue(rowId)}"][data-field-index="${position.columnIndex}"]`,
   );
 }
 
@@ -1451,10 +1485,16 @@ function clearGridEditorTextSelection(editor: HTMLElement | null): void {
   window.getSelection()?.removeAllRanges();
 }
 
-async function focusGridCell(position: GridCellPosition): Promise<void> {
+async function focusGridCell(
+  position: GridCellPosition,
+  options: { scroll?: boolean } = {},
+): Promise<void> {
   if (!tableRows.value.length || !fields.value.length) return;
   const nextPosition = clampGridCell(position);
-  activeGridCell.value = nextPosition;
+  // clamp 恒返新对象；焦点格未变时跳过赋值，避免无谓的全表重绘。
+  if (!sameGridCell(activeGridCell.value, nextPosition)) {
+    activeGridCell.value = nextPosition;
+  }
   suppressGridFocusReset = true;
   await nextTick();
   const editor = gridEditorRoot(nextPosition);
@@ -1467,7 +1507,7 @@ async function focusGridCell(position: GridCellPosition): Promise<void> {
     : editor;
   if (focusTarget) {
     focusTarget.focus({ preventScroll: true });
-    editor?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    if (options.scroll !== false) editor?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }
   window.setTimeout(() => {
     suppressGridFocusReset = false;
@@ -1727,7 +1767,9 @@ function handleGridFocusOut(event: FocusEvent): void {
 function handleGridFocusIn(event: FocusEvent): void {
   const cell = gridCellFromElement(event.target);
   if (!cell) return;
-  activeGridCell.value = cell;
+  // focus() 同步派发 focusin，而 gridCellFromElement 恒返新对象；焦点格未变时
+  // 跳过赋值，避免 gridCellClassName 对 activeGridCell 的依赖触发一次无谓的全表重绘。
+  if (!sameGridCell(activeGridCell.value, cell)) activeGridCell.value = cell;
   if (!suppressGridFocusReset && !isGridCellEditing(cell)) {
     if (!isGridCellSelected(cell)) selectGridCell(cell);
     if (event.target === gridEditorRoot(cell)) void focusGridCell(cell);
@@ -2254,14 +2296,10 @@ function handleGridKeydown(event: KeyboardEvent): void {
     }
     return;
   }
-  const cell = gridCellFromElement(event.target);
-  if (!cell) return;
-  activeGridCell.value = cell;
-
-  if ((event.ctrlKey || event.metaKey) && !event.altKey) {
-    const key = event.key.toLowerCase();
-    const shortcutMode =
-      event.key === "Enter"
+  const key = event.key.toLowerCase();
+  const shortcutMode =
+    (event.ctrlKey || event.metaKey) && !event.altKey
+      ? event.key === "Enter"
         ? "same"
         : key === "d"
           ? "down"
@@ -2269,20 +2307,27 @@ function handleGridKeydown(event: KeyboardEvent): void {
             ? "right"
             : event.key === ";"
               ? "today"
-              : null;
-    if (shortcutMode) {
-      event.preventDefault();
-      event.stopPropagation();
-      const run = () => runGridShortcutFill(cell, shortcutMode);
-      if (isGridCellEditing(cell)) {
-        void finishGridCellEdit(true, false).then((saved) => {
-          if (saved) run();
-        });
-      } else {
-        run();
-      }
-      return;
+              : null
+      : null;
+  // 虚拟滚动可能已把焦点单元格卸载出 DOM，keydown 的 target 落在渲染单元格之外；
+  // 填充快捷键此时回退到状态层的活动单元格，与上方复制/剪切分支的处理保持一致。
+  const cell = gridCellFromElement(event.target)
+    ?? (shortcutMode && !nativeGridClipboardTarget(event.target) ? activeGridCell.value : null);
+  if (!cell) return;
+  activeGridCell.value = cell;
+
+  if (shortcutMode) {
+    event.preventDefault();
+    event.stopPropagation();
+    const run = () => runGridShortcutFill(cell, shortcutMode);
+    if (isGridCellEditing(cell)) {
+      void finishGridCellEdit(true, false).then((saved) => {
+        if (saved) run();
+      });
+    } else {
+      run();
     }
+    return;
   }
 
   if (isGridCellEditing(cell)) {
@@ -3172,206 +3217,6 @@ async function handleHistoryReplayError(
   }
 }
 
-async function loadRecords(
-  projectId = activeProjectId.value,
-  options: {
-    showLoading?: boolean;
-    preserveHistory?: boolean;
-    preserveSelection?: boolean;
-    stabilizeTable?: boolean;
-    preferCache?: boolean;
-    deferForPendingEdits?: boolean;
-  } = {},
-): Promise<boolean> {
-  if (!options.preserveHistory) ledgerHistory.clear();
-  if (!projectId) {
-    records.value = [];
-    recordTotal.value = 0;
-    loadedRecordCount.value = 0;
-    return true;
-  }
-  const showLoading = options.showLoading ?? true;
-  let retryRangeRefresh = false;
-  const request = beginRecordsRequest();
-  const currentQuery = buildRecordQuery(projectId);
-  cancelLedgerRangeRefresh();
-  const currentQueryKey = ledgerRecordQueryKey(currentQuery);
-  const queryCacheGeneration = projectRecordCacheGeneration(projectId);
-  const cacheHit = options.preferCache
-    && ledgerRecordCache.isFresh(currentQueryKey)
-    ? ledgerRecordCache.get(currentQueryKey)
-    : null;
-  loadedRecordCount.value = cacheHit?.snapshot.records.length ?? 0;
-  if (showLoading && !cacheHit) loading.value = true;
-  try {
-    let loaded: ProjectRecord[] = [];
-    let total = 0;
-    if (cacheHit) {
-      total = cacheHit.snapshot.total;
-      loaded = cacheHit.snapshot.records;
-    } else {
-      const page = await queryAllRecordBatches(
-        currentQuery,
-        request.controller.signal,
-        (loadedCount, nextTotal) => {
-          if (!request.isCurrent() || projectId !== activeProjectId.value) return;
-          loadedRecordCount.value = loadedCount;
-          recordTotal.value = nextTotal;
-        },
-      );
-      if (projectRecordCacheGeneration(projectId) !== queryCacheGeneration) {
-        retryRangeRefresh = Boolean(options.deferForPendingEdits);
-        return false;
-      }
-      total = page.total;
-      loaded = page.items;
-      if (loaded.length <= LEDGER_RECORD_CACHE_MAX_RECORDS) {
-        ledgerRecordCache.set(currentQueryKey, projectId, { records: loaded, total });
-      } else {
-        ledgerRecordCache.invalidateProject(projectId);
-      }
-    }
-    if (!request.isCurrent() || projectId !== activeProjectId.value) return false;
-    if (pendingLedgerRangeApplication.value && currentQueryKey !== ledgerRecordQueryKey(buildRecordQuery(projectId))) {
-      retryRangeRefresh = true;
-      return false;
-    }
-    if (options.deferForPendingEdits && (editingGridCell.value || savingIds.value.size || hasDirtyLedgerChanges())) {
-      retryRangeRefresh = true;
-      return false;
-    }
-    const stabilizeTable = options.stabilizeTable || pendingLedgerRangeApplication.value;
-    if (pendingLedgerRangeApplication.value) {
-      clearBottomScrollTimers();
-      clearSelectionsAfterLedgerViewChange();
-      focusRecordId.value = "";
-      findReplacePreview.value = null;
-    }
-    const preserveGridSelection = options.preserveSelection && tableProjectId.value === projectId;
-    const activeIdentity = preserveGridSelection ? captureGridIdentity(activeGridCell.value) : null;
-    const anchorIdentity = preserveGridSelection ? captureGridIdentity(gridSelectionAnchor.value) : null;
-    const rangeIdentities = preserveGridSelection && gridCellRange.value
-      ? { anchor: captureGridIdentity(gridCellRange.value.anchor), focus: captureGridIdentity(gridCellRange.value.focus) }
-      : null;
-    records.value = loaded;
-    pendingLedgerRangeApplication.value = false;
-    if (ledgerRangeSettings.value.mode !== "all" && options.preserveSelection) {
-      const visibleIds = new Set(loaded.map((record) => record.id));
-      selectedRecordIds.value = new Set([...selectedRecordIds.value].filter((id) => visibleIds.has(id)));
-      for (const id of selectedRecordCache.keys()) {
-        if (!visibleIds.has(id)) selectedRecordCache.delete(id);
-      }
-    }
-    recordTotal.value = total;
-    loadedRecordCount.value = loaded.length;
-    tableProjectId.value = projectId;
-    if (preserveGridSelection) {
-      const positions = selectedGridCellPositions();
-      const active = restoreGridIdentity(activeIdentity) ?? positions[0] ?? null;
-      const anchor = restoreGridIdentity(anchorIdentity) ?? active;
-      const rangeAnchor = restoreGridIdentity(rangeIdentities?.anchor ?? null);
-      const rangeFocus = restoreGridIdentity(rangeIdentities?.focus ?? null);
-      let range: GridCellRange | null = null;
-      if (rangeAnchor && rangeFocus) {
-        const candidate = { anchor: rangeAnchor, focus: rangeFocus };
-        const rectangle = gridCellPositionsForRange(candidate);
-        if (
-          rectangle.length === positions.length
-          && rectangle.every((position) => selectedGridCellKeys.value.has(gridCellKey(position)))
-        ) range = candidate;
-      }
-      if (active) replaceGridCellSelection(positions, active, anchor ?? active, range);
-      else {
-        activeGridCell.value = null;
-        clearGridCellSelection();
-      }
-    } else {
-      activeGridCell.value = null;
-      clearGridCellSelection();
-    }
-    fieldErrors.value = {};
-    clearAllCellSaveStates();
-    selectedRecords.value = [];
-    if (!options.preserveSelection) clearRecordSelection();
-    rememberAll();
-    const requestIsCurrent = () => (
-      request.isCurrent()
-      && projectId === activeProjectId.value
-    );
-    if (stabilizeTable) await refreshTableLayout(requestIsCurrent);
-    else await nextTick();
-    if (!requestIsCurrent()) return false;
-    if (options.preserveSelection && selectedRecordIds.value.size) {
-      records.value.forEach((record) => {
-        if (selectedRecordIds.value.has(record.id)) {
-          selectedRecordCache.set(record.id, record);
-        }
-      });
-      selectedRecords.value = records.value.filter((record) => selectedRecordIds.value.has(record.id));
-    }
-    const scrolledToFocus = await scrollToFocusedRecord(requestIsCurrent);
-    if (stabilizeTable && !scrolledToFocus) {
-      await scrollTableToBottomOnce(requestIsCurrent);
-    }
-    return true;
-  } catch (error) {
-    if (!request.isCurrent()) return false;
-    ElMessage.error(error instanceof Error ? error.message : "台账读取失败");
-    return false;
-  } finally {
-    finishRecordsRequest(request);
-    if (retryRangeRefresh) scheduleLedgerRangeRefresh(projectId);
-  }
-}
-
-function buildRecordQuery(
-  projectId = activeProjectId.value,
-  view: {
-    filters?: LedgerFilterMap;
-    sort?: LedgerSortState;
-    includeDisplayRange?: boolean;
-  } = {},
-): RecordComplexQuery {
-  const filters = view.filters ?? ledgerFilters.value;
-  const sort = view.sort === undefined ? ledgerSort.value : view.sort;
-  const fieldFilters: RecordFieldFilter[] = [];
-  Object.entries(filters).forEach(([fieldId, filter]) => {
-    if (!filter) return;
-    if (filter.kind === "text") {
-      fieldFilters.push({ field_id: fieldId, operator: "contains", value: filter.value });
-      return;
-    }
-    if (filter.kind === "options") {
-      if (filter.values.length === 1 && filter.values[0] === "") {
-        fieldFilters.push({ field_id: fieldId, operator: "is_empty" });
-        return;
-      }
-      fieldFilters.push({ field_id: fieldId, operator: "in", values: filter.values });
-      return;
-    }
-    fieldFilters.push({
-      field_id: fieldId,
-      operator: "date_between",
-      start: filter.start || null,
-      end: filter.end || null,
-    });
-  });
-  return {
-    project_id: projectId,
-    ...(view.includeDisplayRange === false ? {} : resolveLedgerRecordRange(ledgerRangeSettings.value)),
-    include_locked: showLockedRecords.value,
-    field_filters: fieldFilters,
-    sort: sort
-      ? {
-          field_id: sort.fieldId,
-          direction: sort.order === "descending" ? "desc" : "asc",
-        }
-      : null,
-    limit: loadBatchSize.value,
-    offset: 0,
-  };
-}
-
 async function ensureProjectLoaded(projectId: string): Promise<void> {
   if (activeProjectId.value !== projectId) {
     activeProjectId.value = projectId;
@@ -3925,13 +3770,9 @@ async function openQuickEntry(): Promise<void> {
     .filter((field) => field.is_core || !field.hidden)
     .sort((left, right) => left.sort_order - right.sort_order)
     .map((field) => field.id);
-  const pinnedFieldIds = project.fields
-    .filter((field) => field.system_key === "experiment_date" || field.system_key === "status")
-    .map((field) => field.id);
   const context = {
     projectId: project.id,
     selectedFieldIds,
-    pinnedFieldIds,
   };
   const bridge = desktopBridge();
   if (bridge) {
@@ -3947,7 +3788,6 @@ async function openQuickEntry(): Promise<void> {
     query: {
       project: context.projectId,
       fields: context.selectedFieldIds.join(","),
-      pinned: context.pinnedFieldIds.join(","),
     },
   }).href;
   window.open(
@@ -4052,6 +3892,166 @@ function handleHeaderResize(
   queue.request(width);
 }
 
+/**
+ * 一次网格粘贴/填充的运行时上下文：计划阶段（目标解析、草稿补建）
+ * 的产物加上并发防线快照，供提交与校验面板两个阶段共享。
+ */
+interface PasteExecutionContext {
+  projectId: string;
+  operationLabel: string;
+  viewIsCurrent: () => boolean;
+  committableDrafts: Array<{ record: LedgerRow; snapshot: ProjectRecord }>;
+  batchPreview: Awaited<ReturnType<typeof previewCellBatch>> | null;
+  existingChanges: RecordCellChange[];
+  cellVersions: Record<string, number>;
+  rollbackSnapshots: Map<string, ValidationCellRollbackSnapshot>;
+  appendedDraftIds: Set<string>;
+  changedCells: number;
+  skippedLocked: number;
+}
+
+async function commitPasteChanges(
+  context: PasteExecutionContext,
+  acceptWarnings: boolean,
+): Promise<void> {
+  const {
+    projectId, operationLabel, viewIsCurrent, committableDrafts, batchPreview,
+    existingChanges, cellVersions, changedCells, skippedLocked,
+  } = context;
+  if (acceptWarnings && !viewIsCurrent()) throw new Error("项目已切换，请重新执行该操作");
+  let batchResult: RecordCellBatchCommitResult | null = null;
+  committableDrafts.forEach(({ snapshot }) => setSaving(snapshot.id, true));
+  try {
+    if (batchPreview) {
+      batchResult = await commitCellBatch(
+        batchPreview.token,
+        acceptWarnings,
+        committableDrafts.length > 0,
+      );
+    }
+  } finally {
+    committableDrafts.forEach(({ snapshot }) => setSaving(snapshot.id, false));
+  }
+  if (batchResult) {
+    invalidateProjectRecordCache(projectId);
+    if (!ledgerDisposed) {
+      if (committableDrafts.length) {
+        pushHistory(`${operationLabel}台账数据`, batchResult.before, batchResult.after, projectId);
+      } else {
+        pushCellHistory(`${operationLabel}台账数据`, batchResult.changes, projectId);
+      }
+    }
+  }
+  if (!viewIsCurrent()) return;
+  const completedKeys = new Set(
+    existingChanges
+      .map((change) => persistedKey(change.record_id, change.field_id))
+      .filter((key) => (peekCellSaveVersion(key) ?? 0) === cellVersions[key]),
+  );
+  batchResult?.records.forEach((record) =>
+    replaceRecordPreservingPending(record, completedKeys),
+  );
+  completedKeys.forEach((key) => {
+    const [recordId = "", fieldId = ""] = key.split(":");
+    if (recordId && fieldId) setCellSaveState(recordId, fieldId, { status: "saved" });
+  });
+
+  let committedDraftRecords: ProjectRecord[] = [];
+  const committedAnchoredDraft = committableDrafts.some(
+    ({ record }) => Boolean(record._insertAnchorId),
+  );
+  if (committableDrafts.length) {
+    committedDraftRecords = reconcileCommittedPaste(
+      committableDrafts,
+      batchResult?.created_record_ids ?? [],
+      batchResult?.records ?? [],
+    ) ?? [];
+    const pendingSaves = committedDraftRecords.flatMap((record) => fields.value.flatMap((field) => {
+      const editing = editingGridSnapshot.value;
+      if (editing?.rowId === record.id && editing.fieldId === field.id) return [];
+      return cellSaveStates.value.get(persistedKey(record.id, field.id))?.status === "dirty"
+        ? [saveField(record, field)]
+        : [];
+    }));
+    await Promise.all(pendingSaves);
+    if (!viewIsCurrent()) return;
+    if (!committedDraftRecords.length && batchResult?.created_record_ids.length) {
+      await loadRecords(projectId, { showLoading: false, preserveHistory: true });
+    }
+    const hasPendingEdits = committedDraftRecords.some((record) => fields.value.some((field) => {
+      const status = cellSaveStates.value.get(persistedKey(record.id, field.id))?.status;
+      return status === "dirty" || status === "saving" || status === "error";
+    }));
+    if (committedDraftRecords.length && committedAnchoredDraft && !hasPendingEdits) {
+      await loadRecords(projectId, { showLoading: false, preserveHistory: true });
+    }
+  }
+  if (!viewIsCurrent()) return;
+  if (batchResult || committedDraftRecords.length) {
+    scheduleLedgerRangeRefresh(projectId);
+    ElMessage.success(`已${operationLabel} ${changedCells} 个单元格`);
+  } else if (changedCells) {
+    ElMessage.success(`已${operationLabel} ${changedCells} 个单元格，填写病理号后将自动保存`);
+  }
+  if (skippedLocked) ElMessage.info(`已跳过 ${skippedLocked} 个锁定单元格`);
+}
+
+/** 校验门禁分支：错误阻断、警告需确认；取消时回滚全部写入与补建的草稿行。 */
+function openPasteValidationGate(
+  context: PasteExecutionContext,
+  allIssues: Awaited<ReturnType<typeof previewCellBatch>>["issues"],
+  errors: typeof allIssues,
+  warnings: typeof allIssues,
+): void {
+  const {
+    projectId, operationLabel, viewIsCurrent, batchPreview,
+    existingChanges, cellVersions, rollbackSnapshots, appendedDraftIds, skippedLocked,
+  } = context;
+  const prompt = errors.length
+    ? {
+        title: "无法保存",
+        outcomeText: "本次更改尚未保存，请按提示调整后重试。",
+        cancelText: "返回修改",
+        continueText: "",
+      }
+    : buildValidationPromptCopy(warnings, {
+        context: "batch",
+        cancelBehavior: "discard",
+        operationLabel,
+      });
+  openValidationPanel(
+    {
+      token: "",
+      projectId,
+      ...prompt,
+      label: `${operationLabel}台账数据`,
+      issues: allIssues,
+      affectedCount: batchPreview?.affected_count ?? 0,
+      skippedLocked: (batchPreview?.skipped_locked ?? 0) + skippedLocked,
+      cellKeys: [...rollbackSnapshots.keys()],
+      cellVersions,
+      canContinue: !errors.length,
+    },
+    errors.length
+      ? undefined
+      : {
+          action: () => commitPasteChanges(context, true),
+          cancel: () => {
+            if (!viewIsCurrent()) return;
+            rollbackValidationCells([...rollbackSnapshots.values()], cellVersions);
+            removeDraftRows(appendedDraftIds);
+            ElMessage.info(`已取消${operationLabel}，并恢复操作前的内容`);
+          },
+        },
+  );
+  existingChanges.forEach((change) => {
+    setCellSaveState(change.record_id, change.field_id, {
+      status: errors.length ? "error" : "dirty",
+      message: errors[0]?.message ?? "等待警告确认",
+    });
+  });
+}
+
 async function pasteGrid(
   event: ClipboardEvent | null,
   startRowIndex: number,
@@ -4074,99 +4074,58 @@ async function pasteGrid(
   // pending "add record" scroll or a newly-created draft row must not move
   // the table to the bottom while the paste is being committed.
   clearBottomScrollTimers();
-  const lines = exactCells ? [] : text.replace(/\r/g, "").split("\n");
-  if (lines.at(-1) === "") lines.pop();
-  const matrix = lines.map((line) => line.split("\t"));
-  const entries: GridPasteEntry[] =
-    exactCells ??
-    matrix.flatMap((rowValues, rowOffset) =>
-      rowValues.map((value, columnOffset) => ({ rowOffset, columnOffset, value })),
-    );
+  const entries = exactCells ?? parsePasteEntries(text);
   if (!entries.length) return [];
-  const changedDraftRows = new Map<string, { record: LedgerRow }>();
+  const rowCountBeforeAppend = tableRows.value.length;
   const rollbackSnapshots = new Map<string, ValidationCellRollbackSnapshot>();
   const draftIdsBeforePaste = new Set(draftRows.value.map((record) => record.id));
-  let appendedDraftIds = new Set<string>();
+  const changedDraftRows = new Map<string, { record: LedgerRow }>();
   const existingChanges: RecordCellChange[] = [];
-  const changedPositions: GridCellPosition[] = [];
-  const changedPositionKeys = new Set<string>();
-  let skippedLocked = 0;
   let changedCells = 0;
-
   try {
-    const maxRowOffset = Math.max(...entries.map((entry) => entry.rowOffset), 0);
-    const missingRows = startRowIndex + maxRowOffset + 1 - tableRows.value.length;
-    for (let index = 0; index < missingRows; index += 1) appendDraftRow(false);
-    appendedDraftIds = new Set(
+    for (
+      let index = 0;
+      index < countMissingPasteRows(entries, startRowIndex, rowCountBeforeAppend);
+      index += 1
+    ) appendDraftRow(false);
+    const appendedDraftIds = new Set(
       draftRows.value
         .filter((record) => !draftIdsBeforePaste.has(record.id))
         .map((record) => record.id),
     );
-    const rows = tableRows.value;
-
-    entries.forEach((entry) => {
-      const targetRowIndex = startRowIndex + entry.rowOffset;
-      const targetColumnIndex = startColumnIndex + entry.columnOffset;
-      const record = rows[targetRowIndex];
-      if (!record) return;
-      const field = fields.value[targetColumnIndex];
-      if (!field || targetColumnIndex < 0 || targetRowIndex < 0) return;
-      const position = { rowIndex: targetRowIndex, columnIndex: targetColumnIndex };
-      const positionKey = `${targetRowIndex}:${targetColumnIndex}`;
-      if (!changedPositionKeys.has(positionKey)) {
-        changedPositionKeys.add(positionKey);
-        changedPositions.push(position);
-      }
-      if (record.locked) {
-        skippedLocked += 1;
-        return;
-      }
-      const value = exactCells ? entry.value : entry.value.trim();
-      const expectedValue = valueFor(record, field);
-      const key = persistedKey(record.id, field.id);
+    const resolved = resolvePasteTargets(
+      entries,
+      startRowIndex,
+      startColumnIndex,
+      tableRows.value,
+      fields.value,
+      { exact: Boolean(exactCells) },
+    );
+    resolved.targets.forEach((target) => {
+      const key = persistedKey(target.record.id, target.field.id);
       if (!rollbackSnapshots.has(key)) {
-        rollbackSnapshots.set(key, captureValidationCellRollback(record, field));
+        rollbackSnapshots.set(key, captureValidationCellRollback(target.record, target.field));
       }
-      if (!isDraft(record)) {
+      if (!isDraft(target.record)) {
         existingChanges.push({
-          record_id: record.id,
-          field_id: field.id,
-          value,
-          expected_value: expectedValue,
+          record_id: target.record.id,
+          field_id: target.field.id,
+          value: target.value,
+          expected_value: target.expectedValue,
         });
-        setCellSaveState(record.id, field.id, { status: "saving" });
+        setCellSaveState(target.record.id, target.field.id, { status: "saving" });
       }
-      setValue(record, field, value);
-      if (isDraft(record)) {
-        changedDraftRows.set(record.id, {
-          record,
+      setValue(target.record, target.field, target.value);
+      if (isDraft(target.record)) {
+        changedDraftRows.set(target.record.id, {
+          record: target.record,
         });
       }
       changedCells += 1;
     });
-
     const committableDrafts = [...changedDraftRows.values()].filter(
       ({ record }) => record.pathology_number.trim() && !savingIds.value.has(record.id),
     ).map((entry) => ({ ...entry, snapshot: snapshotRecord(entry.record) }));
-    const batchNewRecords: RecordBatchNewRecord[] = committableDrafts.map(({ record }) => ({
-      client_id: record.id,
-      pathology_number: record.pathology_number.trim(),
-      block_number: record.block_number?.trim() || null,
-      status: record.status,
-      experiment_date: record.experiment_date ? normalizeDateInput(record.experiment_date) : null,
-      experiment_number: record.experiment_number?.trim() || null,
-      values: Object.fromEntries(
-        (currentProject.value?.fields ?? [])
-          .filter((field) => !field.is_core)
-          .map((field) => [field.id, (record.values[field.id] ?? "").trim()]),
-      ),
-      ...(record._insertAnchorId && record._insertPlacement === "before"
-        ? { insert_before_record_id: record._insertAnchorId }
-        : {}),
-      ...(record._insertAnchorId && record._insertPlacement === "after"
-        ? { insert_after_record_id: record._insertAnchorId }
-        : {}),
-    }));
     const cellKeys = [...rollbackSnapshots.keys()];
     const cellVersions = Object.fromEntries(
       cellKeys.map((key) => [key, peekCellSaveVersion(key) ?? 0]),
@@ -4174,8 +4133,15 @@ async function pasteGrid(
     let batchPreview: Awaited<ReturnType<typeof previewCellBatch>> | null = null;
     committableDrafts.forEach(({ snapshot }) => setSaving(snapshot.id, true));
     try {
-      if (existingChanges.length || batchNewRecords.length) {
-        batchPreview = await previewCellBatch(projectId, existingChanges, batchNewRecords);
+      if (existingChanges.length || committableDrafts.length) {
+        batchPreview = await previewCellBatch(
+          projectId,
+          existingChanges,
+          buildBatchNewRecords(
+            committableDrafts.map(({ record }) => record),
+            currentProject.value?.fields ?? [],
+          ),
+        );
       }
     } finally {
       committableDrafts.forEach(({ snapshot }) => setSaving(snapshot.id, false));
@@ -4183,135 +4149,27 @@ async function pasteGrid(
     const allIssues = batchPreview?.issues ?? [];
     const errors = allIssues.filter((issue) => issue.severity === "error");
     const warnings = allIssues.filter((issue) => issue.severity === "warning");
-
-    const commitPasteChanges = async (acceptWarnings: boolean): Promise<void> => {
-      if (acceptWarnings && !viewIsCurrent()) throw new Error("项目已切换，请重新执行该操作");
-      let batchResult: RecordCellBatchCommitResult | null = null;
-      committableDrafts.forEach(({ snapshot }) => setSaving(snapshot.id, true));
-      try {
-        if (batchPreview) {
-          batchResult = await commitCellBatch(
-            batchPreview.token,
-            acceptWarnings,
-            committableDrafts.length > 0,
-          );
-        }
-      } finally {
-        committableDrafts.forEach(({ snapshot }) => setSaving(snapshot.id, false));
-      }
-      if (batchResult) {
-        invalidateProjectRecordCache(projectId);
-        if (!ledgerDisposed) {
-          if (committableDrafts.length) {
-            pushHistory(`${operationLabel}台账数据`, batchResult.before, batchResult.after, projectId);
-          } else {
-            pushCellHistory(`${operationLabel}台账数据`, batchResult.changes, projectId);
-          }
-        }
-      }
-      if (!viewIsCurrent()) return;
-      const completedKeys = new Set(
-        existingChanges
-          .map((change) => persistedKey(change.record_id, change.field_id))
-          .filter((key) => (peekCellSaveVersion(key) ?? 0) === cellVersions[key]),
-      );
-      batchResult?.records.forEach((record) =>
-        replaceRecordPreservingPending(record, completedKeys),
-      );
-      completedKeys.forEach((key) => {
-        const [recordId = "", fieldId = ""] = key.split(":");
-        if (recordId && fieldId) setCellSaveState(recordId, fieldId, { status: "saved" });
-      });
-
-      let committedDraftRecords: ProjectRecord[] = [];
-      const committedAnchoredDraft = committableDrafts.some(
-        ({ record }) => Boolean(record._insertAnchorId),
-      );
-      if (committableDrafts.length) {
-        committedDraftRecords = reconcileCommittedPaste(
-          committableDrafts,
-          batchResult?.created_record_ids ?? [],
-          batchResult?.records ?? [],
-        ) ?? [];
-        const pendingSaves = committedDraftRecords.flatMap((record) => fields.value.flatMap((field) => {
-          const editing = editingGridSnapshot.value;
-          if (editing?.rowId === record.id && editing.fieldId === field.id) return [];
-          return cellSaveStates.value.get(persistedKey(record.id, field.id))?.status === "dirty"
-            ? [saveField(record, field)]
-            : [];
-        }));
-        await Promise.all(pendingSaves);
-        if (!viewIsCurrent()) return;
-        if (!committedDraftRecords.length && batchResult?.created_record_ids.length) {
-          await loadRecords(projectId, { showLoading: false, preserveHistory: true });
-        }
-        const hasPendingEdits = committedDraftRecords.some((record) => fields.value.some((field) => {
-          const status = cellSaveStates.value.get(persistedKey(record.id, field.id))?.status;
-          return status === "dirty" || status === "saving" || status === "error";
-        }));
-        if (committedDraftRecords.length && committedAnchoredDraft && !hasPendingEdits) {
-          await loadRecords(projectId, { showLoading: false, preserveHistory: true });
-        }
-      }
-      if (!viewIsCurrent()) return;
-      if (batchResult || committedDraftRecords.length) {
-        scheduleLedgerRangeRefresh(projectId);
-        ElMessage.success(`已${operationLabel} ${changedCells} 个单元格`);
-      } else if (changedCells) {
-        ElMessage.success(`已${operationLabel} ${changedCells} 个单元格，填写病理号后将自动保存`);
-      }
-      if (skippedLocked) ElMessage.info(`已跳过 ${skippedLocked} 个锁定单元格`);
+    const context: PasteExecutionContext = {
+      projectId,
+      operationLabel,
+      viewIsCurrent,
+      committableDrafts,
+      batchPreview,
+      existingChanges,
+      cellVersions,
+      rollbackSnapshots,
+      appendedDraftIds,
+      changedCells,
+      skippedLocked: resolved.skippedLocked,
     };
 
     if (errors.length || warnings.length) {
       if (!viewIsCurrent()) return [];
-      const prompt = errors.length
-        ? {
-            title: "无法保存",
-            outcomeText: "本次更改尚未保存，请按提示调整后重试。",
-            cancelText: "返回修改",
-            continueText: "",
-          }
-        : buildValidationPromptCopy(warnings, {
-            context: "batch",
-            cancelBehavior: "discard",
-            operationLabel,
-          });
-      openValidationPanel(
-        {
-          token: "",
-          projectId,
-          ...prompt,
-          label: `${operationLabel}台账数据`,
-          issues: allIssues,
-          affectedCount: batchPreview?.affected_count ?? 0,
-          skippedLocked: (batchPreview?.skipped_locked ?? 0) + skippedLocked,
-          cellKeys,
-          cellVersions,
-          canContinue: !errors.length,
-        },
-        errors.length
-          ? undefined
-          : {
-              action: () => commitPasteChanges(true),
-              cancel: () => {
-                if (!viewIsCurrent()) return;
-                rollbackValidationCells([...rollbackSnapshots.values()], cellVersions);
-                removeDraftRows(appendedDraftIds);
-                ElMessage.info(`已取消${operationLabel}，并恢复操作前的内容`);
-              },
-            },
-      );
-      existingChanges.forEach((change) => {
-        setCellSaveState(change.record_id, change.field_id, {
-          status: errors.length ? "error" : "dirty",
-          message: errors[0]?.message ?? "等待警告确认",
-        });
-      });
-      return changedPositions;
+      openPasteValidationGate(context, allIssues, errors, warnings);
+      return resolved.changedPositions;
     }
 
-    await commitPasteChanges(false);
+    await commitPasteChanges(context, false);
     if (!viewIsCurrent()) return [];
     if (allIssues.length) {
       openValidationPanel({
@@ -4324,13 +4182,13 @@ async function pasteGrid(
         continueText: "",
         issues: allIssues,
         affectedCount: batchPreview?.affected_count ?? 0,
-        skippedLocked: (batchPreview?.skipped_locked ?? 0) + skippedLocked,
+        skippedLocked: (batchPreview?.skipped_locked ?? 0) + resolved.skippedLocked,
         cellKeys,
         cellVersions,
         canContinue: false,
       });
     }
-    return changedPositions;
+    return resolved.changedPositions;
   } catch (error) {
     if (!viewIsCurrent()) return [];
     await loadRecords(projectId, { showLoading: false, preserveHistory: true, preserveSelection: true });

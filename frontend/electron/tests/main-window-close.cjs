@@ -90,7 +90,7 @@ function fixture({ choices = [0, 0], busy = false, saveFails = false } = {}) {
   const api = context.module.exports;
   api.registerDesktopHandlers();
   api.createMainWindow();
-  api.createQuickEntryWindow({ projectId: "p1", selectedFieldIds: [], pinnedFieldIds: [] });
+  api.createQuickEntryWindow({ projectId: "p1", selectedFieldIds: [] });
   windows.forEach((window) => handlers.get("gene-ledger:close-guard-ready")({ sender: window.contents, senderFrame: window.contents.mainFrame }));
   return { app, windows, calls, handlers, settle: async () => { for (let i = 0; i < 4; i += 1) await new Promise(setImmediate); } };
 }

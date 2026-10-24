@@ -64,7 +64,6 @@ describe("quick entry field settings", () => {
       projects: {
         "project-1": {
           selectedFieldIds: ["pathology", "pathology", 42],
-          pinnedFieldIds: "date",
         },
         broken: null,
       },
@@ -73,7 +72,6 @@ describe("quick entry field settings", () => {
       projects: {
         "project-1": {
           selectedFieldIds: ["pathology"],
-          pinnedFieldIds: [],
           fieldWidth: 160,
           quickCreateFieldWidth: 320,
           fontSize: 14,
@@ -88,12 +86,11 @@ describe("quick entry field settings", () => {
     });
   });
 
-  it("keeps pathology selected and removes stale pinned fields", () => {
+  it("keeps pathology selected and drops unknown fields", () => {
     expect(resolveQuickEntryProjectSettings(
       fields,
       {
         selectedFieldIds: ["hidden", "removed"],
-        pinnedFieldIds: ["hidden", "pathology", "removed"],
         fieldWidth: 999,
         quickCreateFieldWidth: 150,
         fontSize: 99,
@@ -102,7 +99,6 @@ describe("quick entry field settings", () => {
       },
     )).toEqual({
       selectedFieldIds: ["hidden", "pathology"],
-      pinnedFieldIds: ["hidden"],
       fieldWidth: 600,
       quickCreateFieldWidth: 160,
       fontSize: 20,
@@ -118,10 +114,8 @@ describe("quick entry field settings", () => {
   it("uses current-view defaults before the user has saved a dedicated selection", () => {
     expect(resolveQuickEntryProjectSettings(fields, undefined, {
       selectedFieldIds: ["pathology", "number"],
-      pinnedFieldIds: ["number"],
     })).toEqual({
       selectedFieldIds: ["pathology", "number"],
-      pinnedFieldIds: ["number"],
       fieldWidth: 160,
       quickCreateFieldWidth: 320,
       fontSize: 14,
@@ -137,10 +131,8 @@ describe("quick entry field settings", () => {
   it("respects an explicitly empty current-view selection while retaining mandatory fields", () => {
     expect(resolveQuickEntryProjectSettings(fields, undefined, {
       selectedFieldIds: [],
-      pinnedFieldIds: [],
     })).toEqual({
       selectedFieldIds: ["pathology"],
-      pinnedFieldIds: [],
       fieldWidth: 160,
       quickCreateFieldWidth: 320,
       fontSize: 14,
@@ -164,6 +156,7 @@ describe("quick entry field settings", () => {
 
   it("migrates v4 settings without changing the existing field order or dimensions", () => {
     const migrated = normalizeQuickEntrySettings({ version: 4, projects: {
+      // v4 文档里可能残留 pinnedFieldIds（已废弃）：静默忽略而非报错。
       p: { selectedFieldIds: ["custom", "pathology", "date"], pinnedFieldIds: ["date"], fieldWidth: 410 },
     } });
     expect(migrated.version).toBe(5);

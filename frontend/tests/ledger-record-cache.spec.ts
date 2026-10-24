@@ -96,4 +96,22 @@ describe("LedgerRecordCache", () => {
     expect(cache.get("a")).toBeNull();
     expect(cache.size).toBe(1);
   });
+
+  it("updates a record in place without touching other entries or freshness", () => {
+    let now = 0;
+    const cache = new LedgerRecordCache({ now: () => now });
+    cache.set("a", "project-a", { records: [record("1"), record("2")], total: 2 });
+    cache.set("b", "project-b", { records: [record("b", "project-b")], total: 1 });
+
+    cache.updateRecord("project-a", { ...record("2"), values: { field: "saved" } });
+
+    const entryA = cache.get("a");
+    expect(entryA?.snapshot.records.map((item) => item.values.field)).toEqual(["1", "saved"]);
+    // 其他项目不受影响；新鲜期不被延长（过期节奏保持原样）。
+    expect(cache.get("b")?.snapshot.records[0]?.values.field).toBe("b");
+    now += 60_000;
+    expect(cache.isFresh("a")).toBe(false);
+    // 缓存中没有的记录是安全 no-op。
+    expect(() => cache.updateRecord("project-a", record("missing"))).not.toThrow();
+  });
 });

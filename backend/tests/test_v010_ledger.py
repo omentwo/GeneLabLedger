@@ -1466,3 +1466,44 @@ def test_single_cell_update_requires_confirmation_for_duplicate_pathology(
     )
     assert accepted.status_code == 200, accepted.text
     assert accepted.json()["record"]["pathology_number"] == "DUP-SOURCE"
+
+
+def test_single_cell_no_op_save_returns_null_change_without_a_second_audit(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    project_id = seeded_projects["TB"]["id"]
+    field = create_custom_field(client, project_id, label="原值备注")
+    record = create_record(client, project_id, "CELL-NOOP", values={field["id"]: "same"})
+
+    def cell_commit_audit_count() -> int:
+        items = client.get("/api/audit-logs").json()["items"]
+        return sum(1 for item in items if item["action"] == "record.cell.commit")
+
+    before = cell_commit_audit_count()
+    response = client.put(
+        f"/api/records/{record['id']}/cell",
+        json={"field_id": field["id"], "value": "same", "expected_value": "same"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["change"] is None
+    assert cell_commit_audit_count() == before
+
+
+def test_single_cell_update_rejects_a_field_from_another_project(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    project_id = seeded_projects["TB"]["id"]
+    record = create_record(client, project_id, "CELL-CROSS")
+
+    created = client.post("/api/projects", json={"name": "跨项目单格校验"}).json()
+    other_field = create_custom_field(client, created["id"], label="别家备注")
+
+    response = client.put(
+        f"/api/records/{record['id']}/cell",
+        json={"field_id": other_field["id"], "value": "越权写入"},
+    )
+    assert response.status_code == 404
+    assert "表头不存在" in response.json()["detail"]
+    assert client.get(f"/api/records/{record['id']}").json()["values"].get(other_field["id"]) is None

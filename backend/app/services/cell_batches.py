@@ -631,12 +631,17 @@ def commit_cell_batch(
     preview = _claim_preview(token, accept_warnings=accept_warnings)
     try:
         begin_immediate_write(session)
-        return _commit_claimed_cell_batch(
-            session,
-            preview=preview,
-            accept_warnings=accept_warnings,
-            include_snapshots=include_snapshots,
-        )
+        try:
+            return _commit_claimed_cell_batch(
+                session,
+                preview=preview,
+                accept_warnings=accept_warnings,
+                include_snapshots=include_snapshots,
+            )
+        except HTTPException:
+            # 与单格路径一致：失败分支 raise 前回滚，尽早释放写锁。
+            session.rollback()
+            raise
     finally:
         _release_preview_claim(token)
 
@@ -658,92 +663,107 @@ def commit_single_cell(
     """
 
     begin_immediate_write(session)
-    record = session.scalar(
-        select(ProjectRecord)
-        .where(ProjectRecord.id == record_id)
-        .options(
-            selectinload(ProjectRecord.project),
-            selectinload(ProjectRecord.values),
+    try:
+        record = session.scalar(
+            select(ProjectRecord)
+            .where(ProjectRecord.id == record_id)
+            .options(
+                selectinload(ProjectRecord.project),
+                selectinload(ProjectRecord.values),
+            )
         )
-    )
-    if not record:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="台账记录不存在")
-    field = session.get(FieldDefinition, field_id, options=[selectinload(FieldDefinition.options)])
-    if not field or field.project_id != record.project_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="表头不存在")
-    if record.locked:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="记录已锁定，不能修改",
-        )
-    current = current_cell_value(record, field)
-    if expected_value is not None and expected_value != current:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="单元格内容已变化，请刷新后重试",
-        )
+        if not record:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="台账记录不存在")
+        field = session.get(FieldDefinition, field_id, options=[selectinload(FieldDefinition.options)])
+        if not field or field.project_id != record.project_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="表头不存在")
+        if record.locked:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="记录已锁定，不能修改",
+            )
+        current = current_cell_value(record, field)
+        if expected_value is not None and expected_value != current:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="单元格内容已变化，请刷新后重试",
+            )
 
-    normalized, issues = validate_field_value(field, value)
-    errors = [issue for issue in issues if issue.severity == "error"]
-    if errors:
-        # 结构化返回，前端可直接渲染"无法保存"面板，不必再发一次 preview。
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={
-                "code": "validation_error",
-                "message": "；".join(dict.fromkeys(issue.message for issue in errors)),
-                "issues": [
-                    {
-                        "record_id": record.id,
-                        "field_id": field.id,
-                        "severity": issue.severity,
-                        "message": issue.message,
-                    }
-                    for issue in errors
-                ],
-            },
-        )
+        normalized, issues = validate_field_value(field, value)
+        errors = [issue for issue in issues if issue.severity == "error"]
+        if errors:
+            # 结构化返回，前端可直接渲染"无法保存"面板，不必再发一次 preview。
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "code": "validation_error",
+                    "message": "；".join(dict.fromkeys(issue.message for issue in errors)),
+                    "issues": [
+                        {
+                            "record_id": record.id,
+                            "field_id": field.id,
+                            "severity": issue.severity,
+                            "message": issue.message,
+                        }
+                        for issue in errors
+                    ],
+                },
+            )
 
-    warnings: list[dict[str, str]] = []
-    if field.system_key == "pathology_number":
-        warnings = _duplicate_pathology_issues(
+        warnings: list[dict[str, str]] = []
+        if field.system_key == "pathology_number":
+            warnings = _duplicate_pathology_issues(
+                session,
+                record.project_id,
+                [StoredCellChange(record.id, field.id, normalized, current)],
+                [],
+            )
+        if warnings and not accept_warnings:
+            # The client falls back to the preview/commit pair to show its
+            # confirmation panel, so the warning payload is machine readable.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "duplicate_warning",
+                    "message": "病理号重复，请确认后继续",
+                    "warnings": warnings,
+                },
+            )
+
+        if normalized == current:
+            return {"record": record_dict(record), "change": None}
+
+        if field.is_core:
+            _apply_core_value(record, field, normalized)
+        else:
+            _apply_custom_values(record, {field.id: normalized})
+        audit(
             session,
-            record.project_id,
-            [StoredCellChange(record.id, field.id, normalized, current)],
-            [],
-        )
-    if warnings and not accept_warnings:
-        # The client falls back to the preview/commit pair to show its
-        # confirmation panel, so the warning payload is machine readable.
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "duplicate_warning",
-                "message": "病理号重复，请确认后继续",
-                "warnings": warnings,
+            "record.cell.commit",
+            "project_record",
+            record.id,
+            {
+                "project_id": record.project_id,
+                "field_id": field.id,
+                "before": current,
+                "after": normalized,
             },
         )
-
-    if normalized == current:
-        return {"record": record_dict(record), "change": None}
-
-    if field.is_core:
-        _apply_core_value(record, field, normalized)
-    else:
-        _apply_custom_values(record, {field.id: normalized})
-    audit(
-        session,
-        "record.cell.commit",
-        "project_record",
-        record.id,
-        {
-            "project_id": record.project_id,
-            "field_id": field.id,
-            "before": current,
-            "after": normalized,
-        },
-    )
-    session.commit()
+        session.commit()
+    except IntegrityError as error:
+        # 与批量路径（_commit_claimed_cell_batch）一致：唯一约束冲突返回 409
+        # 而不是 500。当前写路径在 BEGIN IMMEDIATE 内先读后写，实际不可达；
+        # 加索引或出现第二个写入进程时兜底。
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="单元格保存冲突，请刷新后重试",
+        ) from error
+    except HTTPException:
+        # BEGIN IMMEDIATE 已持有 SQLite 写锁：各校验失败分支在 raise 前先
+        # 回滚释放，避免拼装错误载荷期间阻塞其他写入。
+        session.rollback()
+        raise
 
     refreshed = session.scalar(
         select(ProjectRecord)

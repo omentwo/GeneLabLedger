@@ -64,7 +64,6 @@ export interface WindowCloseRequest {
 export interface QuickEntryOpenContext {
   projectId: string;
   selectedFieldIds: string[];
-  pinnedFieldIds: string[];
 }
 
 export interface ClipboardFollowContext {

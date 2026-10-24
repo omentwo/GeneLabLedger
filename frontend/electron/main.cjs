@@ -412,7 +412,6 @@ function normalizeQuickEntryContext(payload) {
     projectId:
       typeof payload?.projectId === "string" ? payload.projectId.trim().slice(0, 160) : "",
     selectedFieldIds: normalizeIdList(payload?.selectedFieldIds),
-    pinnedFieldIds: normalizeIdList(payload?.pinnedFieldIds),
   };
 }
 
@@ -420,7 +419,6 @@ function rendererRoutePath(context) {
   const params = new URLSearchParams();
   if (context.projectId) params.set("project", context.projectId);
   if (context.selectedFieldIds.length) params.set("fields", context.selectedFieldIds.join(","));
-  if (context.pinnedFieldIds.length) params.set("pinned", context.pinnedFieldIds.join(","));
   const query = params.toString();
   return `/quick-entry${query ? `?${query}` : ""}`;
 }
