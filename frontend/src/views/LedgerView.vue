@@ -4,13 +4,10 @@ import {
   ArrowRight,
   ArrowUp,
   ArrowDown,
-  Download,
   Lock,
   Minus,
   Plus,
   Settings2 as Setting,
-  Undo2,
-  Redo2,
 } from "@lucide/vue";
 import {
   ElMessage,
@@ -127,6 +124,7 @@ import LedgerExportPanel from "@/components/ledger/LedgerExportPanel.vue";
 import LedgerHighlightDialog, { type HighlightMode } from "@/components/ledger/LedgerHighlightDialog.vue";
 import LedgerSelectionBar from "@/components/ledger/LedgerSelectionBar.vue";
 import LedgerFindReplaceDialog from "@/components/ledger/LedgerFindReplaceDialog.vue";
+import LedgerCommandCard from "@/components/ledger/LedgerCommandCard.vue";
 import { logError } from "@/utils/logger";
 import { registerWindowCloseGuard } from "@/utils/windowCloseGuard";
 import {
@@ -5016,36 +5014,46 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="page-stack ledger-page">
-    <section class="page-card ledger-command-card">
-      <header class="ledger-workspace-heading" aria-label="台账工具栏">
-        <div class="ledger-workspace-actions" role="toolbar" aria-label="台账常用操作">
-          <el-button
-            class="ledger-history-button"
-            size="small"
-            :icon="Undo2"
-            text
-            :disabled="!canUndoHistory"
-            :loading="historyBusy"
-            title="撤销"
-            @click="undoLedger"
-          >撤销</el-button>
-          <el-button
-            class="ledger-history-button"
-            size="small"
-            :icon="Redo2"
-            text
-            :disabled="!canRedoHistory"
-            :loading="historyBusy"
-            title="恢复"
-            @click="redoLedger"
-          >恢复</el-button>
-          <span class="ledger-toolbar-divider" aria-hidden="true" />
-          <el-button size="small" :icon="Plus" type="primary" plain @click="appendDraftRow">
-            新增记录
-          </el-button>
-          <el-button size="small" :icon="Plus" @click="openQuickEntry">快速录入</el-button>
-        </div>
-        <div
+    <LedgerCommandCard
+      :can-undo="canUndoHistory"
+      :can-redo="canRedoHistory"
+      :history-busy="historyBusy"
+      v-model:show-locked="showLockedRecords"
+      v-model:more-visible="moreActionsVisible"
+      :column-tools-open="columnToolsVisible"
+      :has-cell-selection="hasGridCellSelection"
+      :busy="loading"
+      :native-preview-loading="nativePreviewLoading"
+      :native-preview-available="nativeEngineAvailable('auto')"
+      :word-available="nativeEngineAvailable('word')"
+      :wps-available="nativeEngineAvailable('wps')"
+      :engine-label="nativeEngineLabel()"
+      v-model:preview-engine="previewEngine"
+      v-model:preview-scope="previewScope"
+      v-model:range-mode="ledgerRangeDraft.mode"
+      v-model:range-months="ledgerRangeDraft.months"
+      v-model:range-count="ledgerRangeDraft.count"
+      v-model:range-include-undated="ledgerRangeDraft.includeUndated"
+      v-model:range-include-future="ledgerRangeDraft.includeFuture"
+      :months-max="LEDGER_RANGE_MONTHS_MAX"
+      :count-max="LEDGER_RANGE_COUNT_MAX"
+      :range-dates="ledgerRangeDates"
+      :range-saving="ledgerRangeSaving"
+      @undo="undoLedger"
+      @redo="redoLedger"
+      @add-record="appendDraftRow"
+      @open-quick-entry="openQuickEntry"
+      @locked-visibility-change="handleLockedVisibilityChange"
+      @toggle-export="exportVisible = !exportVisible"
+      @reorder="openReorderDialog"
+      @find-replace="openFindReplace()"
+      @toggle-column-tools="toggleColumnTools"
+      @best-fit-all="bestFitAllColumns($event)"
+      @manage-projects="managerVisible = true"
+      @save-preview-engine="savePreviewEngineSetting"
+      @open-native="openLedgerNative"
+      @save-range="saveLedgerRangeSettings"
+    >        <div
           class="ledger-cell-editor-bar"
           :class="{
             'is-expanded': ledgerCellEditorExpanded,
@@ -5095,123 +5103,7 @@ onBeforeUnmount(() => {
             <ArrowDown v-else :size="15" aria-hidden="true" />
           </button>
         </div>
-        <el-checkbox
-          v-model="showLockedRecords"
-          class="ledger-locked-visibility"
-          @change="handleLockedVisibilityChange"
-        >显示锁定记录</el-checkbox>
-        <div class="ledger-workspace-actions" role="toolbar" aria-label="台账导出与更多操作">
-          <el-button size="small" :icon="Download" @click="exportVisible = !exportVisible">
-            导出 Excel
-          </el-button>
-          <el-popover
-            v-model:visible="moreActionsVisible"
-            placement="bottom-end"
-            :width="380"
-            trigger="click"
-            popper-class="ledger-toolbar-popover"
-          >
-            <template #reference>
-              <el-button size="small" :icon="Setting" data-toolbar-action="more">更多</el-button>
-            </template>
-            <div class="ledger-popover-section">
-              <strong class="ledger-popover-title">数据与视图</strong>
-              <div class="ledger-popover-action-grid">
-                <el-button @click="moreActionsVisible = false; openReorderDialog()">按日期重排</el-button>
-                <el-button @click="moreActionsVisible = false; openFindReplace()">查找替换</el-button>
-                <el-button
-                  :icon="Setting"
-                  :type="columnToolsVisible ? 'primary' : undefined"
-                  @click="moreActionsVisible = false; toggleColumnTools()"
-                >排序/筛选</el-button>
-                <el-button @click="moreActionsVisible = false; bestFitAllColumns($event)">最佳列宽</el-button>
-                <el-button
-                  :icon="Setting"
-                  class="ledger-manage-project-action"
-                  @click="moreActionsVisible = false; managerVisible = true"
-                >管理项目与表头</el-button>
-              </div>
-            </div>
-            <div class="ledger-popover-section ledger-native-open-section">
-              <strong class="ledger-popover-title">使用 Excel/WPS 打开</strong>
-              <div class="ledger-native-open-options">
-                <label>
-                  <span>打开方式</span>
-                  <el-select
-                    v-model="previewEngine"
-                    class="ledger-preview-engine"
-                    aria-label="打开方式"
-                    @change="savePreviewEngineSetting"
-                  >
-                    <el-option label="自动选择" value="auto" />
-                    <el-option label="Microsoft Excel" value="word" :disabled="!nativeEngineAvailable('word')" />
-                    <el-option label="WPS" value="wps" :disabled="!nativeEngineAvailable('wps')" />
-                  </el-select>
-                </label>
-                <label>
-                  <span>打开范围</span>
-                  <el-select v-model="previewScope" class="ledger-preview-scope" aria-label="打开范围">
-                    <el-option label="当前选区" value="selection" :disabled="!hasGridCellSelection" />
-                    <el-option label="当前台账" value="project" />
-                    <el-option label="整本台账" value="all" />
-                  </el-select>
-                </label>
-              </div>
-              <el-button
-                class="ledger-native-open-button"
-                type="primary"
-                plain
-                :loading="nativePreviewLoading"
-                :disabled="!nativeEngineAvailable(previewEngine)"
-                @click="moreActionsVisible = false; openLedgerNative()"
-              >使用 {{ nativeEngineLabel() }} 打开</el-button>
-            </div>
-            <div class="ledger-popover-section">
-              <strong class="ledger-popover-title">记录显示范围</strong>
-              <el-radio-group v-model="ledgerRangeDraft.mode" aria-label="记录显示范围" :disabled="ledgerRangeSaving">
-                <el-radio value="all">全部显示</el-radio>
-                <el-radio value="months">近几个月</el-radio>
-                <el-radio value="count">末尾几条</el-radio>
-              </el-radio-group>
-              <template v-if="ledgerRangeDraft.mode === 'months'">
-                <label class="ledger-range-input">
-                  <span>近几个月</span>
-                  <el-input-number
-                    v-model="ledgerRangeDraft.months"
-                    :min="1" :max="LEDGER_RANGE_MONTHS_MAX" :precision="0"
-                    :disabled="ledgerRangeSaving" controls-position="right" aria-label="显示月数"
-                  />
-                </label>
-                <p class="page-description">按台账“日期”：{{ ledgerRangeDates }}</p>
-                <el-checkbox v-model="ledgerRangeDraft.includeUndated" :disabled="ledgerRangeSaving">
-                  包含日期为空的记录
-                </el-checkbox>
-                <el-checkbox v-model="ledgerRangeDraft.includeFuture" :disabled="ledgerRangeSaving">
-                  包含未来日期的记录
-                </el-checkbox>
-                <p v-if="!ledgerRangeDraft.includeFuture" class="page-description">
-                  关闭后，日期晚于今天的记录会被移出当前视图。
-                </p>
-              </template>
-              <template v-else-if="ledgerRangeDraft.mode === 'count'">
-                <label class="ledger-range-input">
-                  <span>显示条数</span>
-                  <el-input-number
-                    v-model="ledgerRangeDraft.count"
-                    :min="1" :max="LEDGER_RANGE_COUNT_MAX" :precision="0"
-                    :disabled="ledgerRangeSaving" controls-position="right" aria-label="显示条数"
-                  />
-                </label>
-                <p class="page-description">按当前排序，从台账底部向上取记录，保留原显示顺序。</p>
-              </template>
-              <el-button type="primary" plain :loading="ledgerRangeSaving" :disabled="loading" @click="saveLedgerRangeSettings">
-                保存显示范围
-              </el-button>
-            </div>
-          </el-popover>
-        </div>
-      </header>
-    </section>
+    </LedgerCommandCard>
 
     <LedgerExportPanel
       v-model:visible="exportVisible"
@@ -5746,48 +5638,6 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.ledger-range-input {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin: 10px 0;
-}
-
-.ledger-workspace-heading {
-  box-sizing: border-box;
-  display: flex;
-  min-width: 0;
-  min-height: 52px;
-  align-items: center;
-  gap: var(--app-space-2);
-  overflow-x: auto;
-  padding: var(--app-space-2) var(--app-space-2);
-  scrollbar-width: thin;
-}
-
-.ledger-workspace-heading::-webkit-scrollbar {
-  height: 4px;
-}
-
-.ledger-workspace-actions {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: var(--app-space-1);
-  white-space: nowrap;
-}
-
-.ledger-workspace-actions :deep(.el-button + .el-button) {
-  margin-left: 0;
-}
-
-.ledger-workspace-actions :deep(.el-button) {
-  min-height: 32px;
-  flex: 0 0 auto;
-  font-size: 14px;
-}
-
 .ledger-page > .page-card {
   min-width: 0;
   border-color: var(--app-border);
@@ -6251,22 +6101,6 @@ onBeforeUnmount(() => {
 .ledger-column-tools-actions {
   justify-content: flex-end;
   margin-top: var(--app-space-3);
-}
-
-.ledger-locked-visibility {
-  flex: 0 0 auto;
-  margin-right: 0;
-  white-space: nowrap;
-}
-
-.ledger-locked-visibility :deep(.el-checkbox__label) {
-  padding-left: var(--app-space-1);
-  font-size: 14px;
-}
-
-.ledger-history-button {
-  width: auto;
-  min-width: 58px;
 }
 
 :deep(.search-focus-row > td) {
