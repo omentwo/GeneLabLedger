@@ -44,7 +44,10 @@ def _search_filters(project_id: str, payload: LedgerNativePreviewCreate) -> list
     if payload.report_generated is not None:
         filters.append(ProjectRecord.report_generated == payload.report_generated)
     if payload.search and payload.search.strip():
-        search_clause = record_search_filter(payload.search)
+        # 台账表格的搜索匹配项目名（搜索词命中项目名时返回该项目全部行），
+        # 打印预览作为"所见即所得"必须使用同一谓词语义，否则同一筛选
+        # 在表格与打印页返回的行不一致。
+        search_clause = record_search_filter(payload.search, include_project_name=True)
         if search_clause is not None:
             filters.append(search_clause)
     return filters

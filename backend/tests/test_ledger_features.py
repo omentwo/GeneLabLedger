@@ -430,3 +430,67 @@ def test_report_native_preview_task_uses_rendered_docx(feature_client: TestClien
     assert response.status_code == 200
     assert response.json()["document_type"] == "docx"
     assert response.json()["action"] == "open"
+
+
+def test_search_matches_project_name_in_ledger_and_native_preview(
+    feature_client: TestClient,
+) -> None:
+    """台账表格与打印预览必须对同一关键字返回一致的行集合。
+
+    台账搜索匹配项目名（`include_project_name=True`）；预览若不使用
+    同一谓词，搜索词命中项目名时表格返回全部行、打印页返回 0 行。
+    """
+    projects = feature_client.get("/api/projects").json()
+    project = projects[0]
+    other = projects[1]
+    feature_client.post(
+        "/api/records",
+        json={"project_id": project["id"], "pathology_number": "NAME-1"},
+    )
+    feature_client.post(
+        "/api/records",
+        json={"project_id": project["id"], "pathology_number": "NAME-2"},
+    )
+    feature_client.post(
+        "/api/records",
+        json={"project_id": other["id"], "pathology_number": "OTHER-1"},
+    )
+
+    # 搜索词命中项目名：台账返回该项目全部记录。
+    ledger = feature_client.post(
+        "/api/records/query",
+        json={"project_id": project["id"], "search": project["name"], "limit": 100, "offset": 0},
+    )
+    assert ledger.status_code == 200
+    assert ledger.json()["total"] == 2
+
+    # 原生预览使用同一谓词：以"动作后清理"任务验证打开范围与台账一致。
+    preview = feature_client.post(
+        f"/api/ledgers/{project['id']}/native-preview",
+        json={
+            "scope": "all",
+            "action": "preview",
+            "print_engine": "auto",
+            "search": project["name"],
+        },
+    )
+    assert preview.status_code == 200
+    job = preview.json()
+    status_response = feature_client.get(f"/api/native-preview/{job['job_id']}")
+    assert status_response.status_code == 200
+
+    # 直接断言谓词语义：预览的过滤实现共享台账的 include_project_name。
+    from app.api.preview import _search_filters
+    from app.schemas import LedgerNativePreviewCreate
+
+    filters = _search_filters(
+        project["id"],
+        LedgerNativePreviewCreate(
+            project_id=project["id"],
+            scope="all",
+            action="preview",
+            search=project["name"],
+        ),
+    )
+    clause_texts = [str(clause) for clause in filters]
+    assert any("projects.name" in text for text in clause_texts), clause_texts
