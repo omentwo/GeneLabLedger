@@ -4,17 +4,13 @@ import {
   ArrowRight,
   ArrowUp,
   ArrowDown,
-  Brush,
-  Trash2 as Delete,
   Download,
   Lock,
   Minus,
   Plus,
   Settings2 as Setting,
-  LockOpen as Unlock,
   Undo2,
   Redo2,
-  Check,
 } from "@lucide/vue";
 import {
   ElMessage,
@@ -65,9 +61,7 @@ import {
   deleteRecord,
   getRecordsByIds,
   commitCellBatch,
-  commitReplace,
   previewCellBatch,
-  previewReplace,
   FIND_REPLACE_RECORD_LIMIT,
   previewReorderByDate,
   applyReorderByDate,
@@ -77,7 +71,6 @@ import {
   setRecordsHighlight,
   setRecordsReportGenerated,
   updateRecord,
-  updateRecordCell,
   validateNewRecord,
 } from "@/api/records";
 import EditableChoiceInput from "@/components/EditableChoiceInput.vue";
@@ -88,7 +81,6 @@ import { updateField } from "@/api/projects";
 import { useAppStore } from "@/stores/app";
 import {
   cloneLedgerRecord,
-  createLedgerCellHistoryEntry,
   createLedgerHistoryEntry,
   useLedgerHistory,
   type LedgerHistoryEntry,
@@ -106,9 +98,7 @@ import type {
   RecordComplexQuery,
   RecordCreateInput,
   RecordFieldFilter,
-  RecordReplacePreview,
   RecordReorderByDatePreview,
-  RecordValidationIssue,
 } from "@/types/api";
 import type {
   QuickEntryChangedPayload,
@@ -130,6 +120,13 @@ import {
   ledgerCellHorizontalPadding,
 } from "@/utils/ledgerColumnWidth";
 import { desktopBridge } from "@/utils/desktop";
+import LedgerContextMenu from "@/components/ledger/LedgerContextMenu.vue";
+import LedgerValidationDialog from "@/components/ledger/LedgerValidationDialog.vue";
+import LedgerReorderDialog from "@/components/ledger/LedgerReorderDialog.vue";
+import LedgerExportPanel from "@/components/ledger/LedgerExportPanel.vue";
+import LedgerHighlightDialog, { type HighlightMode } from "@/components/ledger/LedgerHighlightDialog.vue";
+import LedgerSelectionBar from "@/components/ledger/LedgerSelectionBar.vue";
+import LedgerFindReplaceDialog from "@/components/ledger/LedgerFindReplaceDialog.vue";
 import { logError } from "@/utils/logger";
 import { registerWindowCloseGuard } from "@/utils/windowCloseGuard";
 import {
@@ -141,7 +138,6 @@ import {
   splitGridCellKey,
   type GridCellPosition,
   type GridCellRange,
-  type GridCellSelectionSnapshot,
   type NormalizedGridRange,
 } from "@/utils/gridSelectionModel";
 import { useLedgerContext } from "@/composables/useLedgerContext";
@@ -151,11 +147,13 @@ import { useGridPointerDrag } from "@/composables/useGridPointerDrag";
 import { useGridFillDrag } from "@/composables/useGridFillDrag";
 import {
   useLedgerCellSaveState,
-  type CellSaveState,
   type CellSaveStatus,
 } from "@/composables/useLedgerCellSaveState";
 import { useLedgerValidationPanel } from "@/composables/useLedgerValidationPanel";
 import { useLedgerGridClipboard } from "@/composables/useLedgerGridClipboard";
+import { useLedgerCellSave, type ValidationCellRollbackSnapshot } from "@/composables/useLedgerCellSave";
+import { useLedgerRangeRefresh } from "@/composables/useLedgerRangeRefresh";
+import { useLedgerFindReplace } from "@/composables/useLedgerFindReplace";
 import {
   LEDGER_GRID_CLIPBOARD_MIME,
   expandLedgerSingleCellPaste,
@@ -172,13 +170,10 @@ import {
 import {
   LatestValuePersistence,
   resolveCreatedRecordRefreshPlan,
-  resolveLedgerCellCompletionAction,
-  resolveLedgerCellEditState,
   shouldApplyLedgerEditCompletion,
 } from "@/utils/ledgerPersistence";
 import {
   buildValidationPromptCopy,
-  isValidationSnapshotCurrent,
 } from "@/utils/validationPrompt";
 import {
   reanchorInsertedDraftGroup,
@@ -245,7 +240,6 @@ const ledgerRangeSettings = ref<LedgerRangeSettings>({ ...DEFAULT_LEDGER_RANGE_S
 const ledgerRangeDraft = ref<LedgerRangeSettings>({ ...DEFAULT_LEDGER_RANGE_SETTINGS });
 const ledgerRangeSaving = ref(false);
 let persistedLedgerRange: unknown = null;
-let pendingLedgerRangeApplication = false;
 const ledgerRangeSummary = computed(() => ledgerRangeLabel(ledgerRangeSettings.value));
 const ledgerRangeDates = computed(() => {
   const range = resolveLedgerRecordRange(ledgerRangeDraft.value);
@@ -282,7 +276,6 @@ type RecordSelectionDragState = {
   lastAppliedIndex: number | null;
   verticalScrollDirection: GridAutoScrollDirection;
 };
-let findReplaceGridSelectionSnapshot: GridCellSelectionSnapshot | null = null;
 const editingGridCell = ref<GridCellPosition | null>(null);
 const editingGridSnapshot = ref<GridCellEditSnapshot | null>(null);
 let gridCellEditFinishPromise: Promise<boolean> | null = null;
@@ -300,18 +293,9 @@ let recordSelectionAnchorId: string | null = null;
 let suppressRecordSelectionClick = false;
 let bottomScrollTimers: number[] = [];
 const historyReplayLoading = ref(false);
-const savingIds = ref(new Set<string>());
 const closeSaving = ref(false);
 const preparingClose = ref(false);
 const quickEntryRefreshInProgress = ref(false);
-type ValidationCellRollbackSnapshot = {
-  key: string;
-  recordId: string;
-  fieldId: string;
-  beforeValue: string;
-  previousSaveState: CellSaveState | null;
-  previousFieldError: string | null;
-};
 const cellSaveStatusLabels: Record<CellSaveStatus | "idle", string> = {
   dirty: "未保存",
   saving: "保存中",
@@ -319,32 +303,12 @@ const cellSaveStatusLabels: Record<CellSaveStatus | "idle", string> = {
   error: "失败",
   idle: "无改动",
 };
-const fieldErrors = ref<Record<string, string>>({});
 const managerVisible = ref(false);
 const templateManagerVisible = ref(false);
 const ledgerLayoutSettings = ref<LedgerLayoutSettingsDocument>(
   normalizeLedgerLayoutSettings(null),
 );
 const columnWidthSaveQueues = new Map<string, LatestValuePersistence<number>>();
-type FindReplaceMode = "find" | "replace";
-const findReplaceVisible = ref(false);
-const findReplaceLoading = ref(false);
-const findReplacePreview = ref<RecordReplacePreview | null>(null);
-const findReplaceScopeCount = ref<number | null>(null);
-const findReplaceScopeLabel = ref("");
-const findReplaceMode = ref<FindReplaceMode>("replace");
-const findReplaceInputRef = ref<{ focus: () => void } | null>(null);
-const findCurrentMatchIndex = ref(-1);
-const FIND_TERM_DEBOUNCE_MS = 250;
-const debouncedFindTerm = ref("");
-let findTermDebounceTimer: number | undefined;
-const findReplaceForm = reactive({
-  fieldId: "",
-  find: "",
-  replacement: "",
-  matchMode: "substring" as "substring" | "whole",
-  caseSensitive: false,
-});
 const previewScope = ref<LedgerPreviewScope>(DEFAULT_LEDGER_PREVIEW_SCOPE);
 const previewEngine = ref<PrintEngine>("auto");
 const previewCapabilities = ref<PreviewCapabilities | null>(null);
@@ -428,106 +392,9 @@ const highlightDialogVisible = ref(false);
 const highlightLoading = ref(false);
 const highlightColor = ref("#fff2cc");
 const highlightTargetIds = ref<string[]>([]);
-type HighlightMode = "record" | "cell";
 type CellHighlightTarget = { recordId: string; fieldId: string };
 const highlightMode = ref<HighlightMode>("record");
 const highlightCellTargets = ref<CellHighlightTarget[]>([]);
-type HighlightColorOption = { label: string; color: string };
-
-const highlightThemeRows: HighlightColorOption[][] = [
-  [
-    { label: "白色", color: "#FFFFFF" },
-    { label: "黑色", color: "#000000" },
-    { label: "浅灰", color: "#E7E6E6" },
-    { label: "深蓝灰", color: "#44546A" },
-    { label: "蓝色", color: "#4472C4" },
-    { label: "橙色", color: "#ED7D31" },
-    { label: "灰色", color: "#A5A5A5" },
-    { label: "黄色", color: "#FFC000" },
-    { label: "浅蓝", color: "#5B9BD5" },
-    { label: "绿色", color: "#70AD47" },
-  ],
-  [
-    { label: "白色 80%", color: "#F2F2F2" },
-    { label: "黑色 50%", color: "#7F7F7F" },
-    { label: "浅灰蓝 80%", color: "#D9E1F2" },
-    { label: "深蓝灰 80%", color: "#D6E4F0" },
-    { label: "蓝色 80%", color: "#D9E2F3" },
-    { label: "橙色 80%", color: "#FCE4D6" },
-    { label: "灰色 80%", color: "#EDEDED" },
-    { label: "黄色 80%", color: "#FFF2CC" },
-    { label: "浅蓝 80%", color: "#DDEBF7" },
-    { label: "绿色 80%", color: "#E2F0D9" },
-  ],
-  [
-    { label: "白色 60%", color: "#E7E6E6" },
-    { label: "黑色 35%", color: "#595959" },
-    { label: "浅灰蓝 60%", color: "#B4C6E7" },
-    { label: "深蓝灰 60%", color: "#B4C6E7" },
-    { label: "蓝色 60%", color: "#B4C6E7" },
-    { label: "橙色 60%", color: "#F8CBAD" },
-    { label: "灰色 60%", color: "#D9D9D9" },
-    { label: "黄色 60%", color: "#FFE699" },
-    { label: "浅蓝 60%", color: "#BDD7EE" },
-    { label: "绿色 60%", color: "#C6E0B4" },
-  ],
-  [
-    { label: "白色 40%", color: "#D9D9D9" },
-    { label: "黑色 25%", color: "#404040" },
-    { label: "浅灰蓝 40%", color: "#8EA9DB" },
-    { label: "深蓝灰 40%", color: "#8EA9DB" },
-    { label: "蓝色 40%", color: "#8EA9DB" },
-    { label: "橙色 40%", color: "#F4B183" },
-    { label: "灰色 40%", color: "#A6A6A6" },
-    { label: "黄色 40%", color: "#FFD966" },
-    { label: "浅蓝 40%", color: "#9DC3E6" },
-    { label: "绿色 40%", color: "#A9D18E" },
-  ],
-  [
-    { label: "白色 20%", color: "#BFBFBF" },
-    { label: "黑色 15%", color: "#262626" },
-    { label: "浅灰蓝 20%", color: "#5B9BD5" },
-    { label: "深蓝灰 20%", color: "#5B9BD5" },
-    { label: "蓝色 20%", color: "#4472C4" },
-    { label: "橙色 20%", color: "#C65911" },
-    { label: "灰色 20%", color: "#7F7F7F" },
-    { label: "黄色 20%", color: "#BF9000" },
-    { label: "浅蓝 20%", color: "#2F75B5" },
-    { label: "绿色 20%", color: "#548235" },
-  ],
-  [
-    { label: "白色 0%", color: "#7F7F7F" },
-    { label: "黑色", color: "#000000" },
-    { label: "浅灰蓝", color: "#44546A" },
-    { label: "深蓝灰", color: "#2F5597" },
-    { label: "蓝色", color: "#2F5597" },
-    { label: "橙色", color: "#843C0C" },
-    { label: "灰色", color: "#595959" },
-    { label: "黄色", color: "#806000" },
-    { label: "浅蓝", color: "#1F4E79" },
-    { label: "绿色", color: "#375623" },
-  ],
-];
-
-const highlightStandardColors: HighlightColorOption[] = [
-  { label: "深红", color: "#C00000" },
-  { label: "红色", color: "#FF0000" },
-  { label: "橙色", color: "#FFC000" },
-  { label: "黄色", color: "#FFFF00" },
-  { label: "浅绿", color: "#92D050" },
-  { label: "绿色", color: "#00B050" },
-  { label: "青色", color: "#00B0F0" },
-  { label: "蓝色", color: "#0070C0" },
-  { label: "深蓝", color: "#002060" },
-  { label: "紫色", color: "#7030A0" },
-];
-
-const highlightPalette = [
-  ...new Set(
-    [...highlightThemeRows.flat(), ...highlightStandardColors].map(({ color }) => color),
-  ),
-];
-const persistedValues = new Map<string, string>();
 /**
  * 已修改但尚未写回服务端的单元格 key（`recordId:fieldId`）。
  *
@@ -536,10 +403,8 @@ const persistedValues = new Map<string, string>();
  * `dirtyLedgerChanges()` 全量扫描生成，因此即使这个集合过期，也只会让
  * 刷新时机略微保守，不会丢失任何修改。
  */
-const dirtyCellKeys = new Set<string>();
 const insertedGroupRegistry: LedgerInsertedGroupRegistry = new Map();
 let draftSequence = 0;
-let rangeRefreshTimer: number | undefined;
 let ledgerDisposed = false;
 let removeQuickEntryChangedListener: (() => void) | undefined;
 let quickEntryRefreshPromise: Promise<void> = Promise.resolve();
@@ -549,6 +414,153 @@ const quickEntryRetryPending = new Map<string, number>();
 const loadBatchSize = computed(() => ledgerDisplaySettings.value.loadBatchSize);
 const selectedRecordIds = ref(new Set<string>());
 const selectedRecordCache = new Map<string, ProjectRecord>();
+
+const ledgerCellSaveState = useLedgerCellSaveState();
+const {
+  cellSaveStates,
+  persistedKey,
+  setCellSaveState,
+  clearCellSaveState,
+  clearAllCellSaveStates,
+  peekCellSaveVersion,
+  dropCellSaveVersion,
+  hasCellSaveInFlight,
+  dropCellSaveInFlight,
+  clearCellSaveInFlight,
+} = ledgerCellSaveState;
+const ledgerValidationPanel = useLedgerValidationPanel({
+  projectId: () => activeProjectId.value,
+  peekCellSaveVersion,
+  commitTokenPanel: async (panel) => {
+    const result = await commitCellBatch(panel.token, true);
+    const completedKeys = new Set(panel.cellKeys);
+    result.records.forEach((record) => replaceRecordPreservingPending(record, completedKeys));
+    panel.cellKeys.forEach((key) => {
+      const [recordId = "", fieldId = ""] = key.split(":");
+      if (recordId && fieldId) setCellSaveState(recordId, fieldId, { status: "saved" });
+    });
+    pushCellHistory(panel.label, result.changes, panel.projectId);
+    ElMessage.success(`已保存 ${new Set(result.changes.map((change) => change.record_id)).size} 条记录`);
+  },
+});
+const {
+  validationPanel,
+  validationCommitLoading,
+  openValidationPanel,
+  dismissValidationPanel,
+  cancelValidationPanel,
+  continueValidationCommit,
+} = ledgerValidationPanel;
+
+const {
+  savingIds,
+  fieldErrors,
+  persistedValues,
+  setSaving,
+  fieldErrorFor,
+  setFieldError,
+  clearFieldError,
+  rememberRecord,
+  rememberAll,
+  setValue,
+  cellSaveStateFor,
+  dirtyLedgerChanges,
+  hasDirtyLedgerChanges,
+  captureValidationCellRollback,
+  rollbackValidationCells,
+  replaceRecordPreservingPending,
+  pushCellHistory,
+  saveField,
+} = useLedgerCellSave({
+  cellSave: ledgerCellSaveState,
+  panel: ledgerValidationPanel,
+  history: ledgerHistory,
+  records,
+  fields,
+  tableRows,
+  tableRowIndexById,
+  fieldById,
+  recordSelection: {
+    selectedRecords,
+    selectedRecordIds,
+    selectedRecordCache,
+  },
+  activeProjectId: () => activeProjectId.value,
+  isDraft,
+  persistDraft: (record) => persistDraft(record),
+  replaceRecord,
+  invalidateProjectRecordCache,
+  scheduleLedgerRangeRefresh: (projectId) => scheduleLedgerRangeRefresh(projectId),
+});
+const {
+  pendingLedgerRangeApplication,
+  scheduleLedgerRangeRefresh,
+  cancelLedgerRangeRefresh,
+} = useLedgerRangeRefresh({
+  isDisposed: () => ledgerDisposed,
+  isRangeSaving: () => ledgerRangeSaving.value,
+  getActiveProjectId: () => activeProjectId.value,
+  isAllMode: () => ledgerRangeSettings.value.mode === "all",
+  isBusy: () => savingIds.value.size > 0 || hasCellSaveInFlight() || loading.value,
+  isBlockedByEdits: () => Boolean(editingGridCell.value) || hasDirtyLedgerChanges(),
+  refresh: (projectId) => {
+    void loadRecords(projectId, {
+      showLoading: false, preserveHistory: true, preserveSelection: true, deferForPendingEdits: true,
+    });
+  },
+});
+
+const {
+  findReplaceVisible,
+  findReplaceLoading,
+  findReplacePreview,
+  findReplaceScopeCount,
+  findReplaceScopeLabel,
+  findReplaceMode,
+  findReplaceInputRef,
+  findReplaceForm,
+  findMatches,
+  findCurrentMatch,
+  findMatchStatus,
+  setFindReplaceMode,
+  openFindReplace,
+  runFindReplacePreview,
+  commitFindReplace,
+  handleFindReplaceInputEnter,
+  navigateFindMatch,
+  cancelFindTermDebounce,
+  focusFindReplaceInput,
+  restoreFindReplaceGridFocus,
+} = useLedgerFindReplace({
+  fields,
+  tableRows,
+  tableRowIndexById,
+  records,
+  selection: {
+    activeGridCell,
+    gridSelectionAnchor,
+    gridCellRange,
+    selectedGridCellKeys,
+    selectGridCell,
+    selectedGridCellPositions,
+  },
+  clampCell: (position) => clampGridCell(position),
+  tableRef,
+  gridEditorRoot,
+  editingGridCell,
+  commitEditThen: () => finishGridCellEdit(true, false),
+  focusCell: (position) => {
+    void focusGridCell(position);
+  },
+  isDraft,
+  getProjectId: () => activeProjectId.value,
+  queryRecordIds: () => queryLedgerRecordIds(buildRecordQuery()),
+  replaceRecord,
+  pushCellHistory: (label, changes, projectId) => pushCellHistory(label, changes, projectId),
+});
+function registerFindReplaceInput(element: { focus: () => void } | null): void {
+  findReplaceInputRef.value = element;
+}
 const recordSelectionScope = ref<RecordSelectionScope>("all");
 let ledgerInitialized = false;
 let projectViewGeneration = 0;
@@ -755,57 +767,6 @@ const ledgerVirtualContentWidth = computed(() =>
   ledgerVirtualColumns.value.reduce((total, column) => total + column.width, 0),
 );
 const selectedCount = computed(() => selectedRecordIds.value.size);
-const findMatches = computed<number[]>(() => {
-  const term = debouncedFindTerm.value;
-  if (
-    !findReplaceVisible.value ||
-    findReplaceMode.value !== "find" ||
-    !term
-  ) return [];
-  const query = findReplaceForm.caseSensitive
-    ? term
-    : term.toLocaleLowerCase();
-  const searchFields = fields.value
-    .map((field, columnIndex) => ({ field, columnIndex }))
-    .filter(({ field }) => !findReplaceForm.fieldId || field.id === findReplaceForm.fieldId);
-  const fieldCount = fields.value.length;
-  if (!fieldCount) return [];
-  const matches: number[] = [];
-  tableRows.value.forEach((row, rowIndex) => {
-    searchFields.forEach(({ field, columnIndex }) => {
-      const value = valueFor(row, field);
-      const candidate = findReplaceForm.caseSensitive ? value : value.toLocaleLowerCase();
-      const matched = findReplaceForm.matchMode === "whole"
-        ? candidate === query
-        : candidate.includes(query);
-      if (matched) {
-        matches.push(rowIndex * fieldCount + columnIndex);
-      }
-    });
-  });
-  return matches;
-});
-const findCurrentMatch = computed(() => {
-  const encodedMatch = findMatches.value[findCurrentMatchIndex.value];
-  const fieldCount = fields.value.length;
-  if (encodedMatch === undefined || !fieldCount) return null;
-  const rowIndex = Math.floor(encodedMatch / fieldCount);
-  const columnIndex = encodedMatch % fieldCount;
-  const row = tableRows.value[rowIndex];
-  const field = fields.value[columnIndex];
-  return row && field
-    ? { rowId: row.id, fieldId: field.id }
-    : null;
-});
-const findMatchStatus = computed(() => {
-  if (!findReplaceForm.find) return "输入内容以查找";
-  const count = findMatches.value.length;
-  if (!count) return "未找到匹配项";
-  const currentIndex = findCurrentMatchIndex.value;
-  return currentIndex >= 0 && currentIndex < count
-    ? String(currentIndex + 1) + " / " + String(count)
-    : "共 " + String(count) + " 个匹配项";
-});
 const gridCellSelectionCount = computed(() => {
   const range = gridCellRange.value;
   if (!range) return selectedGridCellKeys.value.size;
@@ -850,10 +811,6 @@ const contextDeleteRecordCount = computed(() => {
   if (!row) return 0;
   return selectedRecordIds.value.has(row.id) ? Math.max(1, selectedRecordIds.value.size) : 1;
 });
-const contextMenuStyle = computed<CSSProperties>(() => ({
-  left: `${ledgerContextMenu.value?.x ?? 0}px`,
-  top: `${ledgerContextMenu.value?.y ?? 0}px`,
-}));
 const contextSuggestedInsertRowCount = computed(() => {
   const target = ledgerContextMenu.value?.target;
   if (!target) return 1;
@@ -1198,47 +1155,7 @@ const {
   applyFill: applyGridFill,
   dragThreshold: pointerDragThreshold,
 });
-const {
-  cellSaveStates,
-  persistedKey,
-  setCellSaveState,
-  clearCellSaveState,
-  clearAllCellSaveStates,
-  peekCellSaveVersion,
-  nextCellSaveVersion,
-  restoreCellSaveVersion,
-  dropCellSaveVersion,
-  beginCellSave,
-  endCellSave,
-  cellSaveInFlightCount,
-  hasCellSaveInFlight,
-  dropCellSaveInFlight,
-  clearCellSaveInFlight,
-  enqueueRecordSave,
-} = useLedgerCellSaveState();
-const {
-  validationPanel,
-  validationCommitLoading,
-  openValidationPanel,
-  dismissValidationPanel,
-  cancelValidationPanel,
-  hasPendingValidationAction,
-  continueValidationCommit,
-} = useLedgerValidationPanel({
-  projectId: () => activeProjectId.value,
-  peekCellSaveVersion,
-  commitTokenPanel: async (panel) => {
-    const result = await commitCellBatch(panel.token, true);
-    const completedKeys = new Set(panel.cellKeys);
-    result.records.forEach((record) => replaceRecordPreservingPending(record, completedKeys));
-    panel.cellKeys.forEach((key) => {
-      const [recordId = "", fieldId = ""] = key.split(":");
-      if (recordId && fieldId) setCellSaveState(recordId, fieldId, { status: "saved" });
-    });
-    pushCellHistory(panel.label, result.changes, panel.projectId);
-    ElMessage.success(`已保存 ${new Set(result.changes.map((change) => change.record_id)).size} 条记录`);
-  },
-});
+
 const {
   gridCutInProgress,
   gridClipboardSelection,
@@ -1257,7 +1174,7 @@ const {
   loading,
   activeGridCell,
   selectedGridCellPositions,
-  clampCell: clampGridCell,
+  clampCell: (position) => clampGridCell(position),
   cellFromElement: gridCellFromElement,
   cellData: gridCellData,
   isEditingCell: isGridCellEditing,
@@ -1288,34 +1205,6 @@ function clearGridCellEdit(invalidateSession = true): void {
 
 function isGridCellEditing(position: GridCellPosition | null): boolean {
   return sameGridCell(editingGridCell.value, position);
-}
-
-function captureFindReplaceGridSelection(): void {
-  findReplaceGridSelectionSnapshot = {
-    active: activeGridCell.value ? { ...activeGridCell.value } : null,
-    anchor: gridSelectionAnchor.value ? { ...gridSelectionAnchor.value } : null,
-    range: gridCellRange.value
-      ? {
-          anchor: { ...gridCellRange.value.anchor },
-          focus: { ...gridCellRange.value.focus },
-        }
-      : null,
-    selectedKeys: new Set(selectedGridCellKeys.value),
-  };
-}
-
-function restoreFindReplaceGridSelection(): void {
-  const snapshot = findReplaceGridSelectionSnapshot;
-  if (!snapshot) return;
-  selectedGridCellKeys.value = new Set(snapshot.selectedKeys);
-  activeGridCell.value = snapshot.active ? clampGridCell(snapshot.active) : null;
-  gridSelectionAnchor.value = snapshot.anchor ? clampGridCell(snapshot.anchor) : null;
-  gridCellRange.value = snapshot.range
-    ? {
-        anchor: clampGridCell(snapshot.range.anchor),
-        focus: clampGridCell(snapshot.range.focus),
-      }
-    : null;
 }
 
 function gridColumnPositions(fieldIndex: number): GridCellPosition[] {
@@ -1780,7 +1669,6 @@ function handleGridFocusIn(event: FocusEvent): void {
     if (event.target === gridEditorRoot(cell)) void focusGridCell(cell);
   }
 }
-
 
 function gridTableBodyScrollElement(tableElement: HTMLElement): HTMLElement | null {
   return tableElement.querySelector<HTMLElement>(
@@ -2835,98 +2723,6 @@ async function scrollToFocusedRecord(
   return rowIndex >= 0;
 }
 
-function setValue(
-  record: ProjectRecord,
-  field: FieldDefinition,
-  value: string,
-  options: { markDirty?: boolean } = {},
-): void {
-  if (field.system_key === "pathology_number") {
-    record.pathology_number = value;
-  } else if (field.system_key === "block_number") {
-    record.block_number = value || null;
-  } else if (field.system_key === "experiment_date") {
-    record.experiment_date = value || null;
-  } else if (field.system_key === "experiment_number") {
-    record.experiment_number = value || null;
-  } else if (field.system_key === "status") {
-    record.status = value as RecordStatus;
-  } else {
-    record.values[field.id] = value;
-  }
-  clearFieldError(record, field);
-  if (options.markDirty ?? true) {
-    const key = persistedKey(record.id, field.id);
-    nextCellSaveVersion(key);
-    if (validationPanel.value?.cellKeys.includes(key)) dismissValidationPanel();
-    if (isDraft(record) && hasPendingValidationAction() && validationPanel.value?.label === "新增台账记录") {
-      dismissValidationPanel();
-    }
-  }
-  if ((options.markDirty ?? true) && !isDraft(record)) {
-    const key = persistedKey(record.id, field.id);
-    const editState = resolveLedgerCellEditState(
-      valueFor(record, field),
-      persistedValues.get(key) ?? "",
-      cellSaveInFlightCount(key),
-    );
-    if (editState === "clear") {
-      clearCellSaveState(key);
-    } else {
-      setCellSaveState(record.id, field.id, { status: "dirty" });
-    }
-  }
-  if (!isDraft(record)) {
-    const key = persistedKey(record.id, field.id);
-    if (valueFor(record, field) === (persistedValues.get(key) ?? "")) dirtyCellKeys.delete(key);
-    else dirtyCellKeys.add(key);
-  }
-}
-
-function captureValidationCellRollback(
-  record: LedgerRow,
-  field: FieldDefinition,
-): ValidationCellRollbackSnapshot {
-  const key = persistedKey(record.id, field.id);
-  const previousSaveState = cellSaveStates.value.get(key);
-  return {
-    key,
-    recordId: record.id,
-    fieldId: field.id,
-    beforeValue: valueFor(record, field),
-    previousSaveState: previousSaveState ? { ...previousSaveState } : null,
-    previousFieldError: fieldErrors.value[key] ?? null,
-  };
-}
-
-function rollbackValidationCells(
-  snapshots: ValidationCellRollbackSnapshot[],
-  versions: Record<string, number>,
-): void {
-  snapshots.forEach((snapshot) => {
-    const snapshotVersion = versions[snapshot.key];
-    if (
-      snapshotVersion === undefined
-      || !isValidationSnapshotCurrent(snapshotVersion, peekCellSaveVersion(snapshot.key))
-    ) return;
-    const record = tableRows.value.find((item) => item.id === snapshot.recordId);
-    const field = fieldById.value.get(snapshot.fieldId);
-    if (!record || !field) return;
-    setValue(record, field, snapshot.beforeValue, { markDirty: false });
-    restoreCellSaveVersion(snapshot.key, snapshotVersion + 1);
-    if (snapshot.previousFieldError) {
-      setFieldError(record, field, snapshot.previousFieldError);
-    } else {
-      clearFieldError(record, field);
-    }
-    if (snapshot.previousSaveState) {
-      setCellSaveState(record.id, field.id, snapshot.previousSaveState);
-    } else {
-      clearCellSaveState(snapshot.key);
-    }
-  });
-}
-
 function removeDraftRows(recordIds: Set<string>): void {
   if (!recordIds.size) return;
   fields.value.forEach((field) => {
@@ -2950,77 +2746,6 @@ function removeDraftRows(recordIds: Set<string>): void {
   recordIds.forEach((recordId) => setSaving(recordId, false));
 }
 
-function cellSaveStateFor(record: LedgerRow, field: FieldDefinition): CellSaveState | null {
-  return cellSaveStates.value.get(persistedKey(record.id, field.id)) ?? null;
-}
-
-function fieldErrorFor(record: LedgerRow, field: FieldDefinition): string {
-  return fieldErrors.value[persistedKey(record.id, field.id)] ?? "";
-}
-
-function setFieldError(record: LedgerRow, field: FieldDefinition, message: string): void {
-  fieldErrors.value = {
-    ...fieldErrors.value,
-    [persistedKey(record.id, field.id)]: message,
-  };
-}
-
-function clearFieldError(record: LedgerRow, field: FieldDefinition): void {
-  const key = persistedKey(record.id, field.id);
-  if (!(key in fieldErrors.value)) return;
-  const next = { ...fieldErrors.value };
-  delete next[key];
-  fieldErrors.value = next;
-}
-
-function rememberRecord(record: ProjectRecord): void {
-  fields.value.forEach((field) => {
-    const key = persistedKey(record.id, field.id);
-    persistedValues.set(key, valueFor(record, field));
-    dirtyCellKeys.delete(key);
-  });
-}
-
-function rememberAll(): void {
-  persistedValues.clear();
-  dirtyCellKeys.clear();
-  records.value.forEach(rememberRecord);
-}
-
-/**
- * Validate one cell locally before it reaches the server.
- *
- * This used to build a `RecordUpdateInput` payload that every caller discarded,
- * so only the side effects (date normalization and the thrown messages) were
- * ever used.  It now says what it does: validate, normalize, or throw.
- */
-function validateCellInput(
-  record: ProjectRecord,
-  field: FieldDefinition,
-  rawValue: string,
-): void {
-  const value = rawValue.trim();
-  if (field.system_key === "pathology_number") {
-    if (!value) throw new Error("病理号不能为空");
-    return;
-  }
-  if (field.system_key === "experiment_date") {
-    const normalized = normalizeDateInput(value);
-    record.experiment_date = normalized || null;
-    return;
-  }
-  if (field.system_key === "status" && value !== "待实验" && value !== "已完成") {
-    throw new Error("状态只能是“待实验”或“已完成”");
-  }
-}
-
-function setSaving(recordId: string, saving: boolean): void {
-  const next = new Set(savingIds.value);
-  if (saving) next.add(recordId);
-  else next.delete(recordId);
-  savingIds.value = next;
-}
-
 function replaceRecord(updated: ProjectRecord): void {
   invalidateProjectRecordCache(updated.project_id);
   const index = records.value.findIndex((record) => record.id === updated.id);
@@ -3030,96 +2755,6 @@ function replaceRecord(updated: ProjectRecord): void {
   rememberRecord(updated);
   if (selectedRecordIds.value.has(updated.id)) selectedRecordCache.set(updated.id, updated);
   scheduleLedgerRangeRefresh(updated.project_id);
-}
-
-function replaceRecordPreservingPending(
-  updated: ProjectRecord,
-  completedKeys: string | Set<string>,
-): void {
-  const completed =
-    typeof completedKeys === "string" ? new Set([completedKeys]) : completedKeys;
-  const current = records.value.find((record) => record.id === updated.id);
-  rememberRecord(updated);
-  if (!current) {
-    replaceRecord(updated);
-    return;
-  }
-  const merged = cloneLedgerRecord(updated);
-  fields.value.forEach((field) => {
-    const key = persistedKey(updated.id, field.id);
-    if (completed.has(key)) return;
-    const status = cellSaveStates.value.get(key)?.status;
-    if (status === "dirty" || status === "saving" || status === "error") {
-      setValue(merged, field, valueFor(current, field), { markDirty: false });
-    }
-  });
-  const index = records.value.findIndex((record) => record.id === updated.id);
-  if (index >= 0) records.value.splice(index, 1, merged);
-  const selectedIndex = selectedRecords.value.findIndex((record) => record.id === updated.id);
-  if (selectedIndex >= 0) selectedRecords.value.splice(selectedIndex, 1, merged);
-  if (selectedRecordIds.value.has(updated.id)) selectedRecordCache.set(updated.id, merged);
-  invalidateProjectRecordCache(updated.project_id);
-  scheduleLedgerRangeRefresh(updated.project_id);
-}
-
-function scheduleLedgerRangeRefresh(projectId: string): void {
-  if (ledgerDisposed || ledgerRangeSaving.value || projectId !== activeProjectId.value
-    || (ledgerRangeSettings.value.mode === "all" && !pendingLedgerRangeApplication)) return;
-  if (rangeRefreshTimer !== undefined) window.clearTimeout(rangeRefreshTimer);
-  rangeRefreshTimer = window.setTimeout(() => {
-    rangeRefreshTimer = undefined;
-    if (ledgerDisposed || ledgerRangeSaving.value || projectId !== activeProjectId.value
-      || (ledgerRangeSettings.value.mode === "all" && !pendingLedgerRangeApplication)) return;
-    if (savingIds.value.size || hasCellSaveInFlight() || loading.value) {
-      scheduleLedgerRangeRefresh(projectId);
-      return;
-    }
-    if (editingGridCell.value || hasDirtyLedgerChanges()) return;
-    void loadRecords(projectId, {
-      showLoading: false, preserveHistory: true, preserveSelection: true, deferForPendingEdits: true,
-    });
-  }, 100);
-}
-
-function dirtyLedgerChanges(): RecordCellChange[] {
-  return records.value.flatMap((record) => fields.value.flatMap((field) => {
-    const key = persistedKey(record.id, field.id);
-    const before = persistedValues.get(key);
-    const value = valueFor(record, field);
-    return before !== undefined && value !== before
-      ? [{ record_id: record.id, field_id: field.id, value, expected_value: before }]
-      : [];
-  }));
-}
-
-/**
- * 高频路径专用的"是否有未保存修改"判断。
- *
- * `dirtyLedgerChanges()` 需要遍历 records × fields（1 万行 × 20 列就是 20 万次
- * 比较），而范围刷新、编辑前置检查这类调用只关心"有没有"。这里用增量维护的
- * key 集合直接回答，并顺带剔除已经回到原值的过期条目。
- */
-function hasDirtyLedgerChanges(): boolean {
-  if (!dirtyCellKeys.size) return false;
-  const rows = tableRows.value;
-  const rowIndexById = tableRowIndexById.value;
-  for (const key of dirtyCellKeys) {
-    const separator = key.indexOf(":");
-    if (separator < 0) {
-      dirtyCellKeys.delete(key);
-      continue;
-    }
-    const rowIndex = rowIndexById.get(key.slice(0, separator));
-    const field = fieldById.value.get(key.slice(separator + 1));
-    const record = rowIndex === undefined ? undefined : rows[rowIndex];
-    if (!record || !field) {
-      dirtyCellKeys.delete(key);
-      continue;
-    }
-    if (valueFor(record, field) !== (persistedValues.get(key) ?? "")) return true;
-    dirtyCellKeys.delete(key);
-  }
-  return false;
 }
 
 function dirtyLedgerDrafts(): LedgerRow[] {
@@ -3215,35 +2850,6 @@ const removeCloseGuard = registerWindowCloseGuard({
   release: () => { preparingClose.value = false; },
 });
 
-function reconcileCellAfterCompletedSave(
-  recordId: string,
-  fieldId: string,
-  completedVersion: number,
-  recordHistory: boolean,
-): void {
-  const key = persistedKey(recordId, fieldId);
-  const currentRecord = records.value.find((item) => item.id === recordId);
-  const currentField = fields.value.find((item) => item.id === fieldId);
-  if (!currentRecord || !currentField || currentRecord.locked) return;
-  const currentValue = valueFor(currentRecord, currentField);
-  const action = resolveLedgerCellCompletionAction({
-    completedVersion,
-    currentVersion: peekCellSaveVersion(key),
-    currentValue,
-    persistedValue: persistedValues.get(key) ?? "",
-    inFlightCount: cellSaveInFlightCount(key),
-  });
-  if (action === "none") return;
-  if (action === "pending") return;
-  if (action === "clear") {
-    clearFieldError(currentRecord, currentField);
-    clearCellSaveState(key);
-    return;
-  }
-  setCellSaveState(recordId, fieldId, { status: "dirty" });
-  void saveField(currentRecord, currentField, { recordHistory });
-}
-
 function handleTableSelectionChange(rows: ProjectRecord[]): void {
   const visibleIds = new Set(records.value.map((record) => record.id));
   // Off-page rows are accepted only while explicitly retained in our selection.
@@ -3279,26 +2885,6 @@ function pushHistory(
 ): void {
   if (!projectId || (!before.length && !after.length)) return;
   ledgerHistory.push(createLedgerHistoryEntry(projectId, label, before, after));
-}
-
-function pushCellHistory(
-  label: string,
-  changes: RecordCellBatchCommitResult["changes"],
-  projectId = activeProjectId.value,
-): void {
-  if (!projectId || !changes.length) return;
-  ledgerHistory.push(
-    createLedgerCellHistoryEntry(
-      projectId,
-      label,
-      changes.map((change) => ({
-        recordId: change.record_id,
-        fieldId: change.field_id,
-        before: change.before,
-        after: change.after,
-      })),
-    ),
-  );
 }
 
 function reconcileOperationResult(result: {
@@ -3655,268 +3241,6 @@ async function finishPersistedDraft(
   }
 }
 
-async function saveField(
-  record: LedgerRow,
-  field: FieldDefinition,
-  options: { recordHistory?: boolean } = {},
-): Promise<boolean> {
-  const recordHistory = options.recordHistory ?? true;
-  if (isDraft(record)) {
-    if (field.system_key === "experiment_date") {
-      try {
-        const normalized = normalizeDateInput(record.experiment_date ?? "");
-        record.experiment_date = normalized || null;
-        clearFieldError(record, field);
-      } catch (error) {
-        setFieldError(
-          record,
-          field,
-          error instanceof Error ? error.message : "日期格式无效",
-        );
-      }
-      return false;
-    }
-    if (field.system_key === "pathology_number") {
-      return persistDraft(record);
-    }
-    return false;
-  }
-  if (record.locked) return false;
-  const key = persistedKey(record.id, field.id);
-  if (validationPanel.value?.cellKeys.includes(key)) {
-    dismissValidationPanel();
-  }
-  const initialBefore = persistedValues.get(key) ?? "";
-  const current = valueFor(record, field);
-  if (current === initialBefore) {
-    clearFieldError(record, field);
-    if ((cellSaveInFlightCount(key)) > 0) {
-      setCellSaveState(record.id, field.id, { status: "dirty" });
-    } else {
-      clearCellSaveState(key);
-    }
-    return false;
-  }
-  try {
-    validateCellInput(record, field, current);
-    clearFieldError(record, field);
-  } catch (error) {
-    if (field.system_key === "experiment_date") {
-      setFieldError(
-        record,
-        field,
-        error instanceof Error ? error.message : "日期格式无效",
-      );
-    } else {
-        setValue(record, field, initialBefore, { markDirty: false });
-      setCellSaveState(record.id, field.id, {
-        status: "error",
-        message: error instanceof Error ? error.message : "单元格保存失败",
-      });
-      ElMessage.error(error instanceof Error ? error.message : "单元格保存失败");
-    }
-    return false;
-  }
-
-  const version = nextCellSaveVersion(key);
-  beginCellSave(key);
-  setCellSaveState(record.id, field.id, { status: "saving" });
-  setSaving(record.id, true);
-  try {
-    const changes = await enqueueRecordSave(record.id, async () => {
-      const expectedValue = persistedValues.get(key) ?? initialBefore;
-      try {
-        const updated = await updateRecordCell(record.id, {
-          field_id: field.id,
-          value: current,
-          expected_value: expectedValue,
-        });
-        const currentVersion = peekCellSaveVersion(key) === version;
-        replaceRecordPreservingPending(updated.record, currentVersion ? key : new Set<string>());
-        return updated.change ? [updated.change] : [];
-      } catch (error) {
-        // 字段校验失败：直接用接口返回的问题列表渲染面板，不再多发一次预检查。
-        if (apiDetailCode(error) === "validation_error") {
-          const issues = validationIssuesFromError(error);
-          showCellErrorPanel(record, field, issues, key, version);
-          throw new Error(issues[0]?.message ?? "单元格保存失败");
-        }
-        // 需要用户确认的警告（病理号重复）退回两段式，复用同一个确认面板。
-        if (apiDetailCode(error) === "duplicate_warning") {
-          return await saveFieldWithPreview(record, field, current, expectedValue, key, initialBefore, version);
-        }
-        throw error;
-      }
-    });
-    if (peekCellSaveVersion(key) === version) {
-      setCellSaveState(record.id, field.id, { status: "saved" });
-      if (recordHistory && changes.length) {
-        pushCellHistory(`编辑 ${field.label}`, changes, record.project_id);
-      }
-    }
-    return true;
-  } catch (error) {
-    if (peekCellSaveVersion(key) === version) {
-      setCellSaveState(record.id, field.id, {
-        status: "error",
-        message: error instanceof Error ? error.message : "单元格保存失败",
-      });
-    }
-    if (!validationPanel.value) {
-      ElMessage.error(error instanceof Error ? error.message : "单元格保存失败");
-    }
-    return false;
-  } finally {
-    setSaving(record.id, false);
-    endCellSave(key);
-    reconcileCellAfterCompletedSave(record.id, field.id, version, recordHistory);
-  }
-}
-
-
-/**
- * 带确认面板的单格保存（病理号重复警告等场景）。
- *
- * 与原子接口的差别只是"先把预检查结果显示给用户"，提交仍然走同一个
- * cell-batch 通道，因此两条路径的校验规则完全一致。
- */
-async function saveFieldWithPreview(
-  record: LedgerRow,
-  field: FieldDefinition,
-  current: string,
-  expectedValue: string,
-  key: string,
-  initialBefore: string,
-  version: number,
-): Promise<Array<{ record_id: string; field_id: string; before: string; after: string }>> {
-  const preview = await previewCellBatch(record.project_id, [
-    {
-      record_id: record.id,
-      field_id: field.id,
-      value: current,
-      expected_value: expectedValue,
-    },
-  ]);
-  const errors = preview.issues.filter((issue) => issue.severity === "error");
-  const warnings = preview.issues.filter((issue) => issue.severity === "warning");
-  if (errors.length || warnings.length) {
-    const prompt = errors.length
-      ? {
-          title: "无法保存",
-          outcomeText: "当前修改尚未保存，请按提示调整后重试。",
-          cancelText: "返回修改",
-          continueText: "",
-        }
-      : buildValidationPromptCopy(warnings, {
-          context: "edit",
-          cancelBehavior: "discard",
-          originalValue: initialBefore,
-        });
-    openValidationPanel(
-      {
-        token: preview.token,
-        projectId: record.project_id,
-        ...prompt,
-        label: `编辑 ${field.label}`,
-        issues: preview.issues,
-        affectedCount: preview.affected_count,
-        skippedLocked: preview.skipped_locked,
-        cellKeys: [key],
-        cellVersions: { [key]: version },
-        canContinue: !errors.length,
-      },
-      errors.length
-        ? undefined
-        : {
-            cancel: () => {
-              rollbackValidationCells([
-                {
-                  key,
-                  recordId: record.id,
-                  fieldId: field.id,
-                  beforeValue: initialBefore,
-                  previousSaveState: null,
-                  previousFieldError: null,
-                },
-              ], { [key]: version });
-              ElMessage.info("已取消修改并恢复原值");
-            },
-          },
-    );
-    throw new Error(errors[0]?.message ?? "存在警告，请在验证面板中确认后继续");
-  }
-  if (preview.issues.length) {
-    openValidationPanel({
-      token: "",
-      projectId: record.project_id,
-      title: "操作提示",
-      label: `编辑 ${field.label}`,
-      outcomeText: "修改已经通过校验并将继续保存。",
-      cancelText: "我知道了",
-      continueText: "",
-      issues: preview.issues,
-      affectedCount: preview.affected_count,
-      skippedLocked: preview.skipped_locked,
-      cellKeys: [key],
-      cellVersions: { [key]: version },
-      canContinue: false,
-    });
-  }
-  const committed = await commitCellBatch(preview.token);
-  const currentVersion = peekCellSaveVersion(key) === version;
-  committed.records.forEach((updated) =>
-    replaceRecordPreservingPending(updated, currentVersion ? key : new Set<string>()),
-  );
-  return committed.changes;
-}
-
-/** 读取 `ApiError.detail` 里的机器可读错误码（后端 HTTPException.detail）。 */
-function apiDetailCode(error: unknown): string | null {
-  if (!(error instanceof ApiError)) return null;
-  const body = error.detail;
-  if (!body || typeof body !== "object") return null;
-  const inner = (body as { detail?: unknown }).detail;
-  const candidate = inner && typeof inner === "object" ? inner : body;
-  const code = (candidate as { code?: unknown }).code;
-  return typeof code === "string" ? code : null;
-}
-
-/** 从 `validation_error` 响应里取出可直接渲染的问题列表。 */
-function validationIssuesFromError(error: unknown): RecordValidationIssue[] {
-  if (!(error instanceof ApiError) || !error.detail || typeof error.detail !== "object") return [];
-  const inner = (error.detail as { detail?: unknown }).detail;
-  const issues = (inner as { issues?: unknown } | undefined)?.issues;
-  if (!Array.isArray(issues)) return [];
-  return issues.filter((issue): issue is RecordValidationIssue => (
-    Boolean(issue) && typeof issue === "object" && typeof (issue as { message?: unknown }).message === "string"
-  ));
-}
-
-/** 单格保存被服务端拒绝时展示"无法保存"面板（不提供继续按钮）。 */
-function showCellErrorPanel(
-  record: LedgerRow,
-  field: FieldDefinition,
-  issues: RecordValidationIssue[],
-  key: string,
-  version: number,
-): void {
-  openValidationPanel({
-    token: "",
-    projectId: record.project_id,
-    title: "无法保存",
-    label: `编辑 ${field.label}`,
-    outcomeText: "当前修改尚未保存，请按提示调整后重试。",
-    cancelText: "返回修改",
-    continueText: "",
-    issues,
-    affectedCount: issues.length,
-    skippedLocked: 0,
-    cellKeys: [key],
-    cellVersions: { [key]: version },
-    canContinue: false,
-  });
-}
-
 async function loadLedgerDisplaySettings(): Promise<void> {
   try {
     const result = await getSetting<Partial<LedgerDisplaySettings>>(LEDGER_DISPLAY_SETTINGS_KEY);
@@ -4112,8 +3436,7 @@ async function loadRecords(
   let retryRangeRefresh = false;
   const request = beginRecordsRequest();
   const currentQuery = buildRecordQuery(projectId);
-  if (rangeRefreshTimer !== undefined) window.clearTimeout(rangeRefreshTimer);
-  rangeRefreshTimer = undefined;
+  cancelLedgerRangeRefresh();
   const currentQueryKey = ledgerRecordQueryKey(currentQuery);
   const queryCacheGeneration = projectRecordCacheGeneration(projectId);
   const cacheHit = options.preferCache
@@ -4151,7 +3474,7 @@ async function loadRecords(
       }
     }
     if (!request.isCurrent() || projectId !== activeProjectId.value) return false;
-    if (pendingLedgerRangeApplication && currentQueryKey !== ledgerRecordQueryKey(buildRecordQuery(projectId))) {
+    if (pendingLedgerRangeApplication.value && currentQueryKey !== ledgerRecordQueryKey(buildRecordQuery(projectId))) {
       retryRangeRefresh = true;
       return false;
     }
@@ -4159,8 +3482,8 @@ async function loadRecords(
       retryRangeRefresh = true;
       return false;
     }
-    const stabilizeTable = options.stabilizeTable || pendingLedgerRangeApplication;
-    if (pendingLedgerRangeApplication) {
+    const stabilizeTable = options.stabilizeTable || pendingLedgerRangeApplication.value;
+    if (pendingLedgerRangeApplication.value) {
       clearBottomScrollTimers();
       clearSelectionsAfterLedgerViewChange();
       focusRecordId.value = "";
@@ -4173,7 +3496,7 @@ async function loadRecords(
       ? { anchor: captureGridIdentity(gridCellRange.value.anchor), focus: captureGridIdentity(gridCellRange.value.focus) }
       : null;
     records.value = loaded;
-    pendingLedgerRangeApplication = false;
+    pendingLedgerRangeApplication.value = false;
     if (ledgerRangeSettings.value.mode !== "all" && options.preserveSelection) {
       const visibleIds = new Set(loaded.map((record) => record.id));
       selectedRecordIds.value = new Set([...selectedRecordIds.value].filter((id) => visibleIds.has(id)));
@@ -4319,8 +3642,7 @@ async function loadLedgerRangeSettings(): Promise<void> {
 async function saveLedgerRangeSettings(): Promise<void> {
   if (ledgerRangeSaving.value) return;
   ledgerRangeSaving.value = true;
-  if (rangeRefreshTimer !== undefined) window.clearTimeout(rangeRefreshTimer);
-  rangeRefreshTimer = undefined;
+  cancelLedgerRangeRefresh();
   try {
     if (!await finishGridCellEdit(true, false)) return;
     if (dirtyLedgerChanges().length || savingIds.value.size || hasCellSaveInFlight() || loading.value) {
@@ -4332,7 +3654,7 @@ async function saveLedgerRangeSettings(): Promise<void> {
     persistedLedgerRange = nextSettings;
     ledgerRangeSettings.value = nextSettings;
     ledgerRangeDraft.value = { ...nextSettings };
-    pendingLedgerRangeApplication = true;
+    pendingLedgerRangeApplication.value = true;
     ledgerRecordCache.clear();
     if (editingGridCell.value || dirtyLedgerChanges().length || savingIds.value.size || loading.value) {
       ElMessage.success("显示范围已保存，完成当前编辑后应用");
@@ -4349,7 +3671,7 @@ async function saveLedgerRangeSettings(): Promise<void> {
     if (error instanceof ApiError && error.status === 409) await loadLedgerRangeSettings();
   } finally {
     ledgerRangeSaving.value = false;
-    if (pendingLedgerRangeApplication) scheduleLedgerRangeRefresh(activeProjectId.value);
+    if (pendingLedgerRangeApplication.value) scheduleLedgerRangeRefresh(activeProjectId.value);
   }
 }
 
@@ -4615,14 +3937,6 @@ function openCurrentHighlightDialog(): void {
   else openSelectedHighlightDialog();
 }
 
-function selectHighlightColor(color: string): void {
-  highlightColor.value = color;
-}
-
-function isHighlightColorSelected(color: string): boolean {
-  return highlightColor.value.toLowerCase() === color.toLowerCase();
-}
-
 async function submitHighlight(color: string | null): Promise<void> {
   if (highlightMode.value === "cell") {
     const targets = highlightCellTargets.value;
@@ -4885,248 +4199,6 @@ async function openQuickEntry(): Promise<void> {
   );
 }
 
-function selectedRecordIdsForReplace(): string[] {
-  const selectedCells = selectedGridCellPositions();
-  if (selectedCells.length) {
-    return [
-      ...new Set(
-        selectedCells
-          .filter(
-            (position) => fields.value[position.columnIndex]?.id === findReplaceForm.fieldId,
-          )
-          .map((position) => tableRows.value[position.rowIndex])
-          .filter((row): row is LedgerRow => Boolean(row && !isDraft(row)))
-          .map((row) => row.id),
-      ),
-    ];
-  }
-  return records.value.map((record) => record.id);
-}
-
-function focusFindReplaceInput(): void {
-  void nextTick(() => {
-    findReplaceInputRef.value?.focus();
-    const focusedElement = document.activeElement;
-    if (focusedElement instanceof HTMLInputElement) focusedElement.select();
-  });
-}
-
-function setFindReplaceMode(mode: FindReplaceMode): void {
-  if (findReplaceMode.value === mode) return;
-  findCurrentMatchIndex.value = -1;
-  if (mode === "replace") {
-    restoreFindReplaceGridSelection();
-    if (!findReplaceForm.fieldId) {
-      const activeField = activeGridCell.value
-        ? fields.value[activeGridCell.value.columnIndex]
-        : fields.value[0];
-      findReplaceForm.fieldId = activeField?.id ?? "";
-    }
-    findReplacePreview.value = null;
-    findReplaceScopeCount.value = null;
-    findReplaceScopeLabel.value = selectedGridCellPositions().length
-      ? "选中单元格所在记录"
-      : "当前筛选范围全部记录";
-  }
-  findReplaceMode.value = mode;
-  focusFindReplaceInput();
-}
-
-async function navigateFindMatch(direction: -1 | 1): Promise<void> {
-  const matches = findMatches.value;
-  const fieldCount = fields.value.length;
-  if (findReplaceMode.value !== "find" || !matches.length || !fieldCount) return;
-  let nextIndex = -1;
-  if (findCurrentMatchIndex.value >= 0) {
-    nextIndex = (
-      findCurrentMatchIndex.value + direction + matches.length
-    ) % matches.length;
-  } else {
-    const active = activeGridCell.value;
-    if (active && direction > 0) {
-      nextIndex = matches.findIndex((encodedMatch) => {
-        const rowIndex = Math.floor(encodedMatch / fieldCount);
-        const columnIndex = encodedMatch % fieldCount;
-        return rowIndex > active.rowIndex ||
-          (rowIndex === active.rowIndex && columnIndex > active.columnIndex);
-      });
-    } else if (active) {
-      for (let index = matches.length - 1; index >= 0; index -= 1) {
-        const encodedMatch = matches[index];
-        if (encodedMatch === undefined) continue;
-        const rowIndex = Math.floor(encodedMatch / fieldCount);
-        const columnIndex = encodedMatch % fieldCount;
-        if (
-          rowIndex < active.rowIndex ||
-          (rowIndex === active.rowIndex && columnIndex < active.columnIndex)
-        ) {
-          nextIndex = index;
-          break;
-        }
-      }
-    }
-    if (nextIndex < 0) nextIndex = direction > 0 ? 0 : matches.length - 1;
-  }
-
-  const encodedTarget = matches[nextIndex];
-  if (encodedTarget === undefined) return;
-  findCurrentMatchIndex.value = nextIndex;
-  const targetPosition = {
-    rowIndex: Math.floor(encodedTarget / fieldCount),
-    columnIndex: encodedTarget % fieldCount,
-  };
-  const targetRowId = tableRows.value[targetPosition.rowIndex]?.id;
-  const targetFieldId = fields.value[targetPosition.columnIndex]?.id;
-  if (!targetRowId || !targetFieldId) return;
-  selectGridCell(targetPosition);
-  tableRef.value?.scrollToRow(targetPosition.rowIndex, "center");
-  await nextTick();
-
-  if (findReplaceMode.value !== "find") return;
-  const currentMatches = findMatches.value;
-  const currentFieldCount = fields.value.length;
-  const currentRowIndex = tableRowIndexById.value.get(targetRowId);
-  const currentColumnIndex = fields.value.findIndex((field) => field.id === targetFieldId);
-  if (currentRowIndex === undefined || currentColumnIndex < 0 || !currentFieldCount) return;
-  const currentIndex = currentMatches.findIndex(
-    (encodedMatch) =>
-      Math.floor(encodedMatch / currentFieldCount) === currentRowIndex &&
-      encodedMatch % currentFieldCount === currentColumnIndex,
-  );
-  if (currentIndex < 0) return;
-  const currentEncodedMatch = currentMatches[currentIndex];
-  if (currentEncodedMatch === undefined) return;
-  findCurrentMatchIndex.value = currentIndex;
-  const currentPosition = {
-    rowIndex: Math.floor(currentEncodedMatch / currentFieldCount),
-    columnIndex: currentEncodedMatch % currentFieldCount,
-  };
-  tableRef.value?.scrollToRow(currentPosition.rowIndex, "center");
-  await nextTick();
-  gridEditorRoot(currentPosition)
-    ?.scrollIntoView({ block: "nearest", inline: "nearest" });
-}
-
-function handleFindReplaceInputEnter(event: KeyboardEvent): void {
-  if (findReplaceMode.value !== "find") return;
-  event.preventDefault();
-  event.stopPropagation();
-  void navigateFindMatch(event.shiftKey ? -1 : 1);
-}
-
-function restoreFindReplaceGridFocus(): void {
-  if (findReplaceVisible.value) return;
-  if (activeGridCell.value) void focusGridCell(activeGridCell.value);
-  findReplaceGridSelectionSnapshot = null;
-}
-
-function openFindReplace(
-  mode: FindReplaceMode = "replace",
-  reset = true,
-): void {
-  if (editingGridCell.value) {
-    void finishGridCellEdit(true, false).then((saved) => {
-      if (saved) openFindReplace(mode, reset);
-    });
-    return;
-  }
-  const modeChanged = findReplaceMode.value !== mode;
-  if (!reset && mode === "replace" && modeChanged) {
-    restoreFindReplaceGridSelection();
-  }
-  const activeField = activeGridCell.value
-    ? fields.value[activeGridCell.value.columnIndex]
-    : fields.value[0];
-  if (reset) {
-    captureFindReplaceGridSelection();
-    findReplaceForm.fieldId = mode === "find" ? "" : activeField?.id ?? "";
-    findReplaceForm.find = "";
-    findReplaceForm.replacement = "";
-    findReplaceForm.matchMode = "substring";
-    findReplaceForm.caseSensitive = false;
-    findReplacePreview.value = null;
-    findReplaceScopeCount.value = null;
-    findReplaceScopeLabel.value = selectedGridCellPositions().length
-      ? "选中单元格所在记录"
-      : "当前筛选范围全部记录";
-  } else if (mode === "replace") {
-    if (!findReplaceForm.fieldId) findReplaceForm.fieldId = activeField?.id ?? "";
-    if (modeChanged) {
-      findReplacePreview.value = null;
-      findReplaceScopeCount.value = null;
-      findReplaceScopeLabel.value = selectedGridCellPositions().length
-        ? "选中单元格所在记录"
-        : "当前筛选范围全部记录";
-    }
-  }
-  findReplaceMode.value = mode;
-  findCurrentMatchIndex.value = -1;
-  applyFindTermImmediately();
-  findReplaceVisible.value = true;
-  focusFindReplaceInput();
-}
-
-async function runFindReplacePreview(): Promise<void> {
-  if (findReplaceLoading.value) return;
-  if (!findReplaceForm.fieldId) {
-    ElMessage.warning("请选择要处理的表头");
-    return;
-  }
-  findReplaceLoading.value = true;
-  findReplacePreview.value = null;
-  findReplaceScopeCount.value = null;
-  try {
-    let recordIds = selectedRecordIdsForReplace();
-    const selected = Boolean(selectedGridCellPositions().length);
-    findReplaceScopeLabel.value = selected ? "选中单元格所在记录" : "当前筛选范围全部记录";
-    if (!selected) recordIds = (await queryLedgerRecordIds(buildRecordQuery())).record_ids;
-    recordIds = [...new Set(recordIds)];
-    findReplaceScopeCount.value = recordIds.length;
-    if (!recordIds.length) {
-      ElMessage.warning("当前范围没有记录");
-      return;
-    }
-    findReplacePreview.value = await previewReplace({
-      project_id: activeProjectId.value,
-      field_id: findReplaceForm.fieldId,
-      record_ids: recordIds,
-      find: findReplaceForm.find,
-      replacement: findReplaceForm.replacement,
-      match_mode: findReplaceForm.matchMode,
-      case_sensitive: findReplaceForm.caseSensitive,
-    });
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "查找替换预览失败");
-  } finally {
-    findReplaceLoading.value = false;
-  }
-}
-
-async function commitFindReplace(): Promise<void> {
-  const preview = findReplacePreview.value;
-  if (!preview?.token) return;
-  findReplaceLoading.value = true;
-  try {
-    const hasErrors = preview.issues.some((issue) => issue.severity === "error");
-    if (hasErrors) {
-      ElMessage.error("存在严格验证错误，不能提交");
-      return;
-    }
-    const result = await commitReplace(
-      preview.token,
-      preview.issues.some((issue) => issue.severity === "warning"),
-    );
-    result.records.forEach(replaceRecord);
-    pushCellHistory("查找替换", result.changes, activeProjectId.value);
-    findReplaceVisible.value = false;
-    ElMessage.success(`已替换 ${result.changes.length} 个单元格，可一次撤销`);
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "查找替换提交失败");
-  } finally {
-    findReplaceLoading.value = false;
-  }
-}
-
 function fieldDefinitionById(fieldId: string): FieldDefinition | undefined {
   for (const project of appStore.projects) {
     const field = project.fields.find((item) => item.id === fieldId);
@@ -5139,30 +4211,6 @@ function applyFieldWidth(fieldId: string, width: number): void {
   const field = fieldDefinitionById(fieldId);
   if (field) field.width = width;
 }
-
-function applyFindTermImmediately(): void {
-  if (findTermDebounceTimer !== undefined) {
-    window.clearTimeout(findTermDebounceTimer);
-    findTermDebounceTimer = undefined;
-  }
-  debouncedFindTerm.value = findReplaceForm.find;
-}
-
-watch(() => findReplaceForm.find, (term) => {
-  if (findTermDebounceTimer !== undefined) window.clearTimeout(findTermDebounceTimer);
-  findTermDebounceTimer = window.setTimeout(() => {
-    findTermDebounceTimer = undefined;
-    debouncedFindTerm.value = term;
-  }, FIND_TERM_DEBOUNCE_MS);
-});
-
-watch(findReplaceForm, () => {
-  findReplacePreview.value = null;
-  findCurrentMatchIndex.value = -1;
-}, { flush: "sync" });
-watch(findMatches, () => {
-  findCurrentMatchIndex.value = -1;
-}, { flush: "sync" });
 
 function bestFitColumn(field: FieldDefinition): void {
   const canvas = document.createElement("canvas");
@@ -5935,11 +4983,11 @@ onMounted(() => {
 onBeforeUnmount(() => {
   removeCloseGuard();
   ledgerDisposed = true;
-  if (rangeRefreshTimer !== undefined) window.clearTimeout(rangeRefreshTimer);
+  cancelLedgerRangeRefresh();
   if (quickEntryRetryTimer !== undefined) window.clearTimeout(quickEntryRetryTimer);
   quickEntryRetryTimer = undefined;
   quickEntryRetryPending.clear();
-  if (findTermDebounceTimer !== undefined) window.clearTimeout(findTermDebounceTimer);
+  cancelFindTermDebounce();
   ledgerHistory.clear();
   document.removeEventListener("click", handleRecordSelectionClickCapture, true);
   document.removeEventListener("pointerdown", handleLedgerDocumentPointerDown);
@@ -6165,130 +5213,29 @@ onBeforeUnmount(() => {
       </header>
     </section>
 
-    <section v-if="exportVisible" class="page-card export-panel">
-      <div class="page-card-header">
-        <div>
-          <h2 class="page-card-title">导出当前项目台账</h2>
-          <p class="page-description">
-            导出当前项目台账；可按实验日期指定导出范围。
-          </p>
-        </div>
-        <el-button text @click="exportVisible = false">收起</el-button>
-      </div>
-      <div class="page-card-body toolbar">
-        <span class="field-label">开始日期</span>
-        <EditableDateInput v-model="exportFilter.start" class="export-date" />
-        <span class="field-label">结束日期</span>
-        <EditableDateInput v-model="exportFilter.end" class="export-date" />
-        <el-tag effect="plain">.xlsx</el-tag>
-        <el-button type="primary" :icon="Download" @click="exportCurrentProject">
-          确认导出
-        </el-button>
-      </div>
-    </section>
+    <LedgerExportPanel
+      v-model:visible="exportVisible"
+      v-model:start="exportFilter.start"
+      v-model:end="exportFilter.end"
+      @export="exportCurrentProject"
+    />
 
-    <section
-      class="selection-bar"
-      role="toolbar"
-      aria-label="批量操作"
-    >
-      <el-select
-        v-model="recordSelectionScope"
-        class="record-selection-scope"
-        aria-label="记录选择范围"
-        size="small"
-      >
-        <el-option label="全部记录" value="all" />
-        <el-option label="非锁定记录" value="unlocked" />
-      </el-select>
-      <div class="selection-quick-actions" aria-label="快速选择">
-        <el-button size="small" @click="selectVisibleRecords">全选</el-button>
-        <el-button size="small" @click="invertVisibleSelection">反选</el-button>
-      </div>
-      <span class="selection-divider" aria-hidden="true" />
-      <el-dropdown
-        trigger="click"
-        :disabled="gridCellInternalEditing || (!selectedCount && !hasGridCellSelection)"
-        @command="handleBatchHighlightCommand"
-      >
-        <el-button
-          size="small"
-          :icon="Brush"
-          :loading="highlightLoading"
-          :disabled="gridCellInternalEditing || (!selectedCount && !hasGridCellSelection)"
-        >
-          底色<ArrowDown :size="14" />
-        </el-button>
-        <template #dropdown>
-          <el-dropdown-menu>
-            <el-dropdown-item command="set">设置底色</el-dropdown-item>
-            <el-dropdown-item command="clear">清除底色</el-dropdown-item>
-          </el-dropdown-menu>
-        </template>
-      </el-dropdown>
-      <el-dropdown
-        trigger="click"
-        :disabled="!selectedCount"
-        @command="handleBatchStatusCommand"
-      >
-        <el-button size="small" :disabled="!selectedCount">
-          状态<ArrowDown :size="14" />
-        </el-button>
-        <template #dropdown>
-          <el-dropdown-menu>
-            <el-dropdown-item command="已完成">已完成</el-dropdown-item>
-            <el-dropdown-item command="待实验">待实验</el-dropdown-item>
-          </el-dropdown-menu>
-        </template>
-      </el-dropdown>
-      <el-dropdown
-        trigger="click"
-        :disabled="!selectedCount"
-        @command="handleBatchReportCommand"
-      >
-        <el-button size="small" :disabled="!selectedCount">
-          报告状态<ArrowDown :size="14" />
-        </el-button>
-        <template #dropdown>
-          <el-dropdown-menu>
-            <el-dropdown-item command="generated">已生成报告</el-dropdown-item>
-            <el-dropdown-item command="pending">待生成报告</el-dropdown-item>
-          </el-dropdown-menu>
-        </template>
-      </el-dropdown>
-      <el-dropdown
-        trigger="click"
-        :disabled="!selectedCount"
-        @command="handleBatchLockCommand"
-      >
-        <el-button size="small" :disabled="!selectedCount">
-          锁定<ArrowDown :size="14" />
-        </el-button>
-        <template #dropdown>
-          <el-dropdown-menu>
-            <el-dropdown-item command="lock" :icon="Lock">锁定</el-dropdown-item>
-            <el-dropdown-item command="unlock" :icon="Unlock">解锁</el-dropdown-item>
-          </el-dropdown-menu>
-        </template>
-      </el-dropdown>
-      <el-button
-        size="small"
-        type="danger"
-        plain
-        :icon="Delete"
-        :disabled="!selectedCount"
-        @click="deleteSelectedRecords"
-      >删除所选</el-button>
-      <el-button
-        class="selection-clear-button"
-        size="small"
-        text
-        :disabled="!batchSelectionActive"
-        @click="clearBatchSelection"
-      >
-        取消选择
-      </el-button>
-    </section>
+    <LedgerSelectionBar
+      v-model:selection-scope="recordSelectionScope"
+      :selected-count="selectedCount"
+      :has-cell-selection="hasGridCellSelection"
+      :editing="gridCellInternalEditing"
+      :highlight-busy="highlightLoading"
+      :batch-active="batchSelectionActive"
+      @select-all="selectVisibleRecords"
+      @invert-selection="invertVisibleSelection"
+      @highlight="handleBatchHighlightCommand"
+      @status="handleBatchStatusCommand"
+      @report="handleBatchReportCommand"
+      @lock="handleBatchLockCommand"
+      @delete-selected="deleteSelectedRecords"
+      @clear-selection="clearBatchSelection"
+    />
 
     <section
       ref="ledgerTableCardRef"
@@ -6640,93 +5587,20 @@ onBeforeUnmount(() => {
         </div>
       </transition>
       <transition name="ledger-overlay-pop">
-        <div
-          v-if="ledgerContextMenu"
-          class="ledger-context-menu"
-          :style="contextMenuStyle"
-          role="menu"
-          @pointerdown.stop
-          @click.stop
-          @contextmenu.prevent
-        >
-          <button
-            type="button"
-            role="menuitem"
-            :disabled="ledgerContextMenu.target.kind !== 'cell' || !hasGridCellSelection || loading || gridCutInProgress"
-            class="ledger-context-menu-shortcut-item"
-            title="剪切选中单元格（Ctrl+X / Cmd+X）"
-            aria-keyshortcuts="Control+X Meta+X"
-            @click="contextCut"
-          >
-            <span>剪切</span><kbd>Ctrl+X</kbd>
-          </button>
-          <button type="button" role="menuitem" class="ledger-context-menu-shortcut-item" @click="contextCopy">
-            <span>复制</span><kbd>Ctrl+C</kbd>
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            :disabled="ledgerContextMenu.target.kind !== 'cell' || !hasGridCellSelection"
-            @click="contextDelete"
-          >
-            删除
-          </button>
-          <div class="ledger-context-menu-submenu">
-            <button
-              type="button"
-              class="ledger-context-menu-submenu-trigger"
-              role="menuitem"
-              aria-haspopup="menu"
-            >
-              <span>插入行</span>
-              <ArrowRight :size="14" aria-hidden="true" />
-            </button>
-            <div
-              class="ledger-context-menu-submenu-panel"
-              :class="{ 'opens-left': ledgerContextMenu.submenuLeft }"
-              role="group"
-              aria-label="插入行设置"
-            >
-              <label class="ledger-context-menu-insert-count">
-                <span>插入行数</span>
-                <input
-                  v-model.number="contextInsertRowCount"
-                  type="number"
-                  min="1"
-                  max="100"
-                  step="1"
-                  inputmode="numeric"
-                  aria-label="插入行数，范围 1 到 100"
-                  @click.stop
-                  @keydown.enter.stop.prevent="contextInsertRows('before')"
-                />
-              </label>
-              <button type="button" role="menuitem" @click="contextInsertRows('before')">
-                在上方插入
-              </button>
-              <button type="button" role="menuitem" @click="contextInsertRows('after')">
-                在下方插入
-              </button>
-            </div>
-          </div>
-          <div class="ledger-context-menu-separator" role="separator"></div>
-          <button
-            type="button"
-            class="ledger-context-menu-danger"
-            role="menuitem"
-            :disabled="loading"
-            :title="contextDeleteRecordCount > 1
-              ? `永久删除选中的 ${contextDeleteRecordCount} 条记录`
-              : contextMenuRow?.locked
-                ? '当前记录已锁定，请先解锁后再删除'
-                : '永久删除当前记录'"
-            @click="contextDeleteRecord"
-          >
-            {{ contextDeleteRecordCount > 1
-              ? '删除所选记录'
-              : '删除记录' }}
-          </button>
-        </div>
+        <LedgerContextMenu
+          :menu="ledgerContextMenu"
+          :can-cut="ledgerContextMenu?.target.kind === 'cell' && hasGridCellSelection && !loading && !gridCutInProgress"
+          :can-delete-cells="ledgerContextMenu?.target.kind === 'cell' && hasGridCellSelection"
+          :busy="loading"
+          :delete-record-count="contextDeleteRecordCount"
+          :delete-record-locked="Boolean(contextMenuRow?.locked)"
+          v-model:insert-row-count="contextInsertRowCount"
+          @cut="contextCut"
+          @copy="contextCopy"
+          @delete-cells="contextDelete"
+          @delete-record="contextDeleteRecord"
+          @insert-rows="contextInsertRows"
+        />
       </transition>
       <div class="ledger-bottom-bar">
         <div class="project-tab-navigation" aria-label="项目标签滚动">
@@ -6814,292 +5688,60 @@ onBeforeUnmount(() => {
     @open-templates="templateManagerVisible = true"
   />
 
-  <el-dialog
-    class="ledger-dialog"
-    v-model="reorderDialogVisible"
-    title="按实验日期重排台账"
-    width="680px"
-  >
-    <p class="dialog-note">
-      仅重排当前项目中所选日期的记录，并按“病理号-蜡块号”的实验编排规则排序；其他日期记录的位置保持不变。
-    </p>
-    <el-form label-position="top">
-      <el-form-item label="实验日期">
-        <el-date-picker
-          v-model="reorderDate"
-          type="date"
-          value-format="YYYY-MM-DD"
-          placeholder="选择日期"
-          @change="reorderPreview = null"
-        />
-      </el-form-item>
-    </el-form>
-    <div v-if="reorderPreview" class="reorder-preview-panel">
-      <strong>
-        当前项目共 {{ reorderPreview.affected_records }} 条记录，
-        将调整 {{ reorderPreview.changed_records }} 条
-      </strong>
-      <el-alert
-        v-if="reorderPreview.locked_records.length"
-        type="error"
-        :closable="false"
-        :title="`有 ${reorderPreview.locked_records.length} 条锁定记录，请先解锁`"
-      />
-      <div v-for="project in reorderPreview.projects" :key="project.project_id" class="reorder-project-preview">
-        <b>{{ project.project_name }}（调整 {{ project.changed_count }} 条）</b>
-        <span>调整前：{{ project.before.join('、') || '无' }}</span>
-        <span>调整后：{{ project.after.join('、') || '无' }}</span>
-      </div>
-    </div>
-    <template #footer>
-      <el-button @click="reorderDialogVisible = false">取消</el-button>
-      <el-button :loading="reorderLoading" @click="loadReorderPreview">预览</el-button>
-      <el-button
-        type="primary"
-        :loading="reorderLoading"
-        :disabled="!reorderPreview || Boolean(reorderPreview.locked_records.length) || !reorderPreview.changed_records"
-        @click="confirmReorderByDate"
-      >
-        确认重排
-      </el-button>
-    </template>
-  </el-dialog>
+  <LedgerReorderDialog
+    v-model:visible="reorderDialogVisible"
+    v-model:date="reorderDate"
+    :preview="reorderPreview"
+    :loading="reorderLoading"
+    @changed="reorderPreview = null"
+    @preview="loadReorderPreview"
+    @confirm="confirmReorderByDate"
+  />
 
-  <el-dialog class="ledger-dialog" v-model="findReplaceVisible" title="查找替换" width="660px" :close-on-click-modal="!findReplaceLoading" :close-on-press-escape="!findReplaceLoading" :show-close="!findReplaceLoading" @opened="focusFindReplaceInput" @closed="restoreFindReplaceGridFocus">
-    <div class="find-replace-mode-switch" role="group" aria-label="查找模式">
-      <el-button
-        size="small"
-        :type="findReplaceMode === 'find' ? 'primary' : undefined"
-        :aria-pressed="findReplaceMode === 'find'"
-        @click="setFindReplaceMode('find')"
-      >查找</el-button>
-      <el-button
-        size="small"
-        :type="findReplaceMode === 'replace' ? 'primary' : undefined"
-        :aria-pressed="findReplaceMode === 'replace'"
-        @click="setFindReplaceMode('replace')"
-      >替换</el-button>
-    </div>
-    <p class="muted" v-if="findReplaceMode === 'find'">
-      在当前台账的筛选结果中查找，共 {{ tableRows.length.toLocaleString('zh-CN') }} 条记录。Enter 查找下一个，Shift+Enter 查找上一个。
-    </p>
-    <p class="muted" v-else>
-      {{ findReplaceScopeLabel }}；单次最多 {{ FIND_REPLACE_RECORD_LIMIT.toLocaleString('zh-CN') }} 条记录。
-    </p>
-    <el-form label-position="top" :disabled="findReplaceLoading">
-      <el-form-item :label="findReplaceMode === 'find' ? '查找表头' : '指定表头'">
-        <el-select v-model="findReplaceForm.fieldId" filterable>
-          <el-option v-if="findReplaceMode === 'find'" label="全部表头" value="" />
-          <el-option v-for="field in fields" :key="field.id" :label="field.label" :value="field.id" />
-        </el-select>
-      </el-form-item>
-      <div :class="{ 'two-column-dialog-form': findReplaceMode === 'replace' }">
-        <el-form-item label="查找内容">
-          <el-input
-            ref="findReplaceInputRef"
-            v-model="findReplaceForm.find"
-            clearable
-            aria-label="查找内容"
-            @keydown.enter="handleFindReplaceInputEnter"
-          />
-        </el-form-item>
-        <el-form-item v-if="findReplaceMode === 'replace'" label="替换为">
-          <el-input v-model="findReplaceForm.replacement" />
-        </el-form-item>
-      </div>
-      <div class="two-column-dialog-form">
-        <el-form-item label="匹配方式">
-          <el-radio-group v-model="findReplaceForm.matchMode">
-            <el-radio-button value="substring">子串</el-radio-button>
-            <el-radio-button value="whole">完整单元格</el-radio-button>
-          </el-radio-group>
-        </el-form-item>
-        <el-form-item label="大小写">
-          <el-checkbox v-model="findReplaceForm.caseSensitive">区分大小写</el-checkbox>
-        </el-form-item>
-      </div>
-    </el-form>
-    <div v-if="findReplaceMode === 'find'" class="ledger-find-navigation">
-      <span class="ledger-find-status" role="status" aria-live="polite">{{ findMatchStatus }}</span>
-      <div>
-        <el-button :disabled="!findMatches.length" @click="navigateFindMatch(-1)">上一个</el-button>
-        <el-button type="primary" :disabled="!findMatches.length" @click="navigateFindMatch(1)">
-          下一个
-        </el-button>
-      </div>
-    </div>
-    <div v-else-if="findReplaceScopeCount !== null" class="replace-preview-panel" aria-live="polite">
-      <strong>范围 {{ findReplaceScopeCount.toLocaleString('zh-CN') }} 条记录</strong>
-      <template v-if="findReplacePreview">
-        <span>，可替换 {{ findReplacePreview.matched_count }} 个单元格</span>
-        <span>，锁定跳过 {{ findReplacePreview.skipped_locked }} 个单元格</span>
-      </template>
-      <p v-if="findReplaceScopeCount > FIND_REPLACE_RECORD_LIMIT" role="alert">范围超过单次上限，请缩小筛选或选中范围后重试；本次未执行替换。</p>
-      <ul v-if="findReplacePreview?.issues.length">
-        <li v-for="(issue, index) in findReplacePreview.issues.slice(0, 20)" :key="index">
-          {{ issue.message }}
-        </li>
-      </ul>
-    </div>
-    <template #footer>
-      <el-button :disabled="findReplaceLoading" @click="findReplaceVisible = false">取消</el-button>
-      <template v-if="findReplaceMode === 'replace'">
-        <el-button :loading="findReplaceLoading" @click="runFindReplacePreview">预览</el-button>
-        <el-button
-          type="primary"
-          :loading="findReplaceLoading"
-          :disabled="!findReplacePreview?.matched_count || findReplacePreview.issues.some((issue) => issue.severity === 'error')"
-          @click="commitFindReplace"
-        >
-          确认替换
-        </el-button>
-      </template>
-    </template>
-  </el-dialog>
+  <LedgerFindReplaceDialog
+    v-model:visible="findReplaceVisible"
+    :loading="findReplaceLoading"
+    :mode="findReplaceMode"
+    v-model:field-id="findReplaceForm.fieldId"
+    v-model:find="findReplaceForm.find"
+    v-model:replacement="findReplaceForm.replacement"
+    v-model:match-mode="findReplaceForm.matchMode"
+    v-model:case-sensitive="findReplaceForm.caseSensitive"
+    :fields="fields"
+    :total-records="tableRows.length"
+    :scope-label="findReplaceScopeLabel"
+    :scope-count="findReplaceScopeCount"
+    :preview="findReplacePreview"
+    :match-status="findMatchStatus"
+    :match-count="findMatches.length"
+    :record-limit="FIND_REPLACE_RECORD_LIMIT"
+    :register-input="registerFindReplaceInput"
+    @set-mode="setFindReplaceMode"
+    @opened="focusFindReplaceInput"
+    @closed="restoreFindReplaceGridFocus"
+    @enter="handleFindReplaceInputEnter"
+    @navigate="navigateFindMatch"
+    @preview="runFindReplacePreview"
+    @commit="commitFindReplace"
+  />
 
-  <el-dialog
-    v-if="validationPanel"
-    :model-value="true"
-    class="ledger-dialog ledger-validation-dialog"
-    :title="validationPanel.title"
-    width="620px"
-    align-center
-    append-to-body
-    destroy-on-close
-    :close-on-click-modal="false"
-    :close-on-press-escape="false"
-    :show-close="false"
-    role="alertdialog"
-    aria-modal="true"
-    aria-describedby="ledger-validation-description"
-  >
-    <div id="ledger-validation-description" class="validation-dialog-content">
-      <div class="validation-dialog-summary">
-        <strong>{{ validationPanel.label }}</strong>
-        <span>影响 {{ validationPanel.affectedCount }} 个单元格</span>
-        <span v-if="validationPanel.skippedLocked">，跳过锁定 {{ validationPanel.skippedLocked }} 个</span>
-      </div>
-      <ul class="validation-dialog-issues">
-        <li
-          v-for="(issue, index) in validationPanel.issues.slice(0, 20)"
-          :key="index"
-          :class="`is-${issue.severity}`"
-        >
-          {{ issue.message }}
-        </li>
-      </ul>
-      <p v-if="validationPanel.outcomeText" class="validation-dialog-outcome">
-        {{ validationPanel.outcomeText }}
-      </p>
-    </div>
-    <template #footer>
-      <el-button :disabled="validationCommitLoading" @click="cancelValidationPanel">
-        {{ validationPanel.cancelText }}
-      </el-button>
-      <el-button
-        v-if="validationPanel.canContinue"
-        type="primary"
-        :loading="validationCommitLoading"
-        @click="continueValidationCommit"
-      >
-        {{ validationPanel.continueText }}
-      </el-button>
-    </template>
-  </el-dialog>
+  <LedgerValidationDialog
+    :panel="validationPanel"
+    :loading="validationCommitLoading"
+    @confirm="continueValidationCommit"
+    @cancel="cancelValidationPanel"
+  />
 
-  <el-dialog
-    class="ledger-dialog"
-    v-model="highlightDialogVisible"
-    :title="
-      highlightMode === 'cell'
-        ? `设置单元格底色（${highlightCellTargets.length} 个）`
-        : `设置记录底色（${highlightTargetIds.length} 条）`
-    "
-    width="430px"
-    destroy-on-close
-  >
-    <div class="highlight-dialog-body">
-      <p class="dialog-note">
-        <template v-if="highlightMode === 'cell'">
-          选择一种底色后，会应用到当前选中的单元格；矩形选区中的草稿行不会写入台账。
-        </template>
-        <template v-else>
-          选择一种底色后，会应用到当前选中的记录；锁定记录也可以设置或清除底色标记。
-        </template>
-      </p>
-      <div class="highlight-palette-section">
-        <div class="highlight-palette-title">主题颜色</div>
-        <div class="highlight-palette-grid">
-          <template v-for="(row, rowIndex) in highlightThemeRows" :key="`theme-${rowIndex}`">
-            <button
-              v-for="item in row"
-              :key="item.label"
-              type="button"
-              class="highlight-color-swatch"
-              :class="{ 'is-selected': isHighlightColorSelected(item.color) }"
-              :style="{ backgroundColor: item.color }"
-              :aria-label="item.label"
-              :aria-pressed="isHighlightColorSelected(item.color)"
-              :title="item.label"
-              @click="selectHighlightColor(item.color)"
-            >
-              <span v-if="isHighlightColorSelected(item.color)" class="highlight-swatch-mark">
-                <Check :size="16" :stroke-width="2" aria-hidden="true" />
-              </span>
-            </button>
-          </template>
-        </div>
-      </div>
-      <div class="highlight-palette-section">
-        <div class="highlight-palette-title">标准色</div>
-        <div class="highlight-palette-grid">
-          <button
-            v-for="item in highlightStandardColors"
-            :key="item.label"
-            type="button"
-            class="highlight-color-swatch"
-            :class="{ 'is-selected': isHighlightColorSelected(item.color) }"
-            :style="{ backgroundColor: item.color }"
-            :aria-label="item.label"
-            :aria-pressed="isHighlightColorSelected(item.color)"
-            :title="item.label"
-            @click="selectHighlightColor(item.color)"
-          >
-            <span v-if="isHighlightColorSelected(item.color)" class="highlight-swatch-mark">
-              <Check :size="16" :stroke-width="2" aria-hidden="true" />
-            </span>
-          </button>
-        </div>
-      </div>
-      <div class="highlight-picker-row">
-        <span class="field-label">更多颜色</span>
-        <el-color-picker
-          v-model="highlightColor"
-          :predefine="highlightPalette"
-        />
-        <span
-          class="highlight-preview"
-          :style="{ backgroundColor: highlightColor }"
-          aria-label="底色预览"
-        />
-        <code>{{ highlightColor }}</code>
-      </div>
-    </div>
-    <template #footer>
-      <el-button :disabled="highlightLoading" @click="highlightDialogVisible = false">
-        取消
-      </el-button>
-      <el-button :loading="highlightLoading" @click="clearHighlight">清除底色</el-button>
-      <el-button
-        type="primary"
-        :loading="highlightLoading"
-        @click="submitHighlight(highlightColor)"
-      >
-        应用底色
-      </el-button>
-    </template>
-  </el-dialog>
-
+  <LedgerHighlightDialog
+    v-model:visible="highlightDialogVisible"
+    :mode="highlightMode"
+    :cell-count="highlightCellTargets.length"
+    :record-count="highlightTargetIds.length"
+    :loading="highlightLoading"
+    v-model:color="highlightColor"
+    @clear="clearHighlight"
+    @submit="submitHighlight(highlightColor)"
+  />
 
 </template>
 
@@ -7146,14 +5788,6 @@ onBeforeUnmount(() => {
   font-size: 14px;
 }
 
-.ledger-toolbar-divider,
-.selection-divider {
-  width: 1px;
-  height: 20px;
-  flex: 0 0 1px;
-  background: var(--app-border);
-}
-
 .ledger-page > .page-card {
   min-width: 0;
   border-color: var(--app-border);
@@ -7161,19 +5795,10 @@ onBeforeUnmount(() => {
   box-shadow: 0 3px 14px rgb(45 42 38 / 3%);
 }
 
-.selection-bar :deep(.el-button + .el-button) {
-  margin-left: 0;
-}
-
-.selection-bar > * {
-  flex-shrink: 0;
-}
-
 .ledger-table-card :deep(.ledger-loading-mask) {
   transition-duration: 60ms;
 }
 
-.ledger-context-menu button:focus-visible,
 .ledger-column-tools-trigger:focus-visible,
 .ledger-zoom-value:focus-visible {
   outline: 2px solid var(--app-primary);
@@ -7212,91 +5837,6 @@ onBeforeUnmount(() => {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
-.highlight-dialog-body {
-  padding: var(--app-space-optical) 0 var(--app-space-2);
-}
-
-.highlight-palette-section {
-  display: flex;
-  flex-direction: column;
-  gap: var(--app-space-2);
-}
-
-.highlight-palette-section + .highlight-palette-section {
-  margin-top: var(--app-space-3);
-}
-
-.highlight-palette-title {
-  color: var(--app-text);
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.highlight-palette-grid {
-  display: grid;
-  grid-template-columns: repeat(10, minmax(0, 1fr));
-  gap: var(--app-space-1);
-}
-
-.highlight-color-swatch {
-  position: relative;
-  min-width: 0;
-  height: 27px;
-  border: 1px solid var(--app-border-strong);
-  border-radius: 3px;
-  padding: 0;
-  cursor: pointer;
-  transition: transform 120ms ease, box-shadow 120ms ease;
-}
-
-.highlight-color-swatch:hover {
-  z-index: 1;
-  transform: translateY(-1px);
-  box-shadow: 0 2px 6px rgb(16 24 40 / 20%);
-}
-
-.highlight-color-swatch.is-selected {
-  z-index: 2;
-  outline: 2px solid var(--app-primary);
-  outline-offset: 1px;
-}
-
-.highlight-swatch-mark {
-  display: inline-flex;
-  width: 18px;
-  height: 18px;
-  align-items: center;
-  justify-content: center;
-  color: var(--app-bg);
-  font-size: 14px;
-  font-weight: 800;
-  line-height: 1;
-  text-shadow: 0 1px 2px rgb(0 0 0 / 75%);
-}
-
-.highlight-picker-row {
-  display: flex;
-  align-items: center;
-  gap: var(--app-space-3);
-  margin-top: var(--app-space-3);
-}
-
-.highlight-picker-row .field-label {
-  min-width: 62px;
-}
-
-.highlight-preview {
-  width: 44px;
-  height: 28px;
-  border: 1px solid var(--app-border-strong);
-  border-radius: var(--app-radius-control);
-  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 60%);
-}
-
-.highlight-picker-row code {
-  color: var(--app-muted);
-  font-size: 12px;
-}
 
 .ledger-page {
   --el-border-radius-base: var(--app-radius-control);
@@ -7713,146 +6253,6 @@ onBeforeUnmount(() => {
   margin-top: var(--app-space-3);
 }
 
-.ledger-context-menu {
-  width: 160px;
-  overflow: visible;
-  border: 1px solid var(--app-border-strong);
-  border-radius: var(--app-radius-card);
-  background: var(--app-bg);
-  box-shadow: 0 8px 26px rgb(45 42 38 / 10%);
-  padding: var(--app-space-1);
-}
-
-.ledger-context-menu button {
-  display: block;
-  width: 100%;
-  border: 0;
-  border-radius: var(--app-radius-control);
-  background: transparent;
-  color: var(--app-text);
-  cursor: pointer;
-  font: inherit;
-  padding: var(--app-space-2) var(--app-space-2);
-  text-align: left;
-}
-
-.ledger-context-menu button:hover:not(:disabled) {
-  background: var(--app-primary-soft);
-  color: var(--app-primary-text);
-}
-
-.ledger-context-menu button:disabled {
-  color: var(--app-disabled);
-  cursor: not-allowed;
-}
-
-.ledger-context-menu .ledger-context-menu-shortcut-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.ledger-context-menu-shortcut-item kbd {
-  color: var(--app-muted);
-  font-family: inherit;
-  font-size: 11px;
-}
-
-.ledger-context-menu-separator {
-  height: 1px;
-  margin: var(--app-space-1) var(--app-space-1);
-  background: var(--app-border);
-}
-
-.ledger-context-menu button.ledger-context-menu-danger:not(:disabled) {
-  color: var(--el-color-danger);
-}
-
-.ledger-context-menu button.ledger-context-menu-danger:hover:not(:disabled) {
-  background: var(--el-color-danger-light-9);
-  color: var(--el-color-danger);
-}
-
-.ledger-context-menu-submenu {
-  position: relative;
-}
-
-.ledger-context-menu .ledger-context-menu-submenu-trigger {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.ledger-context-menu-submenu-panel {
-  position: absolute;
-  z-index: 1;
-  bottom: -5px;
-  left: calc(100% - 4px);
-  display: none;
-  width: 200px;
-  box-sizing: border-box;
-  border: 1px solid var(--app-border-strong);
-  border-radius: var(--app-radius-card);
-  background: var(--app-bg);
-  box-shadow: 0 8px 26px rgb(45 42 38 / 10%);
-  padding: var(--app-space-1);
-  transform-origin: top left;
-  animation: ledger-overlay-pop-in 0.16s ease;
-}
-
-.ledger-context-menu-submenu-panel.opens-left {
-  right: calc(100% - 4px);
-  left: auto;
-  transform-origin: top right;
-}
-
-@keyframes ledger-overlay-pop-in {
-  from {
-    opacity: 0;
-    transform: scale(0.94);
-  }
-}
-
-.ledger-context-menu-insert-count {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--app-space-2);
-  color: var(--app-muted);
-  font-size: 13px;
-  padding: var(--app-space-1) var(--app-space-2) var(--app-space-2);
-  white-space: nowrap;
-}
-
-.ledger-context-menu-insert-count input {
-  box-sizing: border-box;
-  width: 72px;
-  height: 28px;
-  border: 1px solid var(--app-border-strong);
-  border-radius: var(--app-radius-control);
-  outline: 0;
-  background: var(--app-bg);
-  color: var(--app-text);
-  font: inherit;
-  font-variant-numeric: tabular-nums;
-  padding: 0 var(--app-space-1);
-  text-align: center;
-}
-
-.ledger-context-menu-insert-count input:focus {
-  border-color: var(--app-primary);
-  box-shadow: 0 0 0 2px var(--app-primary-soft);
-}
-
-.ledger-context-menu-submenu:hover > .ledger-context-menu-submenu-panel,
-.ledger-context-menu-submenu:focus-within > .ledger-context-menu-submenu-panel {
-  display: block;
-}
-
-.export-date {
-  width: 190px;
-}
-
 .ledger-locked-visibility {
   flex: 0 0 auto;
   margin-right: 0;
@@ -7874,65 +6274,16 @@ onBeforeUnmount(() => {
   transition: background-color 300ms ease;
 }
 
-.export-panel {
-  border-color: var(--app-primary-border);
-}
-
 .field-label {
   color: var(--app-muted);
   font-size: 12px;
 }
 
-.selection-bar {
-  display: flex;
-  min-height: 46px;
-  align-items: center;
-  flex-wrap: nowrap;
-  gap: var(--app-space-2);
-  overflow-x: auto;
-  border: 1px solid var(--app-primary-border);
-  border-radius: var(--app-radius-card);
-  background: var(--app-hover);
-  padding: var(--app-space-1) var(--app-space-2);
-  scrollbar-width: none;
-}
-
-.selection-bar::-webkit-scrollbar {
-  display: none;
-}
-
-.record-selection-scope {
-  width: 120px;
-  flex: 0 0 120px;
-}
-
-.record-selection-scope :deep(.el-select__wrapper) {
-  min-height: 32px;
-  font-size: 14px;
-}
-
-.selection-quick-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--app-space-1);
-}
-
-.selection-quick-actions > :deep(.el-button + .el-button) {
-  margin-left: 0;
-}
-
-.selection-bar :deep(.el-button) {
-  min-height: 32px;
-  font-size: 14px;
-}
-
-.selection-bar > :deep(.el-dropdown),
-.selection-clear-button {
-  flex: 0 0 auto;
-}
-
-.selection-bar :deep(.el-button > svg) {
-  margin-left: var(--app-space-1);
+.ledger-toolbar-divider {
+  width: 1px;
+  height: 20px;
+  flex: 0 0 1px;
+  background: var(--app-border);
 }
 
 .ledger-table-card {
@@ -8206,109 +6557,8 @@ onBeforeUnmount(() => {
   gap: var(--app-space-4);
 }
 
-.replace-preview-panel {
-  border: 1px solid var(--app-border-strong);
-  border-radius: var(--app-radius-control);
-  padding: var(--app-space-3);
-  background: var(--app-surface-soft);
-}
-
-.find-replace-mode-switch {
-  display: flex;
-  gap: var(--app-space-1);
-  margin-bottom: var(--app-space-3);
-}
-
-.ledger-find-navigation {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--app-space-3);
-  margin-top: var(--app-space-2);
-}
-
-.ledger-find-status {
-  color: var(--app-muted);
-  font-size: 13px;
-}
-
-.reorder-preview-panel {
-  display: grid;
-  gap: var(--app-space-2);
-}
-
-.reorder-project-preview {
-  display: grid;
-  gap: var(--app-space-1);
-  border: 1px solid var(--app-border-light);
-  border-radius: var(--app-radius-control);
-  padding: var(--app-space-2) var(--app-space-3);
-  font-size: 12px;
-}
-
-.reorder-project-preview span {
-  overflow-wrap: anywhere;
-}
-
-.replace-preview-panel ul {
-  max-height: 150px;
-  overflow: auto;
-  margin: var(--app-space-2) 0 0;
-  padding-left: var(--app-space-6);
-}
-
 :deep(.ledger-validation-dialog) {
   max-width: calc(100vw - 32px);
-}
-
-.validation-dialog-content {
-  display: grid;
-  gap: var(--app-space-3);
-}
-
-.validation-dialog-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--app-space-2) var(--app-space-3);
-  align-items: baseline;
-}
-
-.validation-dialog-summary strong {
-  color: var(--app-text);
-  font-size: 15px;
-}
-
-.validation-dialog-summary span {
-  color: var(--app-muted);
-  font-size: 13px;
-}
-
-.validation-dialog-issues {
-  max-height: 220px;
-  overflow: auto;
-  margin: 0;
-  border: 1px solid var(--app-warning);
-  border-radius: var(--app-radius-control);
-  padding: var(--app-space-3) var(--app-space-3) var(--app-space-3) var(--app-space-8);
-  background: var(--app-warning-soft);
-}
-
-.validation-dialog-issues li.is-error {
-  color: var(--app-danger-text);
-}
-
-.validation-dialog-issues li.is-warning {
-  color: var(--app-warning-text);
-  font-weight: 600;
-}
-
-.validation-dialog-outcome {
-  margin: 0;
-  border-left: 3px solid var(--app-warning);
-  padding: var(--app-space-2) var(--app-space-2);
-  background: var(--app-warning-soft);
-  color: var(--app-text);
-  line-height: 1.6;
 }
 
 /* Table V2 renders div-based virtual rows instead of native table elements. */
