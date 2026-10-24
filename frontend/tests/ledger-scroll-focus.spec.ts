@@ -70,6 +70,9 @@ describe("useLedgerGridScrollFocus", () => {
         commitActiveEdit: vi.fn(async () => true),
         isDisposed: () => false,
         flashRecord: vi.fn(),
+        handleKeydown: vi.fn(),
+        handlePaste: vi.fn(),
+        isNativeClipboardTarget: () => false,
         ...overrides,
       },
       card,
@@ -155,6 +158,9 @@ describe("useLedgerGridScrollFocus", () => {
       commitActiveEdit: vi.fn(async () => true),
       isDisposed: () => false,
       flashRecord,
+      handleKeydown: vi.fn(),
+      handlePaste: vi.fn(),
+      isNativeClipboardTarget: () => false,
     };
     const { revealGridPasteTarget } = useLedgerGridScrollFocus(deps);
 
@@ -176,6 +182,33 @@ describe("useLedgerGridScrollFocus", () => {
     const disposedDeps = { ...deps, isDisposed: () => true };
     useLedgerGridScrollFocus(disposedDeps).revealGridPasteTarget(0, "r0");
     expect(scrollToRow).not.toHaveBeenCalled();
+  });
+
+  it("渲染后补偿：焦点在 body 时收回卡片（覆盖选区物化重建行的场景）", async () => {
+    const { deps, card } = buildDeps();
+    const { restoreFocusAfterRender } = useLedgerGridScrollFocus(deps);
+    expect(document.activeElement).toBe(document.body);
+
+    restoreFocusAfterRender();
+    // rAF 排程在下一帧执行,等它落地
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(document.activeElement).toBe(card);
+  });
+
+  it("渲染后补偿：焦点在输入框等其他元素上时不抢焦", async () => {
+    const { deps } = buildDeps();
+    const { restoreFocusAfterRender } = useLedgerGridScrollFocus(deps);
+    const input = document.createElement("input");
+    document.body.append(input);
+    input.focus();
+
+    restoreFocusAfterRender();
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(document.activeElement).toBe(input);
   });
 });
 
@@ -244,7 +277,11 @@ interface LedgerGridHarness {
   tableRows: Array<{ id: string }>;
   focusRecordId: string;
   ledgerTableCardRef: HTMLElement | null;
-  tableRef: { scrollToRow: (rowIndex: number, strategy?: string) => void };
+  tableRef: {
+    scrollToRow: (rowIndex: number, strategy?: string) => void;
+    scrollToLeft?: (left: number) => void;
+    scrollToTop?: (top: number) => void;
+  };
 }
 
 let app: App | undefined;
@@ -360,5 +397,33 @@ describe("ledger grid focus keep (integration)", () => {
       expect(mocks.message.success).toHaveBeenCalledWith("已粘贴 1 个单元格");
     });
     expect(fakeTable.scrollToRow).toHaveBeenCalledTimes(1);
+  });
+
+  it("焦点落在 body 时，document 级 Ctrl+C 仍触发网格复制分支", async () => {
+    const state = await mountLedger();
+    state.selectGridCell({ rowIndex: 0, columnIndex: 1 });
+    // 模拟渲染替换焦点元素后的状态：焦点在 body，事件从 document 派发
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "c", ctrlKey: true, bubbles: true }));
+    await vi.waitFor(() => {
+      // jsdom 无 execCommand/clipboard，复制分支会走权限失败兜底
+      expect(mocks.message.warning).toHaveBeenCalledWith(
+        "复制失败，请重新选中单元格后重试，并检查剪贴板权限",
+      );
+    });
+  });
+
+  it("焦点落在 body 时，document 级 Ctrl+V 仍粘贴到活动格", async () => {
+    const state = await mountLedger();
+    const { card } = buildCardDom();
+    state.ledgerTableCardRef = card;
+    state.tableRef = { scrollToRow: vi.fn(), scrollToLeft: vi.fn(), scrollToTop: vi.fn() };
+    state.selectGridCell({ rowIndex: 0, columnIndex: 1 });
+
+    const paste = pasteEvent("hello");
+    document.dispatchEvent(paste);
+    await state.handleGridPaste(paste);
+    await vi.waitFor(() => {
+      expect(mocks.message.success).toHaveBeenCalledWith("已粘贴 1 个单元格");
+    });
   });
 });

@@ -1,4 +1,4 @@
-import { type ComputedRef, type Ref } from "vue";
+import { getCurrentInstance, onUpdated, type ComputedRef, type Ref } from "vue";
 import type { TableV2Instance } from "element-plus";
 
 import type { GridCellPosition } from "@/utils/gridSelectionModel";
@@ -36,15 +36,26 @@ export interface GridScrollFocusDeps {
   isDisposed: () => boolean;
   /** 瞬时高亮一条记录（约 2s 自动清除），复用查找定位的视觉语言。 */
   flashRecord: (recordId: string) => void;
+  /** 网格自己的键盘处理（handleGridKeydown），document 级路由的落点。 */
+  handleKeydown: (event: KeyboardEvent) => void;
+  /** 网格自己的粘贴处理（handleGridPaste）。 */
+  handlePaste: (event: ClipboardEvent) => void;
+  /** 输入框/可编辑元素内让原生剪贴板行为接管。 */
+  isNativeClipboardTarget: (target: EventTarget | null) => boolean;
 }
 
 export function useLedgerGridScrollFocus(deps: GridScrollFocusDeps): {
   keepGridFocusOnScroll: () => void;
   revealGridPasteTarget: (rowIndex: number, recordId: string | null) => void;
+  restoreFocusAfterRender: () => void;
+  attachDocumentShortcuts: () => () => void;
 } {
   let trailingKeepTimer: number | undefined;
 
   function restoreFocusToCard(): void {
+    // 单测等环境的销毁不经过本模块：env 拆除后残留的 rAF/补偿回调可能
+    // 触发到这里，document 已不可用——直接短路，绝不向 CI 抛未处理错误。
+    if (typeof document === "undefined") return;
     if (deps.isDisposed() || deps.selectionDragging.value) return;
     if (!deps.activeGridCell.value) return;
     // 只有焦点真正落回 body/documentElement 才补焦。焦点在其他交互元素
@@ -68,17 +79,20 @@ export function useLedgerGridScrollFocus(deps: GridScrollFocusDeps): {
     }, 0);
   }
 
-  // 渲染替换焦点元素并不只发生在滚动里：拖拽结束的选区物化、单元格
-  // 状态变化都会整行重建 DOM，把刚聚焦的元素连同焦点一起丢回 body，
-  // 且之后可能再无滚动事件。低频看门狗兜住所有这类丢失（AG Grid 的
-  // 焦点服务同款思路：网格在逻辑上常驻持有焦点）。
-  const focusWatchdog = window.setInterval(() => {
-    if (deps.isDisposed()) {
-      window.clearInterval(focusWatchdog);
-      return;
-    }
-    restoreFocusToCard();
-  }, 300);
+  // 焦点丢失并不只发生在滚动里：拖拽结束的选区物化、单元格状态变化
+  // 都会整行重建 DOM，把刚聚焦的元素连同焦点一起丢回 body。这里由
+  // 视图的 onUpdated 驱动做渲染后一次性补偿——重渲染的 DOM 提交完成
+  // 时触发，再排一帧 rAF 覆盖 el-table-v2 下一帧的行重建。确定性地
+  // 紧跟肇事渲染，没有轮询的时间窗。
+  function restoreFocusAfterRender(): void {
+    if (deps.isDisposed() || deps.selectionDragging.value) return;
+    if (!deps.activeGridCell.value) return;
+    if (typeof document === "undefined") return;
+    const current = document.activeElement;
+    if (current !== document.body && current !== document.documentElement) return;
+    window.requestAnimationFrame(() => restoreFocusToCard());
+  }
+  if (getCurrentInstance()) onUpdated(() => restoreFocusAfterRender());
 
   function isRowVisible(rowIndex: number): boolean {
     const card = deps.cardRef.value;
@@ -99,5 +113,44 @@ export function useLedgerGridScrollFocus(deps: GridScrollFocusDeps): {
     if (recordId) deps.flashRecord(recordId);
   }
 
-  return { keepGridFocusOnScroll, revealGridPasteTarget };
+  // 剪贴板/填充快捷键的确定性兜底：渲染替换焦点元素后焦点可能落在
+  // body 上且没有任何后续事件，卡片级监听（@keydown.capture）依赖
+  // 事件传播路径经过卡片，此时全部收不到。document 级监听用状态层
+  // 的活动选区路由，快捷键不再依赖焦点位置——这是确定性修复，而非
+  // 焦点恢复的时序补偿。目标在卡片内时交给卡片自己的监听，避免双重
+  // 处理；目标在输入框内时让原生剪贴板行为接管。
+  function isGridOwnedEventTarget(target: EventTarget | null): boolean {
+    if (target instanceof Element && deps.cardRef.value?.contains(target)) return false;
+    return !deps.isNativeClipboardTarget(target);
+  }
+
+  function handleDocumentKeydown(event: KeyboardEvent): void {
+    if (deps.isDisposed() || deps.selectionDragging.value) return;
+    if (!deps.activeGridCell.value) return;
+    if (!isGridOwnedEventTarget(event.target)) return;
+    deps.handleKeydown(event);
+  }
+
+  function handleDocumentPaste(event: ClipboardEvent): void {
+    if (deps.isDisposed() || deps.selectionDragging.value) return;
+    if (!deps.activeGridCell.value) return;
+    if (!isGridOwnedEventTarget(event.target)) return;
+    deps.handlePaste(event);
+  }
+
+  function attachDocumentShortcuts(): () => void {
+    document.addEventListener("keydown", handleDocumentKeydown, true);
+    document.addEventListener("paste", handleDocumentPaste, true);
+    return () => {
+      document.removeEventListener("keydown", handleDocumentKeydown, true);
+      document.removeEventListener("paste", handleDocumentPaste, true);
+    };
+  }
+
+  return {
+    keepGridFocusOnScroll,
+    revealGridPasteTarget,
+    restoreFocusAfterRender,
+    attachDocumentShortcuts,
+  };
 }

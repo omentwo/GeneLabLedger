@@ -1255,7 +1255,8 @@ const {
   applyFill: applyGridFill,
   dragThreshold: pointerDragThreshold,
 });
-const { keepGridFocusOnScroll, revealGridPasteTarget } = useLedgerGridScrollFocus({
+const { keepGridFocusOnScroll, revealGridPasteTarget, attachDocumentShortcuts } =
+  useLedgerGridScrollFocus({
   cardRef: ledgerTableCardRef,
   tableRef,
   rowHeight: ledgerVirtualRowHeight,
@@ -1266,7 +1267,11 @@ const { keepGridFocusOnScroll, revealGridPasteTarget } = useLedgerGridScrollFocu
   commitActiveEdit: () => finishGridCellEdit(true, false),
   isDisposed: () => ledgerDisposed,
   flashRecord: flashGridRecord,
+  handleKeydown: handleGridKeydown,
+  handlePaste: handleGridPaste,
+  isNativeClipboardTarget: (target) => nativeGridClipboardTarget(target),
 });
+let removeDocumentGridShortcuts: (() => void) | null = null;
 
 const {
   gridCutInProgress,
@@ -4620,6 +4625,7 @@ onMounted(() => {
   document.addEventListener("scroll", handleLedgerDocumentScroll, true);
   window.addEventListener("resize", handleLedgerDocumentScroll);
   window.addEventListener("focus", handleLedgerWindowFocus);
+  removeDocumentGridShortcuts = attachDocumentShortcuts();
   const bridge = desktopBridge();
   if (bridge?.windowKind === "main") {
     removeQuickEntryChangedListener = bridge.onQuickEntryChanged(handleQuickEntryChanged);
@@ -4634,6 +4640,8 @@ onBeforeUnmount(() => {
   removeCloseGuard();
   ledgerDisposed = true;
   cancelLedgerRangeRefresh();
+  removeDocumentGridShortcuts?.();
+  removeDocumentGridShortcuts = null;
   if (quickEntryRetryTimer !== undefined) window.clearTimeout(quickEntryRetryTimer);
   quickEntryRetryTimer = undefined;
   quickEntryRetryPending.clear();
