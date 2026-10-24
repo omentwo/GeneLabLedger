@@ -54,7 +54,6 @@ import {
 } from "@/api/system";
 import {
   applyRecordOperation,
-  createRecord,
   deleteRecord,
   getRecordsByIds,
   commitCellBatch,
@@ -68,7 +67,6 @@ import {
   setRecordsHighlight,
   setRecordsReportGenerated,
   updateRecord,
-  validateNewRecord,
 } from "@/api/records";
 import EditableChoiceInput from "@/components/EditableChoiceInput.vue";
 import EditableDateInput from "@/components/EditableDateInput.vue";
@@ -93,7 +91,6 @@ import type {
   RecordBatchNewRecord,
   RecordCellChange,
   RecordComplexQuery,
-  RecordCreateInput,
   RecordFieldFilter,
   RecordReorderByDatePreview,
 } from "@/types/api";
@@ -152,6 +149,9 @@ import { useLedgerGridClipboard } from "@/composables/useLedgerGridClipboard";
 import { useLedgerCellSave, type ValidationCellRollbackSnapshot } from "@/composables/useLedgerCellSave";
 import { useLedgerRangeRefresh } from "@/composables/useLedgerRangeRefresh";
 import { useLedgerFindReplace } from "@/composables/useLedgerFindReplace";
+import { useLedgerDraftRows } from "@/composables/useLedgerDraftRows";
+import { useLedgerPersistDraft } from "@/composables/useLedgerPersistDraft";
+import { buildValidationPromptCopy } from "@/utils/validationPrompt";
 import {
   LEDGER_GRID_CLIPBOARD_MIME,
   expandLedgerSingleCellPaste,
@@ -167,18 +167,13 @@ import {
 } from "@/utils/ledgerLayoutSettings";
 import {
   LatestValuePersistence,
-  resolveCreatedRecordRefreshPlan,
   shouldApplyLedgerEditCompletion,
 } from "@/utils/ledgerPersistence";
+
 import {
-  buildValidationPromptCopy,
-} from "@/utils/validationPrompt";
-import {
-  reanchorInsertedDraftGroup,
   type LedgerDraftPlacement,
   type LedgerFieldFilter,
   type LedgerFilterMap,
-  type LedgerInsertedGroupRegistry,
   type LedgerRow,
   type LedgerSortState,
 } from "@/utils/ledgerTableView";
@@ -401,8 +396,6 @@ const highlightCellTargets = ref<CellHighlightTarget[]>([]);
  * `dirtyLedgerChanges()` 全量扫描生成，因此即使这个集合过期，也只会让
  * 刷新时机略微保守，不会丢失任何修改。
  */
-const insertedGroupRegistry: LedgerInsertedGroupRegistry = new Map();
-let draftSequence = 0;
 let ledgerDisposed = false;
 let removeQuickEntryChangedListener: (() => void) | undefined;
 let quickEntryRefreshPromise: Promise<void> = Promise.resolve();
@@ -484,7 +477,7 @@ const {
     selectedRecordCache,
   },
   activeProjectId: () => activeProjectId.value,
-  isDraft,
+  isDraft: (record) => isDraft(record),
   persistDraft: (record) => persistDraft(record),
   replaceRecord,
   invalidateProjectRecordCache,
@@ -506,6 +499,82 @@ const {
       showLoading: false, preserveHistory: true, preserveSelection: true, deferForPendingEdits: true,
     });
   },
+});
+
+const {
+  isDraft,
+  makeDraftRow,
+  nextInsertGroupId,
+  appendDraftRow,
+  removeDraftRows,
+  dirtyLedgerDrafts,
+  snapshotRecord,
+  reanchorPendingInsertedDrafts,
+  cleanupInsertedGroupRegistry,
+} = useLedgerDraftRows({
+  draftRows,
+  fields,
+  currentProject,
+  activeProjectId,
+  loading,
+  cellSave: {
+    persistedKey,
+    clearCellSaveState,
+    dropCellSaveVersion,
+    dropCellSaveInFlight,
+    setSaving,
+    fieldErrors,
+  },
+  selection: {
+    activeGridCell,
+    clearGridCellSelection,
+  },
+  editing: {
+    editingGridSnapshot,
+    clearGridCellEdit,
+  },
+  scrollToBottom: () => scrollTableToBottom(),
+});
+
+const {
+  persistDraft,
+} = useLedgerPersistDraft({
+  fields,
+  drafts: {
+    draftRows,
+    isDraft,
+    removeDraftRows,
+    reanchorPendingInsertedDrafts,
+    cleanupInsertedGroupRegistry,
+  },
+  cellSave: {
+    savingIds,
+    fields,
+    setFieldError,
+    clearFieldError,
+    setSaving,
+    rememberRecord,
+  },
+  panel: {
+    openValidationPanel,
+  },
+  editing: {
+    editingGridSnapshot,
+    clearGridCellEdit,
+  },
+  currentProject,
+  records,
+  loadedRecordCount,
+  recordTotal,
+  focusRecordId,
+  ledgerRangeSettings,
+  ledgerFilters,
+  activeProjectId: () => activeProjectId.value,
+  invalidateProjectRecordCache,
+  pushHistory,
+  queryRecordIds: (projectId) => queryLedgerRecordIds(buildRecordQuery(projectId)),
+  loadRecords: (projectId, options) => loadRecords(projectId, options),
+  scrollToFocusedRecord,
 });
 
 const {
@@ -845,9 +914,6 @@ const ledgerTableStyle = computed<CSSProperties>(
     }) as CSSProperties;
   },
 );
-function isDraft(record: LedgerRow): boolean {
-  return record._draft === true;
-}
 
 function columnFilterKind(field: FieldDefinition): "text" | "options" | "date-range" {
   if (field.data_type === "date" || field.system_key === "experiment_date") return "date-range";
@@ -2469,7 +2535,7 @@ function insertDraftRowsAt(
   count: number,
 ): boolean {
   if (!currentProject.value || loading.value) return false;
-  const groupId = `insert-${draftSequence + 1}`;
+  const groupId = nextInsertGroupId();
   const inserted = Array.from({ length: count }, (_, order) =>
     makeDraftRow({ anchorId, placement, groupId, order }),
   );
@@ -2570,47 +2636,6 @@ async function clearGridCellRange(
   void focusGridCell(active);
 }
 
-function makeDraftRow(
-  insertion?: {
-    anchorId: string;
-    placement: LedgerDraftPlacement;
-    groupId: string;
-    order: number;
-  },
-): LedgerRow {
-  const now = new Date().toISOString();
-  draftSequence += 1;
-  return {
-    id: `draft-${draftSequence}`,
-    _draft: true,
-    _insertAnchorId: insertion?.anchorId,
-    _insertPlacement: insertion?.placement,
-    _insertGroupId: insertion?.groupId,
-    _insertGroupOrder: insertion?.order,
-    _insertOriginAnchorId: insertion?.anchorId,
-    _insertOriginPlacement: insertion?.placement,
-    project_id: activeProjectId.value,
-    project_name: currentProject.value?.name ?? "",
-    position: 0,
-    pathology_number: "",
-    block_number: null,
-    status: "待实验",
-    experiment_date: null,
-    experiment_number: null,
-    report_generated: false,
-    locked: false,
-    highlight_color: null,
-    cell_highlight_colors: {},
-    values: Object.fromEntries(
-      fields.value
-        .filter((field) => !field.is_core && field.default_value != null)
-        .map((field) => [field.id, field.default_value ?? ""]),
-    ),
-    created_at: now,
-    updated_at: now,
-  };
-}
-
 function clearBottomScrollTimers(): void {
   bottomScrollTimers.forEach((timer) => window.clearTimeout(timer));
   bottomScrollTimers = [];
@@ -2690,15 +2715,6 @@ async function refreshTableLayout(
   await remeasureVisibleTextareas(undefined, shouldApply);
 }
 
-function appendDraftRow(scrollToBottom = true): void {
-  if (!currentProject.value || loading.value) return;
-  const draft = makeDraftRow();
-  draftRows.value.push(draft);
-  if (scrollToBottom) {
-    scrollTableToBottom();
-  }
-}
-
 function fieldOptions(field: FieldDefinition): string[] {
   return field.options
     .slice()
@@ -2721,29 +2737,6 @@ async function scrollToFocusedRecord(
   return rowIndex >= 0;
 }
 
-function removeDraftRows(recordIds: Set<string>): void {
-  if (!recordIds.size) return;
-  fields.value.forEach((field) => {
-    recordIds.forEach((recordId) => {
-      const key = persistedKey(recordId, field.id);
-      clearCellSaveState(key);
-      dropCellSaveVersion(key);
-      dropCellSaveInFlight(key);
-      const nextErrors = { ...fieldErrors.value };
-      delete nextErrors[key];
-      fieldErrors.value = nextErrors;
-    });
-  });
-  draftRows.value = draftRows.value.filter((record) => !recordIds.has(record.id));
-  cleanupInsertedGroupRegistry();
-  if (editingGridSnapshot.value && recordIds.has(editingGridSnapshot.value.rowId)) {
-    clearGridCellEdit();
-  }
-  activeGridCell.value = null;
-  clearGridCellSelection();
-  recordIds.forEach((recordId) => setSaving(recordId, false));
-}
-
 function replaceRecord(updated: ProjectRecord): void {
   invalidateProjectRecordCache(updated.project_id);
   const index = records.value.findIndex((record) => record.id === updated.id);
@@ -2753,13 +2746,6 @@ function replaceRecord(updated: ProjectRecord): void {
   rememberRecord(updated);
   if (selectedRecordIds.value.has(updated.id)) selectedRecordCache.set(updated.id, updated);
   scheduleLedgerRangeRefresh(updated.project_id);
-}
-
-function dirtyLedgerDrafts(): LedgerRow[] {
-  return draftRows.value.filter((record) =>
-    Boolean(record.pathology_number.trim() || record.block_number || record.experiment_date || record.experiment_number) ||
-    record.status !== "待实验" || fields.value.some((field) =>
-      !field.is_core && (record.values[field.id] ?? "") !== (field.default_value ?? "")));
 }
 
 function ledgerCloseState(): { dirty: boolean; busy: boolean } {
@@ -2871,10 +2857,6 @@ function handleTableSelectionChange(rows: ProjectRecord[]): void {
   }
 }
 
-function snapshotRecord(record: ProjectRecord): ProjectRecord {
-  return cloneLedgerRecord(record);
-}
-
 function pushHistory(
   label: string,
   before: ProjectRecord[],
@@ -2905,19 +2887,6 @@ function reconcileOperationResult(result: {
   activeGridCell.value = null;
   clearGridCellSelection();
   rememberAll();
-}
-
-function reanchorPendingInsertedDrafts(record: LedgerRow, created: ProjectRecord): void {
-  reanchorInsertedDraftGroup(draftRows.value, record, created.id, insertedGroupRegistry);
-}
-
-function cleanupInsertedGroupRegistry(): void {
-  const activeGroupIds = new Set(
-    draftRows.value.flatMap((draft) => draft._insertGroupId ? [draft._insertGroupId] : []),
-  );
-  insertedGroupRegistry.forEach((_, groupId) => {
-    if (!activeGroupIds.has(groupId)) insertedGroupRegistry.delete(groupId);
-  });
 }
 
 async function replayHistoryEntry(
@@ -3029,215 +2998,6 @@ function reconcileCommittedPaste(
   return committedRecords;
 }
 
-async function persistDraft(record: LedgerRow, notify = true): Promise<boolean> {
-  if (!isDraft(record) || !currentProject.value) return false;
-  const pathologyNumber = record.pathology_number.trim();
-  if (!pathologyNumber || savingIds.value.has(record.id)) return false;
-  const projectId = currentProject.value.id;
-  const dateField = fields.value.find((field) => field.system_key === "experiment_date");
-  let experimentDate = "";
-
-  try {
-    experimentDate = normalizeDateInput(record.experiment_date ?? "");
-  } catch (error) {
-    if (dateField) {
-      setFieldError(
-        record,
-        dateField,
-        error instanceof Error ? error.message : "日期格式无效",
-      );
-    }
-    return false;
-  }
-  if (dateField) clearFieldError(record, dateField);
-
-  setSaving(record.id, true);
-  try {
-    const values: Record<string, string> = {};
-    fields.value.forEach((field) => {
-      if (!field.is_core) values[field.id] = (record.values[field.id] ?? "").trim();
-    });
-    const payload: RecordCreateInput = {
-      project_id: projectId,
-      pathology_number: pathologyNumber,
-      block_number: record.block_number?.trim() || null,
-      status: record.status,
-      experiment_date: experimentDate || null,
-      experiment_number: record.experiment_number?.trim() || null,
-      values,
-      ...(record._insertAnchorId && record._insertPlacement === "before"
-        ? { insert_before_record_id: record._insertAnchorId }
-        : {}),
-      ...(record._insertAnchorId && record._insertPlacement === "after"
-        ? { insert_after_record_id: record._insertAnchorId }
-        : {}),
-    };
-    const validation = await validateNewRecord(payload);
-    const errors = validation.issues.filter((issue) => issue.severity === "error");
-    const warnings = validation.issues.filter((issue) => issue.severity === "warning");
-    if (errors.length || warnings.length) {
-      const prompt = errors.length
-        ? {
-            title: "无法保存",
-            outcomeText: "当前内容尚未保存，请按提示修改后重试。",
-            cancelText: "返回修改",
-            continueText: "",
-          }
-        : buildValidationPromptCopy(warnings, {
-            context: "create",
-            cancelBehavior: "discard",
-          });
-      openValidationPanel(
-        {
-          token: "",
-          projectId,
-          ...prompt,
-          label: "新增台账记录",
-          issues: validation.issues,
-          affectedCount: 1,
-          skippedLocked: 0,
-          cellKeys: [],
-          cellVersions: {},
-          canContinue: !errors.length,
-        },
-        errors.length
-          ? undefined
-          : {
-              action: async () => {
-                const created = await createRecord(payload);
-                await finishPersistedDraft(record, created, projectId, notify);
-              },
-              cancel: () => {
-                removeDraftRows(new Set([record.id]));
-                ElMessage.info("已放弃本次新增，未写入台账");
-              },
-            },
-      );
-      return false;
-    }
-    const created = await createRecord(payload);
-    await finishPersistedDraft(record, created, projectId, notify);
-    return true;
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "记录自动保存失败");
-    return false;
-  } finally {
-    setSaving(record.id, false);
-  }
-}
-
-type PersistedRecordLocation = "focused" | "filtered-out" | "skipped" | "failed";
-
-function currentRecordViewHasMembershipFilters(): boolean {
-  return ledgerRangeSettings.value.mode !== "all" || Object.values(ledgerFilters.value).some(Boolean);
-}
-
-async function locatePersistedRecord(
-  recordId: string,
-  projectId: string,
-): Promise<PersistedRecordLocation> {
-  if (activeProjectId.value !== projectId) {
-    return "skipped";
-  }
-  if (!currentRecordViewHasMembershipFilters()) {
-    loadedRecordCount.value = records.value.length;
-    focusRecordId.value = recordId;
-    await scrollToFocusedRecord(
-      () => activeProjectId.value === projectId,
-    );
-    return "focused";
-  }
-  try {
-    const result = await queryLedgerRecordIds(buildRecordQuery(projectId));
-    if (activeProjectId.value !== projectId) {
-      return "skipped";
-    }
-    recordTotal.value = result.total;
-    const refreshPlan = resolveCreatedRecordRefreshPlan({
-      localRecordIds: records.value.map((record) => record.id),
-      queriedRecordIds: result.record_ids,
-      createdRecordId: recordId,
-    });
-    if (refreshPlan === "local-filtered-out") {
-      records.value = records.value.filter((record) => record.id !== recordId);
-      loadedRecordCount.value = records.value.length;
-      focusRecordId.value = "";
-      return "filtered-out";
-    }
-    if (refreshPlan === "local-visible") {
-      loadedRecordCount.value = records.value.length;
-      focusRecordId.value = recordId;
-      await scrollToFocusedRecord(
-        () => activeProjectId.value === projectId,
-      );
-      return "focused";
-    }
-    const recordIsVisible = result.record_ids.includes(recordId);
-    if (!recordIsVisible) focusRecordId.value = "";
-    else focusRecordId.value = recordId;
-    const loaded = await loadRecords(projectId, {
-      preserveHistory: true,
-      preserveSelection: true,
-    });
-    if (!recordIsVisible) return "filtered-out";
-    if (!loaded) {
-      focusRecordId.value = "";
-      return "failed";
-    }
-    return "focused";
-  } catch {
-    focusRecordId.value = "";
-    return "failed";
-  }
-}
-
-async function finishPersistedDraft(
-  record: LedgerRow,
-  created: ProjectRecord,
-  projectId: string,
-  notify: boolean,
-): Promise<void> {
-  invalidateProjectRecordCache(projectId);
-  if (editingGridSnapshot.value?.rowId === record.id) {
-    // The enclosing finish operation still owns this session. It will decide
-    // whether focus/selection may be applied after the async save completes.
-    clearGridCellEdit(false);
-  }
-  const draftIndex = draftRows.value.findIndex((item) => item.id === record.id);
-  reanchorPendingInsertedDrafts(record, created);
-  if (draftIndex >= 0) draftRows.value.splice(draftIndex, 1);
-  cleanupInsertedGroupRegistry();
-  if (activeProjectId.value === projectId) {
-    if (record._insertAnchorId) {
-      records.value = records.value.map((item) =>
-        item.position >= created.position
-          ? { ...item, position: item.position + 1 }
-          : item,
-      );
-    }
-    records.value.push(created);
-    records.value.sort(
-      (left, right) => left.position - right.position || left.id.localeCompare(right.id),
-    );
-    recordTotal.value += 1;
-    rememberRecord(created);
-  }
-  pushHistory("新增台账记录", [], [created], projectId);
-  const location = await locatePersistedRecord(created.id, projectId);
-  if (notify) {
-    if (location === "filtered-out") {
-      ElMessage.success("病理号已保存，但该记录不符合当前筛选条件；可使用撤销删除本次新增");
-    } else if (location === "failed") {
-      ElMessage.warning("病理号已保存，但自动定位失败；刷新或搜索后可查看该记录");
-    } else {
-      ElMessage.success(
-        location === "focused"
-          ? "病理号已保存并定位；可使用撤销删除本次新增"
-          : "病理号已保存并创建台账记录；可使用撤销删除本次新增",
-      );
-    }
-  }
-}
 
 async function loadLedgerDisplaySettings(): Promise<void> {
   try {
@@ -4878,7 +4638,7 @@ watch(activeProjectId, async (projectId, previousProjectId) => {
     clearGridCellEdit();
     clearSelectionsAfterLedgerViewChange();
     draftRows.value = [];
-    insertedGroupRegistry.clear();
+    cleanupInsertedGroupRegistry();
     highlightDialogVisible.value = false;
     highlightTargetIds.value = [];
     highlightMode.value = "record";
