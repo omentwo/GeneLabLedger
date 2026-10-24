@@ -69,12 +69,7 @@ const closeCoordinator = new WindowCloseCoordinator({
 });
 
 function closeIpcWindow(event) {
-  const window = [mainWindow, quickEntryWindow].find((candidate) =>
-    candidate && !candidate.isDestroyed() && candidate.webContents.id === event.sender.id);
-  if (!window || (event.senderFrame && event.senderFrame !== event.sender.mainFrame)) {
-    throw new Error("拒绝来自非业务窗口的关闭调用");
-  }
-  return window;
+  return assertIpcSenderWindow(event, [mainWindow, quickEntryWindow], "拒绝来自非业务窗口的关闭调用");
 }
 
 function requestRendererCloseState(window, action) {
@@ -382,20 +377,21 @@ async function waitForBackend() {
   throw new Error("Python 后端启动超时，请查看后端日志。");
 }
 
-function assertTrustedIpcSender(event) {
-  if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
-    throw new Error("拒绝来自非主窗口的桌面调用");
+function assertIpcSenderWindow(event, candidates, message) {
+  const window = candidates.find((candidate) =>
+    candidate && !candidate.isDestroyed() && candidate.webContents.id === event.sender.id);
+  if (!window || (event.senderFrame && event.senderFrame !== event.sender.mainFrame)) {
+    throw new Error(message);
   }
+  return window;
+}
+
+function assertTrustedIpcSender(event) {
+  return assertIpcSenderWindow(event, [mainWindow], "拒绝来自非主窗口的桌面调用");
 }
 
 function assertQuickEntryIpcSender(event) {
-  if (
-    !quickEntryWindow ||
-    quickEntryWindow.isDestroyed() ||
-    event.sender.id !== quickEntryWindow.webContents.id
-  ) {
-    throw new Error("拒绝来自非快速录入窗口的桌面调用");
-  }
+  return assertIpcSenderWindow(event, [quickEntryWindow], "拒绝来自非快速录入窗口的桌面调用");
 }
 
 function normalizeIdList(value) {
@@ -429,10 +425,14 @@ function rendererRoutePath(context) {
   return `/quick-entry${query ? `?${query}` : ""}`;
 }
 
+function rendererDevelopmentUrl() {
+  return process.env.VITE_DEV_SERVER_URL || "http://127.0.0.1:5173";
+}
+
 function configureRendererNavigation(targetWindow) {
   targetWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   const packagedEntryUrl = pathToFileURL(path.join(__dirname, "../dist/index.html")).href;
-  const developmentUrl = process.env.VITE_DEV_SERVER_URL || "http://127.0.0.1:5173";
+  const developmentUrl = rendererDevelopmentUrl();
   const guardNavigation = (event, url) => {
     let allowed = false;
     try {
@@ -453,10 +453,7 @@ function loadRendererWindow(targetWindow, routePath = "") {
     const options = routePath ? { hash: routePath } : undefined;
     return targetWindow.loadFile(path.join(__dirname, "../dist/index.html"), options);
   }
-  const developmentUrl = (process.env.VITE_DEV_SERVER_URL || "http://127.0.0.1:5173").replace(
-    /\/$/,
-    "",
-  );
+  const developmentUrl = rendererDevelopmentUrl().replace(/\/$/, "");
   return targetWindow.loadURL(routePath ? `${developmentUrl}/#${routePath}` : developmentUrl);
 }
 

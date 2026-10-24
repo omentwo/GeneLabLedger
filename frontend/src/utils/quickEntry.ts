@@ -223,11 +223,6 @@ export function quickEntryDefaultValue(field: FieldDefinition): string {
   return field.default_value ?? "";
 }
 
-/** @deprecated 使用 `normalizeDateInput`；保留此别名以兼容现有调用点。 */
-export function normalizeQuickEntryDate(value: string): string {
-  return normalizeDateInput(value);
-}
-
 export function normalizeQuickEntryFieldValue(
   field: FieldDefinition,
   rawValue: string,
@@ -237,7 +232,7 @@ export function normalizeQuickEntryFieldValue(
     throw new Error("病理号不能为空");
   }
   if (field.system_key === "experiment_date" || field.data_type === "date") {
-    return normalizeQuickEntryDate(value);
+    return normalizeDateInput(value);
   }
   if (field.system_key === "status" && value !== "待实验" && value !== "已完成") {
     throw new Error("状态只能是“待实验”或“已完成”");

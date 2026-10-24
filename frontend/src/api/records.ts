@@ -19,16 +19,10 @@ import type {
   RecordUpdateInput,
 } from "@/types/api";
 
-export type RecordSearchScope = "current" | "all" | "selected";
-
 export interface RecordQuery {
   project_id?: string;
   include_locked?: boolean;
-  scope?: RecordSearchScope;
-  project_ids?: string[];
   status?: string;
-  search?: string;
-  experiment_date?: string;
   report_generated?: boolean;
   limit?: number;
   offset?: number;
@@ -37,12 +31,6 @@ export interface RecordQuery {
 function queryString(query: RecordQuery): string {
   const params = new URLSearchParams();
   Object.entries(query).forEach(([key, value]) => {
-    if (Array.isArray(value)) {
-      value.forEach((item) => {
-        if (item !== "") params.append(key, String(item));
-      });
-      return;
-    }
     if (value !== undefined && value !== "") params.set(key, String(value));
   });
   const encoded = params.toString();

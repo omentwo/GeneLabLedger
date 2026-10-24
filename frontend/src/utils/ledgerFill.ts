@@ -148,7 +148,7 @@ function filledSeriesValue(
   const dateField = field.data_type === "date" || field.system_key === "experiment_date";
   if (dateField && values.every((value) => Boolean(value))) {
     try {
-      const dates = values.map(normalizeDate);
+      const dates = values.map(normalizeDateInput);
       const timestamps = dates.map((date) => new Date(`${date}T00:00:00`).getTime());
       const position = seriesPosition(dates.length, targetIndex);
       const step = position.stepPair
@@ -234,10 +234,3 @@ export function buildGridFillEntries(
   }
   return entries;
 }
-
-
-/** @deprecated 使用 `normalizeDateInput`；保留此别名以兼容现有调用点。 */
-export function normalizeDate(value: string): string {
-  return normalizeDateInput(value);
-}
-

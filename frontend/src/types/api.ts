@@ -268,7 +268,7 @@ export interface RecordBatchNewRecord {
 export interface RecordValidationIssue {
   record_id: string;
   field_id: string;
-  severity: "suggestion" | "warning" | "error";
+  severity: "warning" | "error";
   message: string;
 }
 

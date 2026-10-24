@@ -38,7 +38,7 @@ function isEmptyFilter(filter: LedgerFieldFilter | undefined): boolean {
   return !filter.start && !filter.end;
 }
 
-export function matchesLedgerFilter(
+function matchesLedgerFilter(
   record: LedgerRow,
   field: FieldDefinition,
   filter: LedgerFieldFilter | undefined,
@@ -86,7 +86,7 @@ function compareNonEmptyValues(
   });
 }
 
-export function compareLedgerRows(
+function compareLedgerRows(
   left: LedgerRow,
   right: LedgerRow,
   field: FieldDefinition,

@@ -21,7 +21,6 @@ import {
   ElMessageBox,
   TableV2FixedDir,
   type Column,
-  type TableV2Instance,
 } from "element-plus";
 import {
   computed,
@@ -40,10 +39,14 @@ import { ApiError } from "@/api/client";
 import {
   createLedgerNativePreview,
   DEFAULT_LEDGER_PREVIEW_SCOPE,
-  getNativePreviewStatus,
-  getPreviewCapabilities,
   type LedgerPreviewScope,
 } from "@/api/preview";
+import {
+  fetchPreviewCapabilities,
+  isNativeEngineAvailable,
+  monitorNativePreviewJob,
+  nativeEngineLabelFor,
+} from "@/utils/nativePreviewJob";
 import {
   DEFAULT_LEDGER_DISPLAY_SETTINGS,
   LEDGER_FONT_FAMILY_OPTIONS,
@@ -68,7 +71,6 @@ import {
   FIND_REPLACE_RECORD_LIMIT,
   previewReorderByDate,
   applyReorderByDate,
-  queryRecordIds,
   queryRecords,
   setRecordLock,
   setCellsHighlight,
@@ -114,11 +116,10 @@ import type {
 } from "@/types/electron";
 import {
   buildGridFillEntries,
-  normalizeDate,
   type GridFillMode,
 } from "@/utils/ledgerFill";
+import { normalizeDateInput, shanghaiDateKey } from "@/utils/datetime";
 import {
-  gridAutoScrollVector,
   nextGridScrollOffset,
   type GridAutoScrollDirection,
 } from "@/utils/gridAutoScroll";
@@ -128,17 +129,38 @@ import {
   LEDGER_COLUMN_MIN_WIDTH,
   ledgerCellHorizontalPadding,
 } from "@/utils/ledgerColumnWidth";
-import { shanghaiDateKey } from "@/utils/datetime";
 import { desktopBridge } from "@/utils/desktop";
 import { logError } from "@/utils/logger";
 import { registerWindowCloseGuard } from "@/utils/windowCloseGuard";
 import {
+  GRID_CELL_KEY_SEPARATOR,
+  makeGridCellHelpers,
+  moveGridCellByTab as stepGridCellByTab,
+  normalizedGridRange,
+  sameGridCell,
+  splitGridCellKey,
+  type GridCellPosition,
+  type GridCellRange,
+  type GridCellSelectionSnapshot,
+  type NormalizedGridRange,
+} from "@/utils/gridSelectionModel";
+import { useLedgerContext } from "@/composables/useLedgerContext";
+import { useLedgerRecords } from "@/composables/useLedgerRecords";
+import { useLedgerGridSelection } from "@/composables/useLedgerGridSelection";
+import { useGridPointerDrag } from "@/composables/useGridPointerDrag";
+import { useGridFillDrag } from "@/composables/useGridFillDrag";
+import {
+  useLedgerCellSaveState,
+  type CellSaveState,
+  type CellSaveStatus,
+} from "@/composables/useLedgerCellSaveState";
+import { useLedgerValidationPanel } from "@/composables/useLedgerValidationPanel";
+import { useLedgerGridClipboard } from "@/composables/useLedgerGridClipboard";
+import {
   LEDGER_GRID_CLIPBOARD_MIME,
-  buildLedgerGridClipboardData,
   expandLedgerSingleCellPaste,
   parseLedgerGridClipboardPayload,
   type LedgerGridClipboardCell as GridClipboardCell,
-  type LedgerGridClipboardPayload as GridClipboardPayload,
 } from "@/utils/ledgerClipboard";
 import {
   LEDGER_LAYOUT_SETTINGS_KEY,
@@ -159,7 +181,6 @@ import {
   isValidationSnapshotCurrent,
 } from "@/utils/validationPrompt";
 import {
-  applyLedgerTableView,
   reanchorInsertedDraftGroup,
   type LedgerDraftPlacement,
   type LedgerFieldFilter,
@@ -170,10 +191,7 @@ import {
 } from "@/utils/ledgerTableView";
 import { getRecordFieldValue as valueFor } from "@/utils/recordFieldValue";
 import { summarizeLedgerSelection } from "@/utils/ledgerSelectionStats";
-import {
-  LedgerRecordCache,
-  ledgerRecordQueryKey,
-} from "@/utils/ledgerRecordCache";
+import { ledgerRecordQueryKey } from "@/utils/ledgerRecordCache";
 import {
   readLastLedgerProjectId,
   rememberLastLedgerProjectId,
@@ -209,8 +227,16 @@ const canUndoHistory = ledgerHistory.canUndo;
 const canRedoHistory = ledgerHistory.canRedo;
 const historyBusy = ledgerHistory.busy;
 
-const activeProjectId = ref("");
-const records = ref<ProjectRecord[]>([]);
+const ledgerContext = useLedgerContext();
+const {
+  activeProjectId,
+  currentProject,
+  tableProjectId,
+  fields,
+  fieldById,
+  records,
+  tableRef,
+} = ledgerContext;
 const selectedRecords = ref<ProjectRecord[]>([]);
 const ledgerDisplaySettings = ref<LedgerDisplaySettings>({
   ...DEFAULT_LEDGER_DISPLAY_SETTINGS,
@@ -230,63 +256,12 @@ const ledgerRangeDates = computed(() => {
 });
 const ledgerTableCardRef = ref<HTMLElement | null>(null);
 const projectStripRef = ref<HTMLElement | null>(null);
-const tableRef = ref<TableV2Instance | null>(null);
 const ledgerHorizontalScrollbarRef = ref<HTMLElement | null>(null);
 const LEDGER_HORIZONTAL_SCROLLBAR_HEIGHT = 10;
 type AutosizeTextareaInstance = { resizeTextarea: () => void };
 const autosizeTextareaRefs = new Map<string, AutosizeTextareaInstance>();
-type GridCellPosition = { rowIndex: number; columnIndex: number };
-type GridCellRange = { anchor: GridCellPosition; focus: GridCellPosition };
-type GridCellSelectionSnapshot = {
-  active: GridCellPosition | null;
-  anchor: GridCellPosition | null;
-  range: GridCellRange | null;
-  selectedKeys: Set<string>;
-};
-type NormalizedGridRange = {
-  rowStart: number;
-  rowEnd: number;
-  columnStart: number;
-  columnEnd: number;
-};
 type GridCellEditSnapshot = { rowId: string; fieldId: string; value: string };
-type GridClipboardSelection = { positions: GridCellPosition[]; active: GridCellPosition };
-type GridCutSnapshot = {
-  projectId: string;
-  projectGeneration: number;
-  cells: Array<GridCellEditSnapshot & { version: number }>;
-};
-type GridCellDragMode = "replace" | "shift" | "add";
 type GridPasteEntry = GridClipboardCell;
-type GridCellDragState = {
-  pointerId: number;
-  anchor: GridCellPosition;
-  focus: GridCellPosition;
-  startX: number;
-  startY: number;
-  lastX: number;
-  lastY: number;
-  dragging: boolean;
-  mode: GridCellDragMode;
-  initialSelectionKeys: Set<string>;
-  tableElement: HTMLElement;
-  lastAppliedFocus: GridCellPosition | null;
-  horizontalScrollDirection: GridAutoScrollDirection;
-  verticalScrollDirection: GridAutoScrollDirection;
-};
-type GridFillDragState = {
-  pointerId: number;
-  source: NormalizedGridRange;
-  target: NormalizedGridRange;
-  mode: GridFillMode;
-  startX: number;
-  startY: number;
-  lastX: number;
-  lastY: number;
-  dragging: boolean;
-  tableElement: HTMLElement;
-  finishPromise: Promise<boolean>;
-};
 type RecordSelectionDragPreview = {
   range: RecordSelectionRange;
   selected: boolean;
@@ -307,31 +282,11 @@ type RecordSelectionDragState = {
   lastAppliedIndex: number | null;
   verticalScrollDirection: GridAutoScrollDirection;
 };
-const activeGridCell = ref<GridCellPosition | null>(null);
-const gridCellRange = ref<GridCellRange | null>(null);
-const selectedGridCellKeys = ref<Set<string>>(new Set());
-const gridSelectionAnchor = ref<GridCellPosition | null>(null);
 let findReplaceGridSelectionSnapshot: GridCellSelectionSnapshot | null = null;
 const editingGridCell = ref<GridCellPosition | null>(null);
 const editingGridSnapshot = ref<GridCellEditSnapshot | null>(null);
-const gridSelectionDragging = ref(false);
-let gridCellDragState: GridCellDragState | null = null;
-let gridCellDragFrame: number | null = null;
-let pendingGridCell: GridCellPosition | null = null;
-let gridCellAutoScrollFrame: number | null = null;
-let gridCellAutoScrollTimestamp: number | null = null;
-let gridCellWheelUpdateTimer: number | null = null;
 let gridCellEditFinishPromise: Promise<boolean> | null = null;
 let gridCellEditSession = 0;
-let lastGridClipboard: { plainText: string; payload: GridClipboardPayload } | null = null;
-const gridCutInProgress = ref(false);
-let suppressGridClick = false;
-let gridFillDragState: GridFillDragState | null = null;
-const gridFillPreviewRange = ref<NormalizedGridRange | null>(null);
-const gridFillPreviewSource = ref<NormalizedGridRange | null>(null);
-const gridFillPreviewValues = ref(new Map<string, string>());
-const gridFillPreviewSummary = ref("");
-const gridFillPreviewPointer = reactive({ left: 0, top: 0 });
 let suppressGridFocusReset = false;
 const pointerDragThreshold = 10;
 const recordSelectionDragging = ref(false);
@@ -344,14 +299,11 @@ let recordSelectionAutoScrollTimestamp: number | null = null;
 let recordSelectionAnchorId: string | null = null;
 let suppressRecordSelectionClick = false;
 let bottomScrollTimers: number[] = [];
-const loading = ref(false);
 const historyReplayLoading = ref(false);
 const savingIds = ref(new Set<string>());
 const closeSaving = ref(false);
 const preparingClose = ref(false);
 const quickEntryRefreshInProgress = ref(false);
-type CellSaveStatus = "dirty" | "saving" | "saved" | "error";
-type CellSaveState = { status: CellSaveStatus; message?: string };
 type ValidationCellRollbackSnapshot = {
   key: string;
   recordId: string;
@@ -367,11 +319,6 @@ const cellSaveStatusLabels: Record<CellSaveStatus | "idle", string> = {
   error: "失败",
   idle: "无改动",
 };
-const cellSaveStates = ref(new Map<string, CellSaveState>());
-const cellSaveVersions = new Map<string, number>();
-const cellSaveClearTimers = new Map<string, number>();
-const cellSaveInFlightCounts = new Map<string, number>();
-const recordSaveQueues = new Map<string, Promise<unknown>>();
 const fieldErrors = ref<Record<string, string>>({});
 const managerVisible = ref(false);
 const templateManagerVisible = ref(false);
@@ -398,25 +345,6 @@ const findReplaceForm = reactive({
   matchMode: "substring" as "substring" | "whole",
   caseSensitive: false,
 });
-type ValidationPanelState = {
-  token: string;
-  projectId: string;
-  title: string;
-  label: string;
-  outcomeText: string;
-  cancelText: string;
-  continueText: string;
-  issues: RecordValidationIssue[];
-  affectedCount: number;
-  skippedLocked: number;
-  cellKeys: string[];
-  cellVersions: Record<string, number>;
-  canContinue: boolean;
-};
-const validationPanel = ref<ValidationPanelState | null>(null);
-const validationCommitLoading = ref(false);
-let pendingValidationAction: (() => Promise<void>) | null = null;
-let pendingValidationCancel: (() => void) | null = null;
 const previewScope = ref<LedgerPreviewScope>(DEFAULT_LEDGER_PREVIEW_SCOPE);
 const previewEngine = ref<PrintEngine>("auto");
 const previewCapabilities = ref<PreviewCapabilities | null>(null);
@@ -463,6 +391,38 @@ const exportFilter = reactive({
   end: "",
 });
 const draftRows = ref<LedgerRow[]>([]);
+const {
+  loading,
+  recordTotal,
+  loadedRecordCount,
+  baseTableRows,
+  tableRows,
+  tableRowIndexById,
+  queryAllRecordBatches,
+  queryLedgerRecordIds,
+  ledgerRecordCache,
+  LEDGER_RECORD_CACHE_MAX_RECORDS,
+  projectRecordCacheGeneration,
+  invalidateProjectRecordCache,
+  beginRecordsRequest,
+  finishRecordsRequest,
+  disposeRecords,
+} = useLedgerRecords(ledgerContext, { draftRows, ledgerSort, ledgerFilters });
+const {
+  activeGridCell,
+  gridCellRange,
+  selectedGridCellKeys,
+  gridSelectionAnchor,
+  captureGridIdentity,
+  restoreGridIdentity,
+  replaceGridCellSelection,
+  toggleGridCell,
+  clearGridCellSelection,
+  selectedGridCellPositions,
+  isGridCellSelected,
+  selectGridCell,
+  materializeGridCellRangeSelection,
+} = useLedgerGridSelection({ fields, tableRows, tableRowIndexById });
 const focusRecordId = ref("");
 const highlightDialogVisible = ref(false);
 const highlightLoading = ref(false);
@@ -578,13 +538,8 @@ const persistedValues = new Map<string, string>();
  */
 const dirtyCellKeys = new Set<string>();
 const insertedGroupRegistry: LedgerInsertedGroupRegistry = new Map();
-const LEDGER_RECORD_CACHE_MAX_RECORDS = 10_000;
 let draftSequence = 0;
-let loadSequence = 0;
-let recordsAbortController: AbortController | null = null;
 let rangeRefreshTimer: number | undefined;
-const ledgerRecordCache = new LedgerRecordCache({ maxEntries: 2 });
-const projectRecordCacheGenerations = new Map<string, number>();
 let ledgerDisposed = false;
 let removeQuickEntryChangedListener: (() => void) | undefined;
 let quickEntryRefreshPromise: Promise<void> = Promise.resolve();
@@ -592,8 +547,6 @@ const QUICK_ENTRY_RETRY_DELAY_MS = 500;
 let quickEntryRetryTimer: number | undefined;
 const quickEntryRetryPending = new Map<string, number>();
 const loadBatchSize = computed(() => ledgerDisplaySettings.value.loadBatchSize);
-const recordTotal = ref(0);
-const loadedRecordCount = ref(0);
 const selectedRecordIds = ref(new Set<string>());
 const selectedRecordCache = new Map<string, ProjectRecord>();
 const recordSelectionScope = ref<RecordSelectionScope>("all");
@@ -601,19 +554,6 @@ let ledgerInitialized = false;
 let projectViewGeneration = 0;
 let projectLoadPromise: Promise<void> | null = null;
 let ledgerLayoutSaveQueue: Promise<void> = Promise.resolve();
-
-function projectRecordCacheGeneration(projectId: string): number {
-  return projectRecordCacheGenerations.get(projectId) ?? 0;
-}
-
-function invalidateProjectRecordCache(projectId: string): void {
-  if (!projectId) return;
-  ledgerRecordCache.invalidateProject(projectId);
-  projectRecordCacheGenerations.set(
-    projectId,
-    projectRecordCacheGeneration(projectId) + 1,
-  );
-}
 
 function normalizeQuickEntryProjectChange(
   change: { projectId?: unknown; revision?: unknown },
@@ -643,7 +583,7 @@ function hasPendingLedgerEdits(): boolean {
     loading.value
     || editingGridCell.value
     || savingIds.value.size
-    || cellSaveInFlightCounts.size
+    || hasCellSaveInFlight()
     || hasDirtyLedgerChanges(),
   );
 }
@@ -752,20 +692,6 @@ function handleLedgerWindowFocus(): void {
   void requestPendingQuickEntryChanges();
 }
 
-const currentProject = computed(() => appStore.projectById(activeProjectId.value));
-// Keep the table schema on the previous project while the next project's
-// records are loading.  This prevents Element Plus from laying out a new
-// column set against the old rows and then laying it out again after the API
-// response arrives.
-const tableProjectId = ref("");
-const tableProject = computed(() => appStore.projectById(tableProjectId.value));
-const fields = computed(() =>
-  (tableProject.value?.fields ?? [])
-    .filter((field) => !field.hidden)
-    .slice()
-    .sort((left, right) => left.sort_order - right.sort_order),
-);
-const fieldById = computed(() => new Map(fields.value.map((field) => [field.id, field])));
 type LedgerVirtualColumnKind = "selection" | "lock" | "field";
 type LedgerVirtualColumn = Column<unknown> & {
   kind: LedgerVirtualColumnKind;
@@ -829,13 +755,6 @@ const ledgerVirtualContentWidth = computed(() =>
   ledgerVirtualColumns.value.reduce((total, column) => total + column.width, 0),
 );
 const selectedCount = computed(() => selectedRecordIds.value.size);
-const baseTableRows = computed<LedgerRow[]>(() => [...records.value, ...draftRows.value]);
-const tableRows = computed<LedgerRow[]>(() =>
-  applyLedgerTableView(baseTableRows.value, fields.value, ledgerSort.value, ledgerFilters.value),
-);
-const tableRowIndexById = computed(
-  () => new Map(tableRows.value.map((row, index) => [row.id, index] as const)),
-);
 const findMatches = computed<number[]>(() => {
   const term = debouncedFindTerm.value;
   if (
@@ -1023,20 +942,6 @@ function clearCellTitle(event: MouseEvent): void {
 function closeLedgerOverlays(): void {
   closeColumnTools();
   closeLedgerContextMenu();
-}
-
-function captureGridIdentity(position: GridCellPosition | null): { rowId: string; fieldId: string } | null {
-  if (!position) return null;
-  const row = tableRows.value[position.rowIndex];
-  const field = fields.value[position.columnIndex];
-  return row && field ? { rowId: row.id, fieldId: field.id } : null;
-}
-
-function restoreGridIdentity(identity: { rowId: string; fieldId: string } | null): GridCellPosition | null {
-  if (!identity) return null;
-  const rowIndex = tableRowIndexById.value.get(identity.rowId) ?? -1;
-  const columnIndex = fields.value.findIndex((field) => field.id === identity.fieldId);
-  return rowIndex >= 0 && columnIndex >= 0 ? { rowIndex, columnIndex } : null;
 }
 
 function clearRecordSelection(): void {
@@ -1242,12 +1147,127 @@ function gridCellFromElement(element: EventTarget | null): GridCellPosition | nu
   return { rowIndex, columnIndex };
 }
 
-function clampGridCell(position: GridCellPosition): GridCellPosition {
-  return {
-    rowIndex: Math.max(0, Math.min(tableRows.value.length - 1, position.rowIndex)),
-    columnIndex: Math.max(0, Math.min(fields.value.length - 1, position.columnIndex)),
-  };
-}
+const gridCellHelpers = makeGridCellHelpers(() => tableRows.value, () => fields.value);
+const clampGridCell = gridCellHelpers.clamp;
+const gridCellKey = gridCellHelpers.key;
+const gridCellPositionsForRange = gridCellHelpers.positionsForRange;
+const {
+  gridSelectionDragging,
+  suppressGridClick,
+  stopGridCellDrag,
+  gridCellAtPoint,
+  handleGridPointerDown,
+} = useGridPointerDrag({
+  cells: gridCellHelpers,
+  selection: {
+    activeGridCell,
+    gridCellRange,
+    selectedGridCellKeys,
+    gridSelectionAnchor,
+    selectGridCell,
+    materializeGridCellRangeSelection,
+  },
+  tableRef,
+  cellFromElement: gridCellFromElement,
+  bodyScrollElement: gridTableBodyScrollElement,
+  isEditingCell: isGridCellEditing,
+  commitActiveEdit: () => {
+    if (editingGridCell.value) void finishGridCellEdit(true, false);
+  },
+  focusCell: (position) => {
+    void focusGridCell(position);
+  },
+  dragThreshold: pointerDragThreshold,
+});
+const {
+  gridFillPreviewRange,
+  gridFillPreviewSource,
+  gridFillPreviewValues,
+  gridFillPreviewSummary,
+  gridFillPreviewPointer,
+  stopGridFillDrag,
+  handleGridFillPointerDown,
+} = useGridFillDrag({
+  fields,
+  tableRows,
+  gridCellRange,
+  suppressGridClick,
+  cellFromElement: gridCellFromElement,
+  cellAtPoint: gridCellAtPoint,
+  commitEditThen: () => (editingGridCell.value ? finishGridCellEdit(true, false) : Promise.resolve(true)),
+  applyFill: applyGridFill,
+  dragThreshold: pointerDragThreshold,
+});
+const {
+  cellSaveStates,
+  persistedKey,
+  setCellSaveState,
+  clearCellSaveState,
+  clearAllCellSaveStates,
+  peekCellSaveVersion,
+  nextCellSaveVersion,
+  restoreCellSaveVersion,
+  dropCellSaveVersion,
+  beginCellSave,
+  endCellSave,
+  cellSaveInFlightCount,
+  hasCellSaveInFlight,
+  dropCellSaveInFlight,
+  clearCellSaveInFlight,
+  enqueueRecordSave,
+} = useLedgerCellSaveState();
+const {
+  validationPanel,
+  validationCommitLoading,
+  openValidationPanel,
+  dismissValidationPanel,
+  cancelValidationPanel,
+  hasPendingValidationAction,
+  continueValidationCommit,
+} = useLedgerValidationPanel({
+  projectId: () => activeProjectId.value,
+  peekCellSaveVersion,
+  commitTokenPanel: async (panel) => {
+    const result = await commitCellBatch(panel.token, true);
+    const completedKeys = new Set(panel.cellKeys);
+    result.records.forEach((record) => replaceRecordPreservingPending(record, completedKeys));
+    panel.cellKeys.forEach((key) => {
+      const [recordId = "", fieldId = ""] = key.split(":");
+      if (recordId && fieldId) setCellSaveState(recordId, fieldId, { status: "saved" });
+    });
+    pushCellHistory(panel.label, result.changes, panel.projectId);
+    ElMessage.success(`已保存 ${new Set(result.changes.map((change) => change.record_id)).size} 条记录`);
+  },
+});
+const {
+  gridCutInProgress,
+  gridClipboardSelection,
+  lastGridClipboardPayload,
+  clearLastGridClipboard,
+  handleGridCopy,
+  handleGridCut,
+  nativeGridClipboardTarget,
+  copyGridSelectionWithNativeCommand,
+  copyGridSelectionToClipboard,
+  cutGridSelectionToClipboard,
+} = useLedgerGridClipboard({
+  fields,
+  tableRows,
+  tableRowIndexById,
+  loading,
+  activeGridCell,
+  selectedGridCellPositions,
+  clampCell: clampGridCell,
+  cellFromElement: gridCellFromElement,
+  cellData: gridCellData,
+  isEditingCell: isGridCellEditing,
+  peekCellSaveVersion,
+  persistedKey,
+  projectId: () => activeProjectId.value,
+  projectGeneration: () => projectViewGeneration,
+  isDisposed: () => ledgerDisposed,
+  clearCells: (positions) => clearGridCellRange("剪切", { positions, preserveSelection: true }),
+});
 
 function moveGridCell(position: GridCellPosition, rowDelta: number, columnDelta: number): GridCellPosition {
   return clampGridCell({
@@ -1257,129 +1277,7 @@ function moveGridCell(position: GridCellPosition, rowDelta: number, columnDelta:
 }
 
 function moveGridCellByTab(position: GridCellPosition, backwards: boolean): GridCellPosition {
-  const columnCount = fields.value.length;
-  const rowCount = tableRows.value.length;
-  if (!columnCount || !rowCount) return clampGridCell(position);
-  const lastIndex = rowCount * columnCount - 1;
-  const currentIndex = position.rowIndex * columnCount + position.columnIndex;
-  const nextIndex = Math.max(0, Math.min(lastIndex, currentIndex + (backwards ? -1 : 1)));
-  return {
-    rowIndex: Math.floor(nextIndex / columnCount),
-    columnIndex: nextIndex % columnCount,
-  };
-}
-
-function normalizedGridRange(range: GridCellRange): NormalizedGridRange {
-  return {
-    rowStart: Math.min(range.anchor.rowIndex, range.focus.rowIndex),
-    rowEnd: Math.max(range.anchor.rowIndex, range.focus.rowIndex),
-    columnStart: Math.min(range.anchor.columnIndex, range.focus.columnIndex),
-    columnEnd: Math.max(range.anchor.columnIndex, range.focus.columnIndex),
-  };
-}
-
-const GRID_CELL_KEY_SEPARATOR = "\u0000";
-
-function gridCellKey(position: GridCellPosition): string {
-  const row = tableRows.value[position.rowIndex];
-  const field = fields.value[position.columnIndex];
-  return row && field ? `${row.id}${GRID_CELL_KEY_SEPARATOR}${field.id}` : "";
-}
-
-function gridCellPositionsForRange(range: GridCellRange): GridCellPosition[] {
-  const normalized = normalizedGridRange(range);
-  const positions: GridCellPosition[] = [];
-  for (let rowIndex = normalized.rowStart; rowIndex <= normalized.rowEnd; rowIndex += 1) {
-    for (
-      let columnIndex = normalized.columnStart;
-      columnIndex <= normalized.columnEnd;
-      columnIndex += 1
-    ) {
-      if (gridCellKey({ rowIndex, columnIndex })) positions.push({ rowIndex, columnIndex });
-    }
-  }
-  return positions;
-}
-
-function splitGridCellKey(key: string): [rowId: string, fieldId: string] | null {
-  const separatorIndex = key.indexOf(GRID_CELL_KEY_SEPARATOR);
-  if (separatorIndex < 0) return null;
-  return [
-    key.slice(0, separatorIndex),
-    key.slice(separatorIndex + GRID_CELL_KEY_SEPARATOR.length),
-  ];
-}
-
-function selectedGridCellPositions(): GridCellPosition[] {
-  const selectedKeys = selectedGridCellKeys.value;
-  if (!selectedKeys.size) return [];
-  const rowIndexById = tableRowIndexById.value;
-  const columnIndexByFieldId = new Map(
-    fields.value.map((field, index) => [field.id, index] as const),
-  );
-  const positions: GridCellPosition[] = [];
-  for (const key of selectedKeys) {
-    const parts = splitGridCellKey(key);
-    if (!parts) continue;
-    const rowIndex = rowIndexById.get(parts[0]);
-    const columnIndex = columnIndexByFieldId.get(parts[1]);
-    if (rowIndex === undefined || columnIndex === undefined) continue;
-    positions.push({ rowIndex, columnIndex });
-  }
-  positions.sort((left, right) => left.rowIndex - right.rowIndex || left.columnIndex - right.columnIndex);
-  return positions;
-}
-
-function isGridCellSelected(position: GridCellPosition): boolean {
-  const range = gridCellRange.value;
-  if (range) {
-    const normalized = normalizedGridRange(range);
-    return (
-      position.rowIndex >= normalized.rowStart &&
-      position.rowIndex <= normalized.rowEnd &&
-      position.columnIndex >= normalized.columnStart &&
-      position.columnIndex <= normalized.columnEnd
-    );
-  }
-  const key = gridCellKey(position);
-  return Boolean(key && selectedGridCellKeys.value.has(key));
-}
-
-function replaceGridCellSelection(
-  positions: GridCellPosition[],
-  active: GridCellPosition,
-  anchor: GridCellPosition = active,
-  range: GridCellRange | null = null,
-): void {
-  const keys = new Set(positions.map(gridCellKey).filter(Boolean));
-  selectedGridCellKeys.value = keys;
-  activeGridCell.value = clampGridCell(active);
-  gridSelectionAnchor.value = clampGridCell(anchor);
-  gridCellRange.value = range
-    ? {
-        anchor: { ...range.anchor },
-        focus: { ...range.focus },
-      }
-    : null;
-}
-
-function toggleGridCell(position: GridCellPosition): void {
-  const nextPosition = clampGridCell(position);
-  const key = gridCellKey(nextPosition);
-  if (!key) return;
-  const keys = new Set(selectedGridCellKeys.value);
-  if (keys.has(key)) keys.delete(key);
-  else keys.add(key);
-  selectedGridCellKeys.value = keys;
-  activeGridCell.value = nextPosition;
-  if (!gridSelectionAnchor.value) gridSelectionAnchor.value = nextPosition;
-  gridCellRange.value = null;
-}
-
-function clearGridCellSelection(): void {
-  selectedGridCellKeys.value = new Set();
-  gridCellRange.value = null;
-  gridSelectionAnchor.value = null;
+  return stepGridCellByTab(position, backwards, gridCellHelpers.size());
 }
 
 function clearGridCellEdit(invalidateSession = true): void {
@@ -1388,27 +1286,8 @@ function clearGridCellEdit(invalidateSession = true): void {
   if (invalidateSession) gridCellEditSession += 1;
 }
 
-function sameGridCell(left: GridCellPosition | null, right: GridCellPosition | null): boolean {
-  return Boolean(
-    left &&
-      right &&
-      left.rowIndex === right.rowIndex &&
-      left.columnIndex === right.columnIndex,
-  );
-}
-
 function isGridCellEditing(position: GridCellPosition | null): boolean {
   return sameGridCell(editingGridCell.value, position);
-}
-
-function selectGridCell(position: GridCellPosition): void {
-  const nextPosition = clampGridCell(position);
-  replaceGridCellSelection(
-    [nextPosition],
-    nextPosition,
-    nextPosition,
-    { anchor: { ...nextPosition }, focus: { ...nextPosition } },
-  );
 }
 
 function captureFindReplaceGridSelection(): void {
@@ -1902,60 +1781,6 @@ function handleGridFocusIn(event: FocusEvent): void {
   }
 }
 
-function stopGridCellDrag(resetClickSuppression = true): void {
-  clearGridCellAutoScroll();
-  clearGridCellDragFrame();
-  clearGridCellWheelUpdate();
-  document.removeEventListener("pointermove", handleGridPointerMove);
-  document.removeEventListener("pointerup", handleGridPointerUp, true);
-  document.removeEventListener("pointercancel", handleGridPointerCancel, true);
-  document.removeEventListener("wheel", handleGridWheelDuringDrag);
-  gridCellDragState = null;
-  gridSelectionDragging.value = false;
-  if (resetClickSuppression) {
-    window.setTimeout(() => {
-      suppressGridClick = false;
-    }, 0);
-  }
-}
-
-function clearGridCellDragFrame(): void {
-  if (gridCellDragFrame !== null) window.cancelAnimationFrame(gridCellDragFrame);
-  gridCellDragFrame = null;
-  pendingGridCell = null;
-}
-
-function flushGridCellDragFrame(): void {
-  if (gridCellDragFrame !== null) window.cancelAnimationFrame(gridCellDragFrame);
-  gridCellDragFrame = null;
-  const cell = pendingGridCell;
-  pendingGridCell = null;
-  if (cell) updateGridCellDrag(cell);
-}
-
-function materializeGridCellRangeSelection(): void {
-  const range = gridCellRange.value;
-  if (!range) return;
-  selectedGridCellKeys.value = new Set(
-    gridCellPositionsForRange(range).map(gridCellKey).filter(Boolean),
-  );
-}
-
-function scheduleGridCellDragUpdate(cell: GridCellPosition): void {
-  pendingGridCell = cell;
-  if (gridCellDragFrame !== null) return;
-  gridCellDragFrame = window.requestAnimationFrame(() => {
-    gridCellDragFrame = null;
-    const nextCell = pendingGridCell;
-    pendingGridCell = null;
-    if (nextCell) updateGridCellDrag(nextCell);
-  });
-}
-
-function gridCellAtPoint(x: number, y: number): GridCellPosition | null {
-  const element = document.elementFromPoint?.(x, y) ?? null;
-  return gridCellFromElement(element);
-}
 
 function gridTableBodyScrollElement(tableElement: HTMLElement): HTMLElement | null {
   return tableElement.querySelector<HTMLElement>(
@@ -2244,240 +2069,6 @@ function handleRecordSelectionClickCapture(event: MouseEvent): void {
   commitRecordSelectionIds(next);
 }
 
-function clearGridCellAutoScroll(): void {
-  if (gridCellAutoScrollFrame !== null) {
-    window.cancelAnimationFrame(gridCellAutoScrollFrame);
-  }
-  gridCellAutoScrollFrame = null;
-  gridCellAutoScrollTimestamp = null;
-}
-
-function clearGridCellWheelUpdate(): void {
-  if (gridCellWheelUpdateTimer === null) return;
-  window.clearTimeout(gridCellWheelUpdateTimer);
-  gridCellWheelUpdateTimer = null;
-}
-
-function gridCellAtDragPoint(state: GridCellDragState): GridCellPosition | null {
-  const body = gridTableBodyScrollElement(state.tableElement);
-  const rect = body?.getBoundingClientRect();
-  if (!rect || rect.width <= 0 || rect.height <= 0) {
-    return gridCellAtPoint(state.lastX, state.lastY);
-  }
-  const x = Math.max(rect.left + 1, Math.min(rect.right - 1, state.lastX));
-  const y = Math.max(rect.top + 1, Math.min(rect.bottom - 1, state.lastY));
-  return gridCellAtPoint(x, y);
-}
-
-function updateGridCellAutoScroll(event: PointerEvent): void {
-  const state = gridCellDragState;
-  if (!state || !state.dragging) return;
-  const body = gridTableBodyScrollElement(state.tableElement);
-  const rect = body?.getBoundingClientRect() ?? state.tableElement.getBoundingClientRect();
-  const edgeSize = 42;
-  const direction = gridAutoScrollVector(event.clientX, event.clientY, rect, edgeSize);
-  if (
-    state.horizontalScrollDirection === direction.horizontal &&
-    state.verticalScrollDirection === direction.vertical
-  ) return;
-
-  state.horizontalScrollDirection = direction.horizontal;
-  state.verticalScrollDirection = direction.vertical;
-  clearGridCellAutoScroll();
-  if (direction.horizontal === 0 && direction.vertical === 0) return;
-
-  const scrollFrame = (timestamp: number): void => {
-    gridCellAutoScrollFrame = null;
-    const currentState = gridCellDragState;
-    if (!currentState) {
-      clearGridCellAutoScroll();
-      return;
-    }
-    const horizontalDirection = currentState.horizontalScrollDirection;
-    const verticalDirection = currentState.verticalScrollDirection;
-    if (horizontalDirection === 0 && verticalDirection === 0) {
-      clearGridCellAutoScroll();
-      return;
-    }
-    const elapsed = gridCellAutoScrollTimestamp === null
-      ? 1000 / 60
-      : Math.min(50, timestamp - gridCellAutoScrollTimestamp);
-    gridCellAutoScrollTimestamp = timestamp;
-    const step = 480 * elapsed / 1000;
-    const currentBody = gridTableBodyScrollElement(currentState.tableElement);
-    const currentLeft = currentBody?.scrollLeft ?? 0;
-    const currentTop = currentBody?.scrollTop ?? 0;
-    const maxLeft = currentBody
-      ? Math.max(0, currentBody.scrollWidth - currentBody.clientWidth)
-      : 0;
-    const maxTop = currentBody
-      ? Math.max(0, currentBody.scrollHeight - currentBody.clientHeight)
-      : 0;
-    const nextLeft = nextGridScrollOffset(currentLeft, maxLeft, horizontalDirection, step);
-    const nextTop = nextGridScrollOffset(currentTop, maxTop, verticalDirection, step);
-    if (nextLeft === currentLeft && nextTop === currentTop) {
-      currentState.horizontalScrollDirection = 0;
-      currentState.verticalScrollDirection = 0;
-      clearGridCellAutoScroll();
-      return;
-    }
-    if (nextLeft !== currentLeft) {
-      if (tableRef.value) tableRef.value.scrollToLeft(nextLeft);
-      else if (currentBody) currentBody.scrollLeft = nextLeft;
-    }
-    if (nextTop !== currentTop) {
-      if (tableRef.value) tableRef.value.scrollToTop(nextTop);
-      else if (currentBody) currentBody.scrollTop = nextTop;
-    }
-    const cell = gridCellAtDragPoint(currentState);
-    if (cell) updateGridCellDrag(cell);
-    gridCellAutoScrollFrame = window.requestAnimationFrame(scrollFrame);
-  };
-  gridCellAutoScrollFrame = window.requestAnimationFrame(scrollFrame);
-}
-
-function handleGridWheelDuringDrag(event: WheelEvent): void {
-  const state = gridCellDragState;
-  if (!state?.dragging) return;
-  if (event.clientX || event.clientY) {
-    state.lastX = event.clientX;
-    state.lastY = event.clientY;
-  }
-  if (gridCellWheelUpdateTimer !== null) return;
-  gridCellWheelUpdateTimer = window.setTimeout(() => {
-    gridCellWheelUpdateTimer = null;
-    const currentState = gridCellDragState;
-    if (!currentState?.dragging) return;
-    const cell = gridCellAtDragPoint(currentState);
-    if (cell) updateGridCellDrag(cell);
-  }, 0);
-}
-
-function updateGridCellDrag(cell: GridCellPosition): void {
-  const state = gridCellDragState;
-  if (!state) return;
-  const focus = clampGridCell(cell);
-  if (sameGridCell(state.lastAppliedFocus, focus)) return;
-  state.lastAppliedFocus = focus;
-  state.focus = focus;
-  activeGridCell.value = state.focus;
-  const range = {
-    anchor: { ...state.anchor },
-    focus: { ...state.focus },
-  };
-  if (state.mode === "add") {
-    const keys = new Set(state.initialSelectionKeys);
-    gridCellPositionsForRange(range).forEach((position) => keys.add(gridCellKey(position)));
-    selectedGridCellKeys.value = keys;
-    gridCellRange.value = null;
-  } else {
-    activeGridCell.value = state.focus;
-    gridSelectionAnchor.value = state.anchor;
-    gridCellRange.value = range;
-  }
-}
-
-function handleGridPointerMove(event: PointerEvent): void {
-  const state = gridCellDragState;
-  if (!state || state.pointerId !== event.pointerId) return;
-  if ((event.buttons & 1) !== 1) {
-    stopGridCellDrag();
-    return;
-  }
-  state.lastX = event.clientX;
-  state.lastY = event.clientY;
-  if (!state.dragging) {
-    const movedX = event.clientX - state.startX;
-    const movedY = event.clientY - state.startY;
-    if (Math.hypot(movedX, movedY) < pointerDragThreshold) return;
-    state.dragging = true;
-    gridSelectionDragging.value = true;
-    suppressGridClick = true;
-    event.preventDefault();
-  } else {
-    event.preventDefault();
-  }
-  const cell = gridCellAtPoint(event.clientX, event.clientY);
-  if (cell) scheduleGridCellDragUpdate(cell);
-  updateGridCellAutoScroll(event);
-}
-
-function handleGridPointerUp(event: PointerEvent): void {
-  if (!gridCellDragState || gridCellDragState.pointerId !== event.pointerId) return;
-  if (gridCellDragState.dragging) {
-    event.preventDefault();
-    flushGridCellDragFrame();
-    if (gridCellDragState.mode !== "add") materializeGridCellRangeSelection();
-  }
-  stopGridCellDrag();
-}
-
-function handleGridPointerCancel(event: PointerEvent): void {
-  if (!gridCellDragState || gridCellDragState.pointerId !== event.pointerId) return;
-  stopGridCellDrag();
-}
-
-function gridFillTargetForCell(
-  source: NormalizedGridRange,
-  cell: GridCellPosition,
-): NormalizedGridRange {
-  return {
-    rowStart: Math.min(source.rowStart, cell.rowIndex),
-    rowEnd: Math.max(source.rowEnd, cell.rowIndex),
-    columnStart: Math.min(source.columnStart, cell.columnIndex),
-    columnEnd: Math.max(source.columnEnd, cell.columnIndex),
-  };
-}
-
-function updateGridFillPreview(
-  target: NormalizedGridRange,
-  source: NormalizedGridRange,
-  mode: GridFillMode,
-  pointer?: { x: number; y: number },
-  currentCell?: GridCellPosition,
-): void {
-  gridFillPreviewSource.value = { ...source };
-  gridFillPreviewRange.value = { ...target };
-  const entries = buildGridFillEntries(
-    source,
-    target,
-    fields.value,
-    tableRows.value,
-    valueFor,
-    mode,
-  );
-  const values = new Map<string, string>();
-  entries.forEach((entry) => {
-    values.set(
-      `${source.rowStart + entry.rowOffset}:${source.columnStart + entry.columnOffset}`,
-      entry.value,
-    );
-  });
-  gridFillPreviewValues.value = values;
-  const currentKey = currentCell ? `${currentCell.rowIndex}:${currentCell.columnIndex}` : "";
-  const currentValue = currentKey ? values.get(currentKey) : undefined;
-  gridFillPreviewSummary.value = currentValue === undefined ? "" : currentValue || "（空）";
-  if (pointer) {
-    gridFillPreviewPointer.left = Math.max(8, Math.min(window.innerWidth - 360, pointer.x + 14));
-    gridFillPreviewPointer.top = Math.max(8, Math.min(window.innerHeight - 96, pointer.y + 14));
-  }
-}
-
-function clearGridFillPreview(): void {
-  gridFillPreviewRange.value = null;
-  gridFillPreviewSource.value = null;
-  gridFillPreviewValues.value = new Map();
-  gridFillPreviewSummary.value = "";
-}
-
-function stopGridFillDrag(): void {
-  document.removeEventListener("pointermove", handleGridFillPointerMove);
-  document.removeEventListener("pointerup", handleGridFillPointerUp, true);
-  document.removeEventListener("pointercancel", handleGridFillPointerCancel, true);
-  gridFillDragState = null;
-  clearGridFillPreview();
-}
-
 async function applyGridFill(
   source: NormalizedGridRange,
   target: NormalizedGridRange,
@@ -2512,88 +2103,6 @@ async function applyGridFill(
       selection,
     );
   }
-}
-
-function handleGridFillPointerDown(event: PointerEvent): void {
-  if (event.button !== 0 || event.isPrimary === false) return;
-  const range = gridCellRange.value;
-  if (!range) return;
-  const source = normalizedGridRange(range);
-  const cell = gridCellFromElement(event.target);
-  if (!cell || cell.rowIndex !== source.rowEnd || cell.columnIndex !== source.columnEnd) return;
-  const tableElement =
-    event.target instanceof Element ? event.target.closest<HTMLElement>(".el-table-v2") : null;
-  if (!tableElement) return;
-  const finishPromise = editingGridCell.value
-    ? finishGridCellEdit(true, false)
-    : Promise.resolve(true);
-  stopGridFillDrag();
-  gridFillDragState = {
-    pointerId: event.pointerId,
-    source,
-    target: { ...source },
-    mode: event.ctrlKey ? "copy" : "series",
-    startX: event.clientX,
-    startY: event.clientY,
-    lastX: event.clientX,
-    lastY: event.clientY,
-    dragging: false,
-    tableElement,
-    finishPromise,
-  };
-  document.addEventListener("pointermove", handleGridFillPointerMove, { passive: false });
-  document.addEventListener("pointerup", handleGridFillPointerUp, true);
-  document.addEventListener("pointercancel", handleGridFillPointerCancel, true);
-  event.preventDefault();
-  event.stopPropagation();
-}
-
-function handleGridFillPointerMove(event: PointerEvent): void {
-  const state = gridFillDragState;
-  if (!state || state.pointerId !== event.pointerId) return;
-  state.lastX = event.clientX;
-  state.lastY = event.clientY;
-  if (!state.dragging) {
-    if (Math.hypot(event.clientX - state.startX, event.clientY - state.startY) < pointerDragThreshold) {
-      return;
-    }
-    state.dragging = true;
-    suppressGridClick = true;
-  }
-  const cell = gridCellAtPoint(event.clientX, event.clientY);
-  if (cell) {
-    state.mode = event.ctrlKey ? "copy" : "series";
-    state.target = gridFillTargetForCell(state.source, cell);
-    updateGridFillPreview(
-      state.target,
-      state.source,
-      state.mode,
-      { x: event.clientX, y: event.clientY },
-      cell,
-    );
-  }
-  event.preventDefault();
-}
-
-async function handleGridFillPointerUp(event: PointerEvent): Promise<void> {
-  const state = gridFillDragState;
-  if (!state || state.pointerId !== event.pointerId) return;
-  const shouldFill = state.dragging;
-  const source = state.source;
-  const target = state.target;
-  const mode: GridFillMode = event.ctrlKey ? "copy" : "series";
-  const finishPromise = state.finishPromise;
-  if (shouldFill) {
-    event.preventDefault();
-    suppressGridClick = true;
-  }
-  stopGridFillDrag();
-  if (shouldFill && (await finishPromise)) await applyGridFill(source, target, mode);
-}
-
-function handleGridFillPointerCancel(event: PointerEvent): void {
-  if (!gridFillDragState || gridFillDragState.pointerId !== event.pointerId) return;
-  stopGridFillDrag();
 }
 
 function rowHasDataOutsideRange(rowIndex: number, range: NormalizedGridRange): boolean {
@@ -2632,61 +2141,17 @@ function fillDownFromGridHandle(): void {
   });
 }
 
-function handleGridPointerDown(event: PointerEvent): void {
-  if (event.target instanceof Element && event.target.closest(".grid-fill-handle")) return;
-  if (event.button !== 0 || event.isPrimary === false) return;
-  const cell = gridCellFromElement(event.target);
-  if (!cell) return;
-  if (isGridCellEditing(cell)) return;
-  const tableElement =
-    event.target instanceof Element ? event.target.closest<HTMLElement>(".el-table-v2") : null;
-  if (!tableElement) return;
-  if (editingGridCell.value) void finishGridCellEdit(true, false);
-
-  stopGridCellDrag(false);
-  const modifierAdd = event.ctrlKey || event.metaKey;
-  const modifierShift = event.shiftKey;
-  const mode: GridCellDragMode = modifierAdd ? "add" : modifierShift ? "shift" : "replace";
-  const anchor = modifierShift
-    ? gridSelectionAnchor.value ?? activeGridCell.value ?? cell
-    : cell;
-  if (mode === "replace") selectGridCell(cell);
-  else activeGridCell.value = cell;
-  void focusGridCell(cell);
-  gridCellDragState = {
-    pointerId: event.pointerId,
-    anchor: { ...cell },
-    focus: { ...cell },
-    startX: event.clientX,
-    startY: event.clientY,
-    lastX: event.clientX,
-    lastY: event.clientY,
-    dragging: false,
-    mode,
-    initialSelectionKeys: new Set(selectedGridCellKeys.value),
-    tableElement,
-    lastAppliedFocus: null,
-    horizontalScrollDirection: 0,
-    verticalScrollDirection: 0,
-  };
-  if (mode === "shift") gridCellDragState.anchor = clampGridCell(anchor);
-  document.addEventListener("pointermove", handleGridPointerMove, { passive: false });
-  document.addEventListener("pointerup", handleGridPointerUp, true);
-  document.addEventListener("pointercancel", handleGridPointerCancel, true);
-  document.addEventListener("wheel", handleGridWheelDuringDrag, { passive: true });
-}
-
 function handleGridClick(event: MouseEvent): void {
   if (event.target instanceof Element && event.target.closest(".grid-fill-handle")) {
-    suppressGridClick = false;
+    suppressGridClick.value = false;
     return;
   }
   const cell = gridCellFromElement(event.target);
   if (!cell) return;
-  if (suppressGridClick) {
+  if (suppressGridClick.value) {
     event.preventDefault();
     event.stopPropagation();
-    suppressGridClick = false;
+    suppressGridClick.value = false;
     return;
   }
   if (isGridCellEditing(cell)) {
@@ -2941,213 +2406,6 @@ function handleGridKeydown(event: KeyboardEvent): void {
   void focusGridCell(nextCell);
 }
 
-function gridClipboardSelection(eventCell: GridCellPosition | null): GridClipboardSelection | null {
-  let positions = selectedGridCellPositions();
-  if (!positions.length && eventCell) positions = [clampGridCell(eventCell)];
-  if (!positions.length) return null;
-  const firstPosition = positions[0];
-  if (!firstPosition) return null;
-  const activeCandidate = activeGridCell.value;
-  const active =
-    (activeCandidate && positions.some((position) => sameGridCell(position, activeCandidate))
-      ? activeCandidate
-      : firstPosition);
-  return { positions, active: clampGridCell(active) };
-}
-
-function buildGridClipboardData(selection: GridClipboardSelection): { plainText: string; payload: GridClipboardPayload } {
-  return buildLedgerGridClipboardData(selection.positions, (position) => {
-      const row = tableRows.value[position.rowIndex];
-      const field = fields.value[position.columnIndex];
-      return row && field ? valueFor(row, field) : "";
-    });
-}
-
-function nativeGridClipboardTarget(target: EventTarget | null): boolean {
-  if (
-    target instanceof Element
-    && target.closest("input, textarea, [contenteditable]:not([contenteditable='false'])")
-  ) return true;
-  const cell = gridCellFromElement(target);
-  return Boolean(cell && isGridCellEditing(cell));
-}
-
-function writeGridClipboardEvent(event: ClipboardEvent, selection: GridClipboardSelection): boolean {
-  const { plainText, payload } = buildGridClipboardData(selection);
-  const clipboard = event.clipboardData;
-  if (!clipboard) return false;
-  try {
-    clipboard.setData("text/plain", plainText);
-  } catch {
-    return false;
-  }
-  try {
-    clipboard.setData(LEDGER_GRID_CLIPBOARD_MIME, JSON.stringify(payload));
-  } catch {
-    // Browsers may reject custom clipboard MIME types; text/plain remains usable.
-  }
-  lastGridClipboard = { plainText, payload };
-  event.preventDefault();
-  event.stopPropagation();
-  return true;
-}
-
-function copyGridSelectionWithNativeCommand(selection: GridClipboardSelection): boolean {
-  if (typeof document.execCommand !== "function") return false;
-  const previousClipboard = lastGridClipboard;
-  let handled = false;
-  let succeeded = false;
-  const writeClipboard = (event: ClipboardEvent) => {
-    handled = writeGridClipboardEvent(event, selection);
-  };
-  document.addEventListener("copy", writeClipboard, true);
-  try {
-    // Trigger the browser's native copy during the keyboard user gesture.
-    // This also works when the async clipboard API is unavailable or denied.
-    succeeded = document.execCommand("copy") && handled;
-  } catch {
-    // Fall back to the async clipboard API when the native command is unavailable.
-  } finally {
-    document.removeEventListener("copy", writeClipboard, true);
-    if (!succeeded) lastGridClipboard = previousClipboard;
-  }
-  return succeeded;
-}
-
-function handleGridCopy(event: ClipboardEvent): void {
-  // Editing keeps the browser's native text-copy behavior. Cell/range copy
-  // is only active while the grid itself owns the selection.
-  if (nativeGridClipboardTarget(event.target)) {
-    lastGridClipboard = null;
-    return;
-  }
-  const selection = gridClipboardSelection(gridCellFromElement(event.target) ?? activeGridCell.value);
-  if (selection && !writeGridClipboardEvent(event, selection)) {
-    event.preventDefault();
-    event.stopPropagation();
-    void copyGridSelectionToClipboard(selection, false, "复制失败，请检查剪贴板权限后重试");
-  }
-}
-
-function handleGridCut(event: ClipboardEvent): void {
-  if (nativeGridClipboardTarget(event.target)) {
-    lastGridClipboard = null;
-    return;
-  }
-  const selection = gridClipboardSelection(gridCellFromElement(event.target) ?? activeGridCell.value);
-  if (!selection) return;
-  event.preventDefault();
-  event.stopPropagation();
-  void cutGridSelectionToClipboard(selection, event);
-}
-
-function captureGridCutSnapshot(selection: GridClipboardSelection): GridCutSnapshot | null {
-  const cells: GridCutSnapshot["cells"] = [];
-  for (const position of selection.positions) {
-    const data = gridCellData(position);
-    if (!data) return null;
-    cells.push({
-      rowId: data.record.id,
-      fieldId: data.field.id,
-      value: valueFor(data.record, data.field),
-      version: cellSaveVersions.get(persistedKey(data.record.id, data.field.id)) ?? 0,
-    });
-  }
-  return { projectId: activeProjectId.value, projectGeneration: projectViewGeneration, cells };
-}
-
-function resolveGridCutPositions(snapshot: GridCutSnapshot): GridCellPosition[] | null {
-  if (ledgerDisposed) return null;
-  if (snapshot.projectId !== activeProjectId.value || snapshot.projectGeneration !== projectViewGeneration) {
-    ElMessage.info("台账已切换，剪切已取消，原内容已保留");
-    return null;
-  }
-  const fieldIndexes = new Map(fields.value.map((field, index) => [field.id, index]));
-  const positions: GridCellPosition[] = [];
-  for (const cell of snapshot.cells) {
-    const rowIndex = tableRowIndexById.value.get(cell.rowId);
-    const columnIndex = fieldIndexes.get(cell.fieldId);
-    const data = rowIndex !== undefined && columnIndex !== undefined
-      ? gridCellData({ rowIndex, columnIndex }) : null;
-    if (
-      !data || valueFor(data.record, data.field) !== cell.value
-      || (cellSaveVersions.get(persistedKey(cell.rowId, cell.fieldId)) ?? 0) !== cell.version
-    ) {
-      ElMessage.warning("剪切范围的内容已变化，原内容已保留，请重新剪切");
-      return null;
-    }
-    positions.push({ rowIndex: rowIndex!, columnIndex: columnIndex! });
-  }
-  return positions;
-}
-
-async function cutGridSelectionToClipboard(
-  selection: GridClipboardSelection,
-  event?: ClipboardEvent,
-): Promise<void> {
-  if (gridCutInProgress.value || loading.value || ledgerDisposed) return;
-  const snapshot = captureGridCutSnapshot(selection);
-  if (!snapshot) return;
-  gridCutInProgress.value = true;
-  const writeFailureMessage = "剪贴板写入失败，原内容已保留，请检查剪贴板权限后重试";
-  try {
-    const copied = event
-      ? writeGridClipboardEvent(event, selection)
-      : await copyGridSelectionToClipboard(selection, false, writeFailureMessage);
-    if (!copied) {
-      if (event) ElMessage.warning(writeFailureMessage);
-      return;
-    }
-    const positions = resolveGridCutPositions(snapshot);
-    if (positions) await clearGridCellRange("剪切", { positions, preserveSelection: true });
-  } catch (error) {
-    if (!ledgerDisposed) ElMessage.error(error instanceof Error ? error.message : "剪切失败");
-  } finally {
-    gridCutInProgress.value = false;
-  }
-}
-
-async function copyGridSelectionToClipboard(
-  selectionOverride?: GridClipboardSelection,
-  showSuccess = true,
-  failureMessage = "浏览器未授予剪贴板权限，请使用 Ctrl/Cmd+C 复制",
-): Promise<boolean> {
-  const selection = selectionOverride ?? gridClipboardSelection(null);
-  if (!selection) {
-    ElMessage.warning("请先选择要复制的单元格");
-    return false;
-  }
-  const { plainText, payload } = buildGridClipboardData(selection);
-  try {
-    const clipboard = navigator.clipboard;
-    if (!clipboard) throw new Error("clipboard-unavailable");
-    let written = false;
-    if (typeof ClipboardItem !== "undefined" && typeof clipboard.write === "function") {
-      try {
-        const item = new ClipboardItem({
-          "text/plain": new Blob([plainText], { type: "text/plain" }),
-          [LEDGER_GRID_CLIPBOARD_MIME]: new Blob([JSON.stringify(payload)], {
-            type: LEDGER_GRID_CLIPBOARD_MIME,
-          }),
-        });
-        await clipboard.write([item]);
-        written = true;
-      } catch {
-        // Some browsers expose ClipboardItem but reject custom MIME types.
-      }
-    }
-    if (!written) {
-      await clipboard.writeText(plainText);
-    }
-    if (!ledgerDisposed) lastGridClipboard = { plainText, payload };
-    if (showSuccess) ElMessage.success("已复制选中单元格");
-    return true;
-  } catch {
-    if (!ledgerDisposed) ElMessage.warning(failureMessage);
-    return false;
-  }
-}
-
 function handleGridPaste(event: ClipboardEvent): void {
   const eventCell = gridCellFromElement(event.target);
   if (eventCell && isGridCellEditing(eventCell)) return;
@@ -3158,7 +2416,7 @@ function handleGridPaste(event: ClipboardEvent): void {
   const text = clipboard.getData("text/plain");
   const customPayload =
     parseLedgerGridClipboardPayload(clipboard.getData(LEDGER_GRID_CLIPBOARD_MIME)) ??
-    (lastGridClipboard?.plainText === text ? lastGridClipboard.payload : null);
+    lastGridClipboardPayload(text);
   if (!customPayload && !text) return;
   event.preventDefault();
   event.stopPropagation();
@@ -3599,9 +2857,9 @@ function setValue(
   clearFieldError(record, field);
   if (options.markDirty ?? true) {
     const key = persistedKey(record.id, field.id);
-    cellSaveVersions.set(key, (cellSaveVersions.get(key) ?? 0) + 1);
+    nextCellSaveVersion(key);
     if (validationPanel.value?.cellKeys.includes(key)) dismissValidationPanel();
-    if (isDraft(record) && pendingValidationAction && validationPanel.value?.label === "新增台账记录") {
+    if (isDraft(record) && hasPendingValidationAction() && validationPanel.value?.label === "新增台账记录") {
       dismissValidationPanel();
     }
   }
@@ -3610,7 +2868,7 @@ function setValue(
     const editState = resolveLedgerCellEditState(
       valueFor(record, field),
       persistedValues.get(key) ?? "",
-      cellSaveInFlightCounts.get(key) ?? 0,
+      cellSaveInFlightCount(key),
     );
     if (editState === "clear") {
       clearCellSaveState(key);
@@ -3623,48 +2881,6 @@ function setValue(
     if (valueFor(record, field) === (persistedValues.get(key) ?? "")) dirtyCellKeys.delete(key);
     else dirtyCellKeys.add(key);
   }
-}
-
-function persistedKey(recordId: string, fieldId: string): string {
-  return `${recordId}:${fieldId}`;
-}
-
-function setCellSaveState(recordId: string, fieldId: string, state: CellSaveState): void {
-  const key = persistedKey(recordId, fieldId);
-  const pendingTimer = cellSaveClearTimers.get(key);
-  if (pendingTimer !== undefined) {
-    window.clearTimeout(pendingTimer);
-    cellSaveClearTimers.delete(key);
-  }
-  const next = new Map(cellSaveStates.value);
-  next.set(key, state);
-  cellSaveStates.value = next;
-  if (state.status === "saved") {
-    const version = cellSaveVersions.get(key);
-    const timer = window.setTimeout(() => {
-      cellSaveClearTimers.delete(key);
-      if (cellSaveVersions.get(key) !== version) return;
-      if (cellSaveStates.value.get(key)?.status === "saved") clearCellSaveState(key);
-    }, 1500);
-    cellSaveClearTimers.set(key, timer);
-  }
-}
-
-function clearCellSaveState(key: string): void {
-  const pendingTimer = cellSaveClearTimers.get(key);
-  if (pendingTimer !== undefined) window.clearTimeout(pendingTimer);
-  cellSaveClearTimers.delete(key);
-  if (!cellSaveStates.value.has(key)) return;
-  const next = new Map(cellSaveStates.value);
-  next.delete(key);
-  cellSaveStates.value = next;
-}
-
-function clearAllCellSaveStates(): void {
-  cellSaveClearTimers.forEach((timer) => window.clearTimeout(timer));
-  cellSaveClearTimers.clear();
-  cellSaveStates.value = new Map();
-  cellSaveVersions.clear();
 }
 
 function captureValidationCellRollback(
@@ -3691,13 +2907,13 @@ function rollbackValidationCells(
     const snapshotVersion = versions[snapshot.key];
     if (
       snapshotVersion === undefined
-      || !isValidationSnapshotCurrent(snapshotVersion, cellSaveVersions.get(snapshot.key))
+      || !isValidationSnapshotCurrent(snapshotVersion, peekCellSaveVersion(snapshot.key))
     ) return;
     const record = tableRows.value.find((item) => item.id === snapshot.recordId);
     const field = fieldById.value.get(snapshot.fieldId);
     if (!record || !field) return;
     setValue(record, field, snapshot.beforeValue, { markDirty: false });
-    cellSaveVersions.set(snapshot.key, snapshotVersion + 1);
+    restoreCellSaveVersion(snapshot.key, snapshotVersion + 1);
     if (snapshot.previousFieldError) {
       setFieldError(record, field, snapshot.previousFieldError);
     } else {
@@ -3717,8 +2933,8 @@ function removeDraftRows(recordIds: Set<string>): void {
     recordIds.forEach((recordId) => {
       const key = persistedKey(recordId, field.id);
       clearCellSaveState(key);
-      cellSaveVersions.delete(key);
-      cellSaveInFlightCounts.delete(key);
+      dropCellSaveVersion(key);
+      dropCellSaveInFlight(key);
       const nextErrors = { ...fieldErrors.value };
       delete nextErrors[key];
       fieldErrors.value = nextErrors;
@@ -3734,29 +2950,8 @@ function removeDraftRows(recordIds: Set<string>): void {
   recordIds.forEach((recordId) => setSaving(recordId, false));
 }
 
-function beginCellSave(key: string): void {
-  cellSaveInFlightCounts.set(key, (cellSaveInFlightCounts.get(key) ?? 0) + 1);
-}
-
-function endCellSave(key: string): void {
-  const remaining = (cellSaveInFlightCounts.get(key) ?? 1) - 1;
-  if (remaining > 0) cellSaveInFlightCounts.set(key, remaining);
-  else cellSaveInFlightCounts.delete(key);
-}
-
 function cellSaveStateFor(record: LedgerRow, field: FieldDefinition): CellSaveState | null {
   return cellSaveStates.value.get(persistedKey(record.id, field.id)) ?? null;
-}
-
-function enqueueRecordSave<T>(recordId: string, task: () => Promise<T>): Promise<T> {
-  const previous = recordSaveQueues.get(recordId) ?? Promise.resolve();
-  const current = previous.catch(() => undefined).then(task);
-  recordSaveQueues.set(recordId, current);
-  const clearQueue = () => {
-    if (recordSaveQueues.get(recordId) === current) recordSaveQueues.delete(recordId);
-  };
-  void current.then(clearQueue, clearQueue);
-  return current;
 }
 
 function fieldErrorFor(record: LedgerRow, field: FieldDefinition): string {
@@ -3810,7 +3005,7 @@ function validateCellInput(
     return;
   }
   if (field.system_key === "experiment_date") {
-    const normalized = normalizeDate(value);
+    const normalized = normalizeDateInput(value);
     record.experiment_date = normalized || null;
     return;
   }
@@ -3875,7 +3070,7 @@ function scheduleLedgerRangeRefresh(projectId: string): void {
     rangeRefreshTimer = undefined;
     if (ledgerDisposed || ledgerRangeSaving.value || projectId !== activeProjectId.value
       || (ledgerRangeSettings.value.mode === "all" && !pendingLedgerRangeApplication)) return;
-    if (savingIds.value.size || cellSaveInFlightCounts.size || loading.value) {
+    if (savingIds.value.size || hasCellSaveInFlight() || loading.value) {
       scheduleLedgerRangeRefresh(projectId);
       return;
     }
@@ -3937,7 +3132,7 @@ function dirtyLedgerDrafts(): LedgerRow[] {
 function ledgerCloseState(): { dirty: boolean; busy: boolean } {
   return {
     dirty: Boolean(dirtyLedgerChanges().length || dirtyLedgerDrafts().length),
-    busy: Boolean(closeSaving.value || savingIds.value.size || cellSaveInFlightCounts.size ||
+    busy: Boolean(closeSaving.value || savingIds.value.size || hasCellSaveInFlight() ||
       gridCellEditFinishPromise || gridCutInProgress.value || historyReplayLoading.value ||
       validationCommitLoading.value || findReplaceLoading.value || reorderLoading.value ||
       highlightLoading.value || loading.value || ledgerRangeSaving.value || quickEntryRefreshInProgress.value || projectLoadPromise),
@@ -3963,7 +3158,7 @@ async function saveLedgerBeforeClose(): Promise<boolean> {
       pathology_number: record.pathology_number.trim(),
       block_number: record.block_number?.trim() || null,
       status: record.status,
-      experiment_date: record.experiment_date ? normalizeDate(record.experiment_date) : null,
+      experiment_date: record.experiment_date ? normalizeDateInput(record.experiment_date) : null,
       experiment_number: record.experiment_number?.trim() || null,
       values: { ...record.values },
       ...(record._insertAnchorId && record._insertPlacement === "before" ? { insert_before_record_id: record._insertAnchorId } : {}),
@@ -4033,10 +3228,10 @@ function reconcileCellAfterCompletedSave(
   const currentValue = valueFor(currentRecord, currentField);
   const action = resolveLedgerCellCompletionAction({
     completedVersion,
-    currentVersion: cellSaveVersions.get(key),
+    currentVersion: peekCellSaveVersion(key),
     currentValue,
     persistedValue: persistedValues.get(key) ?? "",
-    inFlightCount: cellSaveInFlightCounts.get(key) ?? 0,
+    inFlightCount: cellSaveInFlightCount(key),
   });
   if (action === "none") return;
   if (action === "pending") return;
@@ -4259,7 +3454,7 @@ async function persistDraft(record: LedgerRow, notify = true): Promise<boolean> 
   let experimentDate = "";
 
   try {
-    experimentDate = normalizeDate(record.experiment_date ?? "");
+    experimentDate = normalizeDateInput(record.experiment_date ?? "");
   } catch (error) {
     if (dateField) {
       setFieldError(
@@ -4308,30 +3503,32 @@ async function persistDraft(record: LedgerRow, notify = true): Promise<boolean> 
             context: "create",
             cancelBehavior: "discard",
           });
-      pendingValidationAction = errors.length
-        ? null
-        : async () => {
-            const created = await createRecord(payload);
-            await finishPersistedDraft(record, created, projectId, notify);
-          };
-      pendingValidationCancel = errors.length
-        ? null
-        : () => {
-            removeDraftRows(new Set([record.id]));
-            ElMessage.info("已放弃本次新增，未写入台账");
-          };
-      validationPanel.value = {
-        token: "",
-        projectId,
-        ...prompt,
-        label: "新增台账记录",
-        issues: validation.issues,
-        affectedCount: 1,
-        skippedLocked: 0,
-        cellKeys: [],
-        cellVersions: {},
-        canContinue: !errors.length,
-      };
+      openValidationPanel(
+        {
+          token: "",
+          projectId,
+          ...prompt,
+          label: "新增台账记录",
+          issues: validation.issues,
+          affectedCount: 1,
+          skippedLocked: 0,
+          cellKeys: [],
+          cellVersions: {},
+          canContinue: !errors.length,
+        },
+        errors.length
+          ? undefined
+          : {
+              action: async () => {
+                const created = await createRecord(payload);
+                await finishPersistedDraft(record, created, projectId, notify);
+              },
+              cancel: () => {
+                removeDraftRows(new Set([record.id]));
+                ElMessage.info("已放弃本次新增，未写入台账");
+              },
+            },
+      );
       return false;
     }
     const created = await createRecord(payload);
@@ -4467,7 +3664,7 @@ async function saveField(
   if (isDraft(record)) {
     if (field.system_key === "experiment_date") {
       try {
-        const normalized = normalizeDate(record.experiment_date ?? "");
+        const normalized = normalizeDateInput(record.experiment_date ?? "");
         record.experiment_date = normalized || null;
         clearFieldError(record, field);
       } catch (error) {
@@ -4493,7 +3690,7 @@ async function saveField(
   const current = valueFor(record, field);
   if (current === initialBefore) {
     clearFieldError(record, field);
-    if ((cellSaveInFlightCounts.get(key) ?? 0) > 0) {
+    if ((cellSaveInFlightCount(key)) > 0) {
       setCellSaveState(record.id, field.id, { status: "dirty" });
     } else {
       clearCellSaveState(key);
@@ -4521,8 +3718,7 @@ async function saveField(
     return false;
   }
 
-  const version = (cellSaveVersions.get(key) ?? 0) + 1;
-  cellSaveVersions.set(key, version);
+  const version = nextCellSaveVersion(key);
   beginCellSave(key);
   setCellSaveState(record.id, field.id, { status: "saving" });
   setSaving(record.id, true);
@@ -4535,7 +3731,7 @@ async function saveField(
           value: current,
           expected_value: expectedValue,
         });
-        const currentVersion = cellSaveVersions.get(key) === version;
+        const currentVersion = peekCellSaveVersion(key) === version;
         replaceRecordPreservingPending(updated.record, currentVersion ? key : new Set<string>());
         return updated.change ? [updated.change] : [];
       } catch (error) {
@@ -4552,7 +3748,7 @@ async function saveField(
         throw error;
       }
     });
-    if (cellSaveVersions.get(key) === version) {
+    if (peekCellSaveVersion(key) === version) {
       setCellSaveState(record.id, field.id, { status: "saved" });
       if (recordHistory && changes.length) {
         pushCellHistory(`编辑 ${field.label}`, changes, record.project_id);
@@ -4560,7 +3756,7 @@ async function saveField(
     }
     return true;
   } catch (error) {
-    if (cellSaveVersions.get(key) === version) {
+    if (peekCellSaveVersion(key) === version) {
       setCellSaveState(record.id, field.id, {
         status: "error",
         message: error instanceof Error ? error.message : "单元格保存失败",
@@ -4616,40 +3812,41 @@ async function saveFieldWithPreview(
           cancelBehavior: "discard",
           originalValue: initialBefore,
         });
-    pendingValidationAction = null;
-    pendingValidationCancel = errors.length
-      ? null
-      : () => {
-          rollbackValidationCells([
-            {
-              key,
-              recordId: record.id,
-              fieldId: field.id,
-              beforeValue: initialBefore,
-              previousSaveState: null,
-              previousFieldError: null,
+    openValidationPanel(
+      {
+        token: preview.token,
+        projectId: record.project_id,
+        ...prompt,
+        label: `编辑 ${field.label}`,
+        issues: preview.issues,
+        affectedCount: preview.affected_count,
+        skippedLocked: preview.skipped_locked,
+        cellKeys: [key],
+        cellVersions: { [key]: version },
+        canContinue: !errors.length,
+      },
+      errors.length
+        ? undefined
+        : {
+            cancel: () => {
+              rollbackValidationCells([
+                {
+                  key,
+                  recordId: record.id,
+                  fieldId: field.id,
+                  beforeValue: initialBefore,
+                  previousSaveState: null,
+                  previousFieldError: null,
+                },
+              ], { [key]: version });
+              ElMessage.info("已取消修改并恢复原值");
             },
-          ], { [key]: version });
-          ElMessage.info("已取消修改并恢复原值");
-        };
-    validationPanel.value = {
-      token: preview.token,
-      projectId: record.project_id,
-      ...prompt,
-      label: `编辑 ${field.label}`,
-      issues: preview.issues,
-      affectedCount: preview.affected_count,
-      skippedLocked: preview.skipped_locked,
-      cellKeys: [key],
-      cellVersions: { [key]: version },
-      canContinue: !errors.length,
-    };
+          },
+    );
     throw new Error(errors[0]?.message ?? "存在警告，请在验证面板中确认后继续");
   }
   if (preview.issues.length) {
-    pendingValidationAction = null;
-    pendingValidationCancel = null;
-    validationPanel.value = {
+    openValidationPanel({
       token: "",
       projectId: record.project_id,
       title: "操作提示",
@@ -4663,10 +3860,10 @@ async function saveFieldWithPreview(
       cellKeys: [key],
       cellVersions: { [key]: version },
       canContinue: false,
-    };
+    });
   }
   const committed = await commitCellBatch(preview.token);
-  const currentVersion = cellSaveVersions.get(key) === version;
+  const currentVersion = peekCellSaveVersion(key) === version;
   committed.records.forEach((updated) =>
     replaceRecordPreservingPending(updated, currentVersion ? key : new Set<string>()),
   );
@@ -4703,9 +3900,7 @@ function showCellErrorPanel(
   key: string,
   version: number,
 ): void {
-  pendingValidationAction = null;
-  pendingValidationCancel = null;
-  validationPanel.value = {
+  openValidationPanel({
     token: "",
     projectId: record.project_id,
     title: "无法保存",
@@ -4719,7 +3914,7 @@ function showCellErrorPanel(
     cellKeys: [key],
     cellVersions: { [key]: version },
     canContinue: false,
-  };
+  });
 }
 
 async function loadLedgerDisplaySettings(): Promise<void> {
@@ -4730,60 +3925,6 @@ async function loadLedgerDisplaySettings(): Promise<void> {
   } catch (error) {
     ElMessage.warning(error instanceof Error ? error.message : "台账显示设置读取失败");
   }
-}
-
-async function continueValidationCommit(): Promise<void> {
-  const panel = validationPanel.value;
-  if (!panel?.canContinue) return;
-  if (panel.projectId !== activeProjectId.value) {
-    dismissValidationPanel();
-    ElMessage.warning("项目已切换，请重新执行该操作");
-    return;
-  }
-  const staleCell = Object.entries(panel.cellVersions).some(
-    ([key, version]) => (cellSaveVersions.get(key) ?? 0) !== version,
-  );
-  if (staleCell) {
-    dismissValidationPanel();
-    ElMessage.warning("单元格内容已变化，请重新执行并预检查");
-    return;
-  }
-  validationCommitLoading.value = true;
-  try {
-    if (pendingValidationAction) {
-      const action = pendingValidationAction;
-      await action();
-      if (validationPanel.value === panel) dismissValidationPanel();
-      return;
-    }
-    if (!panel.token) return;
-    const result = await commitCellBatch(panel.token, true);
-    const completedKeys = new Set(panel.cellKeys);
-    result.records.forEach((record) => replaceRecordPreservingPending(record, completedKeys));
-    panel.cellKeys.forEach((key) => {
-      const [recordId = "", fieldId = ""] = key.split(":");
-      if (recordId && fieldId) setCellSaveState(recordId, fieldId, { status: "saved" });
-    });
-    pushCellHistory(panel.label, result.changes, panel.projectId);
-    if (validationPanel.value === panel) dismissValidationPanel();
-    ElMessage.success(`已保存 ${new Set(result.changes.map((change) => change.record_id)).size} 条记录`);
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "批量保存失败");
-  } finally {
-    validationCommitLoading.value = false;
-  }
-}
-
-function dismissValidationPanel(): void {
-  pendingValidationAction = null;
-  pendingValidationCancel = null;
-  validationPanel.value = null;
-}
-
-function cancelValidationPanel(): void {
-  const cancel = pendingValidationCancel;
-  dismissValidationPanel();
-  cancel?.();
 }
 
 async function loadPreviewEngineSetting(): Promise<void> {
@@ -4798,60 +3939,23 @@ async function loadPreviewEngineSetting(): Promise<void> {
 }
 
 async function loadPreviewCapabilities(): Promise<void> {
-  try {
-    previewCapabilities.value = await getPreviewCapabilities();
-  } catch {
-    previewCapabilities.value = null;
-  }
+  previewCapabilities.value = await fetchPreviewCapabilities();
 }
 
 function nativeEngineAvailable(engine: PrintEngine): boolean {
-  const capabilities = previewCapabilities.value;
-  if (!capabilities) return true;
-  if (engine === "auto") return capabilities.native_preview;
-  if (engine === "word") return capabilities.microsoft_spreadsheet;
-  return capabilities.wps_spreadsheet;
+  return isNativeEngineAvailable(previewCapabilities.value, engine, "spreadsheet");
 }
 
 function nativeEngineLabel(): string {
-  if (previewEngine.value === "word") return "Excel";
-  if (previewEngine.value === "wps") return "WPS";
-  return "Excel/WPS";
+  return nativeEngineLabelFor(previewEngine.value, "Excel", "Excel/WPS");
 }
 
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
-}
-
-async function monitorNativeLedgerJob(task: NativePreviewTask): Promise<void> {
-  let current = task;
-  let openedNotified = false;
-  let failures = 0;
-  for (let attempt = 0; attempt < 28_800; attempt += 1) {
-    if (ledgerDisposed) return;
-    if (current.status === "failed") {
-      ElMessage.error(current.error || "Excel/WPS 原生窗口打开失败");
-      return;
-    }
-    if (current.status === "open" && !openedNotified) {
-      openedNotified = true;
-      ElMessage.success(`${nativeEngineLabel()} 原生窗口已打开`);
-    }
-    if (current.status === "completed") {
-      ElMessage.info(`${nativeEngineLabel()} 原生窗口已关闭`);
-      return;
-    }
-    await sleep(openedNotified ? 2000 : 500);
-    if (ledgerDisposed) return;
-    try {
-      current = await getNativePreviewStatus(task.job_id);
-      failures = 0;
-    } catch (error) {
-      if (ledgerDisposed) return;
-      failures += 1;
-      if (failures >= 5) throw error;
-    }
-  }
+function monitorNativeLedgerJob(task: NativePreviewTask): Promise<void> {
+  return monitorNativePreviewJob(task, {
+    isDisposed: () => ledgerDisposed,
+    engineLabel: nativeEngineLabel,
+    failedMessage: "Excel/WPS 原生窗口打开失败",
+  });
 }
 
 async function openLedgerNative(): Promise<void> {
@@ -4986,47 +4090,6 @@ async function handleHistoryReplayError(
   }
 }
 
-async function queryAllRecordBatches(
-  query: RecordComplexQuery,
-  signal?: AbortSignal,
-  onProgress?: (loaded: number, total: number) => void,
-): Promise<Awaited<ReturnType<typeof queryRecords>>> {
-  const items: ProjectRecord[] = [];
-  let total = 0;
-  let offset = 0;
-  // The spreadsheet's locale-aware/natural sort is authoritative. SQL ordering
-  // can differ for pathology numbers, text and empty cells, so sorted tails
-  // must be selected after applying that same comparator to the candidates.
-  const sortedTail = Boolean(query.tail_count && query.sort);
-  const transportQuery = sortedTail ? { ...query, tail_count: undefined } : query;
-  while (true) {
-    const batch = await queryRecords({ ...transportQuery, offset }, signal);
-    total = batch.total;
-    items.push(...batch.items);
-    offset += batch.items.length;
-    onProgress?.(items.length, total);
-    if (!batch.items.length || offset >= total) break;
-  }
-  if (sortedTail) {
-    const projectFields = appStore.projectById(query.project_id)?.fields ?? [];
-    const sort = query.sort
-      ? { fieldId: query.sort.field_id, order: query.sort.direction === "desc" ? "descending" : "ascending" } as const
-      : null;
-    const selected = applyLedgerTableView(items, projectFields, sort, {}, query);
-    onProgress?.(selected.length, selected.length);
-    return { items: selected, total: selected.length, limit: query.limit, offset: 0 };
-  }
-  return { items, total, limit: query.limit, offset: 0 };
-}
-
-async function queryLedgerRecordIds(query: RecordComplexQuery) {
-  if (query.tail_count && query.sort) {
-    const result = await queryAllRecordBatches(query);
-    return { record_ids: result.items.map((record) => record.id), total: result.total };
-  }
-  return queryRecordIds(query);
-}
-
 async function loadRecords(
   projectId = activeProjectId.value,
   options: {
@@ -5047,10 +4110,7 @@ async function loadRecords(
   }
   const showLoading = options.showLoading ?? true;
   let retryRangeRefresh = false;
-  const requestSequence = ++loadSequence;
-  recordsAbortController?.abort();
-  const controller = new AbortController();
-  recordsAbortController = controller;
+  const request = beginRecordsRequest();
   const currentQuery = buildRecordQuery(projectId);
   if (rangeRefreshTimer !== undefined) window.clearTimeout(rangeRefreshTimer);
   rangeRefreshTimer = undefined;
@@ -5071,9 +4131,9 @@ async function loadRecords(
     } else {
       const page = await queryAllRecordBatches(
         currentQuery,
-        controller.signal,
+        request.controller.signal,
         (loadedCount, nextTotal) => {
-          if (requestSequence !== loadSequence || projectId !== activeProjectId.value) return;
+          if (!request.isCurrent() || projectId !== activeProjectId.value) return;
           loadedRecordCount.value = loadedCount;
           recordTotal.value = nextTotal;
         },
@@ -5090,7 +4150,7 @@ async function loadRecords(
         ledgerRecordCache.invalidateProject(projectId);
       }
     }
-    if (requestSequence !== loadSequence || projectId !== activeProjectId.value) return false;
+    if (!request.isCurrent() || projectId !== activeProjectId.value) return false;
     if (pendingLedgerRangeApplication && currentQueryKey !== ledgerRecordQueryKey(buildRecordQuery(projectId))) {
       retryRangeRefresh = true;
       return false;
@@ -5154,9 +4214,8 @@ async function loadRecords(
     if (!options.preserveSelection) clearRecordSelection();
     rememberAll();
     const requestIsCurrent = () => (
-      requestSequence === loadSequence
+      request.isCurrent()
       && projectId === activeProjectId.value
-      && !controller.signal.aborted
     );
     if (stabilizeTable) await refreshTableLayout(requestIsCurrent);
     else await nextTick();
@@ -5175,14 +4234,11 @@ async function loadRecords(
     }
     return true;
   } catch (error) {
-    if (requestSequence !== loadSequence || controller.signal.aborted) return false;
+    if (!request.isCurrent()) return false;
     ElMessage.error(error instanceof Error ? error.message : "台账读取失败");
     return false;
   } finally {
-    if (requestSequence === loadSequence) {
-      loading.value = false;
-      if (recordsAbortController === controller) recordsAbortController = null;
-    }
+    finishRecordsRequest(request);
     if (retryRangeRefresh) scheduleLedgerRangeRefresh(projectId);
   }
 }
@@ -5267,7 +4323,7 @@ async function saveLedgerRangeSettings(): Promise<void> {
   rangeRefreshTimer = undefined;
   try {
     if (!await finishGridCellEdit(true, false)) return;
-    if (dirtyLedgerChanges().length || savingIds.value.size || cellSaveInFlightCounts.size || loading.value) {
+    if (dirtyLedgerChanges().length || savingIds.value.size || hasCellSaveInFlight() || loading.value) {
       ElMessage.warning("请先完成当前记录的修改，再切换显示范围");
       return;
     }
@@ -6291,7 +5347,7 @@ async function pasteGrid(
       pathology_number: record.pathology_number.trim(),
       block_number: record.block_number?.trim() || null,
       status: record.status,
-      experiment_date: record.experiment_date ? normalizeDate(record.experiment_date) : null,
+      experiment_date: record.experiment_date ? normalizeDateInput(record.experiment_date) : null,
       experiment_number: record.experiment_number?.trim() || null,
       values: Object.fromEntries(
         (currentProject.value?.fields ?? [])
@@ -6307,7 +5363,7 @@ async function pasteGrid(
     }));
     const cellKeys = [...rollbackSnapshots.keys()];
     const cellVersions = Object.fromEntries(
-      cellKeys.map((key) => [key, cellSaveVersions.get(key) ?? 0]),
+      cellKeys.map((key) => [key, peekCellSaveVersion(key) ?? 0]),
     );
     let batchPreview: Awaited<ReturnType<typeof previewCellBatch>> | null = null;
     committableDrafts.forEach(({ snapshot }) => setSaving(snapshot.id, true));
@@ -6351,7 +5407,7 @@ async function pasteGrid(
       const completedKeys = new Set(
         existingChanges
           .map((change) => persistedKey(change.record_id, change.field_id))
-          .filter((key) => (cellSaveVersions.get(key) ?? 0) === cellVersions[key]),
+          .filter((key) => (peekCellSaveVersion(key) ?? 0) === cellVersions[key]),
       );
       batchResult?.records.forEach((record) =>
         replaceRecordPreservingPending(record, completedKeys),
@@ -6415,27 +5471,31 @@ async function pasteGrid(
             cancelBehavior: "discard",
             operationLabel,
           });
-      pendingValidationAction = errors.length ? null : () => commitPasteChanges(true);
-      pendingValidationCancel = errors.length
-        ? null
-        : () => {
-            if (!viewIsCurrent()) return;
-            rollbackValidationCells([...rollbackSnapshots.values()], cellVersions);
-            removeDraftRows(appendedDraftIds);
-            ElMessage.info(`已取消${operationLabel}，并恢复操作前的内容`);
-          };
-      validationPanel.value = {
-        token: "",
-        projectId,
-        ...prompt,
-        label: `${operationLabel}台账数据`,
-        issues: allIssues,
-        affectedCount: batchPreview?.affected_count ?? 0,
-        skippedLocked: (batchPreview?.skipped_locked ?? 0) + skippedLocked,
-        cellKeys,
-        cellVersions,
-        canContinue: !errors.length,
-      };
+      openValidationPanel(
+        {
+          token: "",
+          projectId,
+          ...prompt,
+          label: `${operationLabel}台账数据`,
+          issues: allIssues,
+          affectedCount: batchPreview?.affected_count ?? 0,
+          skippedLocked: (batchPreview?.skipped_locked ?? 0) + skippedLocked,
+          cellKeys,
+          cellVersions,
+          canContinue: !errors.length,
+        },
+        errors.length
+          ? undefined
+          : {
+              action: () => commitPasteChanges(true),
+              cancel: () => {
+                if (!viewIsCurrent()) return;
+                rollbackValidationCells([...rollbackSnapshots.values()], cellVersions);
+                removeDraftRows(appendedDraftIds);
+                ElMessage.info(`已取消${operationLabel}，并恢复操作前的内容`);
+              },
+            },
+      );
       existingChanges.forEach((change) => {
         setCellSaveState(change.record_id, change.field_id, {
           status: errors.length ? "error" : "dirty",
@@ -6448,9 +5508,7 @@ async function pasteGrid(
     await commitPasteChanges(false);
     if (!viewIsCurrent()) return [];
     if (allIssues.length) {
-      pendingValidationAction = null;
-      pendingValidationCancel = null;
-      validationPanel.value = {
+      openValidationPanel({
         token: "",
         projectId,
         title: "操作提示",
@@ -6464,7 +5522,7 @@ async function pasteGrid(
         cellKeys,
         cellVersions,
         canContinue: false,
-      };
+      });
     }
     return changedPositions;
   } catch (error) {
@@ -6655,8 +5713,8 @@ async function deleteSelectedRecords(): Promise<void> {
 async function exportCurrentProject(): Promise<void> {
   if (!currentProject.value) return;
   try {
-    const start = normalizeDate(exportFilter.start);
-    const end = normalizeDate(exportFilter.end);
+    const start = normalizeDateInput(exportFilter.start);
+    const end = normalizeDateInput(exportFilter.end);
     if (start && end && start > end) throw new Error("导出开始日期不能晚于结束日期");
     exportFilter.start = start;
     exportFilter.end = end;
@@ -6894,19 +5952,16 @@ onBeforeUnmount(() => {
   stopGridCellDrag(false);
   stopGridFillDrag();
   stopRecordSelectionDrag(false);
-  recordsAbortController?.abort();
-  recordsAbortController = null;
-  ledgerRecordCache.clear();
-  projectRecordCacheGenerations.clear();
+  disposeRecords();
   clearGridCellEdit();
   activeGridCell.value = null;
   clearGridCellSelection();
-  lastGridClipboard = null;
+  clearLastGridClipboard();
   bottomScrollTimers.forEach((timer) => window.clearTimeout(timer));
   bottomScrollTimers = [];
   autosizeTextareaRefs.clear();
   columnWidthSaveQueues.clear();
-  cellSaveInFlightCounts.clear();
+  clearCellSaveInFlight();
   clearAllCellSaveStates();
 });
 </script>
@@ -9247,10 +8302,6 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
-.validation-dialog-issues li.is-suggestion {
-  color: var(--app-primary-text);
-}
-
 .validation-dialog-outcome {
   margin: 0;
   border-left: 3px solid var(--app-warning);
@@ -9538,30 +8589,3 @@ onBeforeUnmount(() => {
 }
 </style>
 
-<!-- 台账浮层统一缩放淡入淡出：列工具面板 / 右键菜单 / 填充预览在组件内，
-     单元格 tooltip 的 popper 挂在 body 下，因此这些类需要全局生效 -->
-<style>
-.ledger-overlay-pop-enter-active {
-  transition: opacity 0.16s ease, transform 0.16s ease;
-  transform-origin: top left;
-}
-
-.ledger-overlay-pop-leave-active {
-  transition: opacity 0.12s ease, transform 0.12s ease;
-  transform-origin: top left;
-  pointer-events: none;
-}
-
-.ledger-overlay-pop-enter-from,
-.ledger-overlay-pop-leave-to {
-  opacity: 0;
-  transform: scale(0.94);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .ledger-overlay-pop-enter-active,
-  .ledger-overlay-pop-leave-active {
-    transition: none;
-  }
-}
-</style>

@@ -12,7 +12,6 @@ import { ElMessage, ElMessageBox, TableV2FixedDir, type Column } from "element-p
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 
-import { getNativePreviewStatus, getPreviewCapabilities } from "@/api/preview";
 import { listRecords } from "@/api/records";
 import {
   addReportTemplateVersion,
@@ -27,6 +26,12 @@ import {
   type ReportMappingInput,
 } from "@/api/reports";
 import { getSetting, putSetting } from "@/api/system";
+import {
+  fetchPreviewCapabilities,
+  isNativeEngineAvailable,
+  monitorNativePreviewJob,
+  nativeEngineLabelFor,
+} from "@/utils/nativePreviewJob";
 import { useAppStore } from "@/stores/app";
 import {
   DEFAULT_REPORT_PRINT_ORDER,
@@ -284,29 +289,15 @@ async function loadAvailablePrinters(): Promise<void> {
 }
 
 async function loadPreviewCapabilities(): Promise<void> {
-  try {
-    previewCapabilities.value = await getPreviewCapabilities();
-  } catch {
-    previewCapabilities.value = null;
-  }
+  previewCapabilities.value = await fetchPreviewCapabilities();
 }
 
 function nativeEngineAvailable(engine: PrintEngine): boolean {
-  const capabilities = previewCapabilities.value;
-  if (!capabilities) return true;
-  if (engine === "auto") return capabilities.native_preview;
-  if (engine === "word") return capabilities.microsoft_writer;
-  return capabilities.wps_writer;
+  return isNativeEngineAvailable(previewCapabilities.value, engine, "writer");
 }
 
 function nativeEngineLabel(): string {
-  if (selectedPrintEngine.value === "word") return "Office";
-  if (selectedPrintEngine.value === "wps") return "WPS";
-  return "Office/WPS";
-}
-
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+  return nativeEngineLabelFor(selectedPrintEngine.value, "Office", "Office/WPS");
 }
 
 async function selectTemplate(template: ReportTemplate): Promise<void> {
@@ -442,35 +433,12 @@ async function openNativeReport(action: "preview" | "open"): Promise<void> {
   }
 }
 
-async function monitorNativeReportJob(task: NativePreviewTask): Promise<void> {
-  let current = task;
-  let openedNotified = false;
-  let failures = 0;
-  for (let attempt = 0; attempt < 28_800; attempt += 1) {
-    if (disposed) return;
-    if (current.status === "failed") {
-      ElMessage.error(current.error || "Office/WPS 原生窗口打开失败");
-      return;
-    }
-    if (current.status === "open" && !openedNotified) {
-      openedNotified = true;
-      ElMessage.success(`${nativeEngineLabel()} 原生窗口已打开`);
-    }
-    if (current.status === "completed") {
-      ElMessage.info(`${nativeEngineLabel()} 原生窗口已关闭`);
-      return;
-    }
-    await sleep(openedNotified ? 2000 : 500);
-    if (disposed) return;
-    try {
-      current = await getNativePreviewStatus(task.job_id);
-      failures = 0;
-    } catch (error) {
-      if (disposed) return;
-      failures += 1;
-      if (failures >= 5) throw error;
-    }
-  }
+function monitorNativeReportJob(task: NativePreviewTask): Promise<void> {
+  return monitorNativePreviewJob(task, {
+    isDisposed: () => disposed,
+    engineLabel: nativeEngineLabel,
+    failedMessage: "Office/WPS 原生窗口打开失败",
+  });
 }
 
 function handleCreateFile(event: Event): void {

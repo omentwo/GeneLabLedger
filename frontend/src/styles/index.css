@@ -254,12 +254,31 @@ textarea {
 .el-popover.el-popper { max-width: calc(100vw - 24px); }
 .workspace-page button, .quick-entry-page button { transition: background-color .18s ease, border-color .18s ease, box-shadow .18s ease; }
 button:focus-visible, a:focus-visible { outline: 2px solid var(--app-primary); outline-offset: 3px; }
+
+/* 台账浮层统一缩放淡入淡出：列工具面板 / 右键菜单 / 填充预览在组件内，
+   单元格 tooltip 的 popper 挂在 body 下，因此这些类需要全局生效。 */
+.ledger-overlay-pop-enter-active {
+  transition: opacity 0.16s ease, transform 0.16s ease;
+  transform-origin: top left;
+}
+.ledger-overlay-pop-leave-active {
+  transition: opacity 0.12s ease, transform 0.12s ease;
+  transform-origin: top left;
+  pointer-events: none;
+}
+.ledger-overlay-pop-enter-from,
+.ledger-overlay-pop-leave-to {
+  opacity: 0;
+  transform: scale(0.94);
+}
 @media (max-width: 640px) {
   .workspace-heading h1 { font-size: 20px; }
   .workspace-page .page-card-header { align-items: flex-start; gap: var(--app-space-2); }
 }
 @media (prefers-reduced-motion: reduce) {
   .workspace-page *, .quick-entry-page * { transition: none !important; animation: none !important; }
+  .ledger-overlay-pop-enter-active,
+  .ledger-overlay-pop-leave-active { transition: none; }
 }
 
 /* Filled controls use a theme-appropriate label color. */
