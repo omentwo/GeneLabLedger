@@ -68,6 +68,18 @@ export function useLedgerGridScrollFocus(deps: GridScrollFocusDeps): {
     }, 0);
   }
 
+  // 渲染替换焦点元素并不只发生在滚动里：拖拽结束的选区物化、单元格
+  // 状态变化都会整行重建 DOM，把刚聚焦的元素连同焦点一起丢回 body，
+  // 且之后可能再无滚动事件。低频看门狗兜住所有这类丢失（AG Grid 的
+  // 焦点服务同款思路：网格在逻辑上常驻持有焦点）。
+  const focusWatchdog = window.setInterval(() => {
+    if (deps.isDisposed()) {
+      window.clearInterval(focusWatchdog);
+      return;
+    }
+    restoreFocusToCard();
+  }, 300);
+
   function isRowVisible(rowIndex: number): boolean {
     const card = deps.cardRef.value;
     if (!card) return true;
