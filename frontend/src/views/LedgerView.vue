@@ -150,6 +150,7 @@ import {
 } from "@/composables/useLedgerCellSaveState";
 import { useLedgerValidationPanel } from "@/composables/useLedgerValidationPanel";
 import { useLedgerGridClipboard } from "@/composables/useLedgerGridClipboard";
+import { useLedgerGridScrollFocus } from "@/composables/useLedgerGridScrollFocus";
 import { useLedgerCellSave, type ValidationCellRollbackSnapshot } from "@/composables/useLedgerCellSave";
 import { useLedgerRangeRefresh } from "@/composables/useLedgerRangeRefresh";
 import { useLedgerFindReplace } from "@/composables/useLedgerFindReplace";
@@ -1084,6 +1085,8 @@ type LedgerTableScrollPosition = {
 };
 
 function handleLedgerTableScroll(position: { scrollLeft?: number; scrollTop?: number }): void {
+  // 必须先于下方 scrollbar 早退：无横向滚动条时纵向滚动同样会丢焦点。
+  keepGridFocusOnScroll();
   const scrollbar = ledgerHorizontalScrollbarRef.value;
   if (!scrollbar || typeof position.scrollLeft !== "number") return;
   if (Math.abs(scrollbar.scrollLeft - position.scrollLeft) > 0.5) {
@@ -1251,6 +1254,18 @@ const {
   commitEditThen: () => (editingGridCell.value ? finishGridCellEdit(true, false) : Promise.resolve(true)),
   applyFill: applyGridFill,
   dragThreshold: pointerDragThreshold,
+});
+const { keepGridFocusOnScroll, revealGridPasteTarget } = useLedgerGridScrollFocus({
+  cardRef: ledgerTableCardRef,
+  tableRef,
+  rowHeight: ledgerVirtualRowHeight,
+  bodyScrollElement: gridTableBodyScrollElement,
+  activeGridCell,
+  selectionDragging: gridSelectionDragging,
+  editingCell: editingGridCell,
+  commitActiveEdit: () => finishGridCellEdit(true, false),
+  isDisposed: () => ledgerDisposed,
+  flashRecord: flashGridRecord,
 });
 
 const {
@@ -2767,6 +2782,13 @@ function fieldOptions(field: FieldDefinition): string[] {
     .map((option) => option.value);
 }
 
+function flashGridRecord(recordId: string): void {
+  focusRecordId.value = recordId;
+  window.setTimeout(() => {
+    if (focusRecordId.value === recordId) focusRecordId.value = "";
+  }, 2200);
+}
+
 async function scrollToFocusedRecord(
   shouldApply: () => boolean = () => true,
 ): Promise<boolean> {
@@ -3908,6 +3930,8 @@ interface PasteExecutionContext {
   appendedDraftIds: Set<string>;
   changedCells: number;
   skippedLocked: number;
+  /** 剪贴板粘贴的回位目标；内部填充/清除路径（event=null）不需要。 */
+  reveal?: { rowIndex: number; recordId: string | null };
 }
 
 async function commitPasteChanges(
@@ -4035,7 +4059,11 @@ function openPasteValidationGate(
     errors.length
       ? undefined
       : {
-          action: () => commitPasteChanges(context, true),
+          action: () => commitPasteChanges(context, true).then(() => {
+            if (context.viewIsCurrent() && context.reveal) {
+              revealGridPasteTarget(context.reveal.rowIndex, context.reveal.recordId);
+            }
+          }),
           cancel: () => {
             if (!viewIsCurrent()) return;
             rollbackValidationCells([...rollbackSnapshots.values()], cellVersions);
@@ -4161,6 +4189,9 @@ async function pasteGrid(
       appendedDraftIds,
       changedCells,
       skippedLocked: resolved.skippedLocked,
+      reveal: event
+        ? { rowIndex: startRowIndex, recordId: tableRows.value[startRowIndex]?.id ?? null }
+        : undefined,
     };
 
     if (errors.length || warnings.length) {
@@ -4188,6 +4219,7 @@ async function pasteGrid(
         canContinue: false,
       });
     }
+    if (context.reveal) revealGridPasteTarget(context.reveal.rowIndex, context.reveal.recordId);
     return resolved.changedPositions;
   } catch (error) {
     if (!viewIsCurrent()) return [];
@@ -4750,6 +4782,7 @@ onBeforeUnmount(() => {
     <section
       ref="ledgerTableCardRef"
       class="page-card ledger-table-card"
+      tabindex="-1"
       @wheel="handleLedgerCellWheel"
       @pointerdown.capture="handleGridPointerDown"
       @click.capture="handleGridClick"
@@ -5736,6 +5769,11 @@ onBeforeUnmount(() => {
   height: 20px;
   flex: 0 0 1px;
   background: var(--app-border);
+}
+
+.ledger-table-card:focus {
+  /* 滚动后的焦点锚点(编程式 focus),不显示焦点环;活动单元格自带高亮。 */
+  outline: none;
 }
 
 .ledger-table-card {
