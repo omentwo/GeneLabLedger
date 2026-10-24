@@ -699,7 +699,7 @@ class RecordCellBatchPreview(BaseModel):
 class RecordValidationIssue(BaseModel):
     record_id: str
     field_id: str
-    severity: Literal["suggestion", "warning", "error"]
+    severity: Literal["warning", "error"]
     message: str
 
 

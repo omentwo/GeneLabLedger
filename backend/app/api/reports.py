@@ -111,7 +111,7 @@ def load_report_record(session: Session, record_id: str) -> ProjectRecord:
     return record
 
 
-async def read_docx_upload(file: UploadFile, settings: Settings) -> bytes:
+async def read_docx_upload(file: UploadFile, settings: Settings) -> tuple[bytes, list[str]]:
     filename = file.filename or ""
     if Path(filename).suffix.lower() != ".docx":
         raise HTTPException(
@@ -137,7 +137,7 @@ async def read_docx_upload(file: UploadFile, settings: Settings) -> bytes:
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="模板中没有识别到 {{占位符}}",
         )
-    return content
+    return content, placeholders
 
 
 def store_template_version(
@@ -146,8 +146,7 @@ def store_template_version(
     version_number: int,
     storage_key: str,
     content: bytes,
-) -> tuple[Path, list[str]]:
-    placeholders = extract_placeholders(content)
+) -> Path:
     target_dir = settings.template_dir / template.id
     target_dir.mkdir(parents=True, exist_ok=True)
     target_path = target_dir / f"v{version_number}-{storage_key}.docx"
@@ -157,7 +156,7 @@ def store_template_version(
         temporary_path.replace(target_path)
     finally:
         temporary_path.unlink(missing_ok=True)
-    return target_path, placeholders
+    return target_path
 
 
 @router.get("/report-templates", response_model=list[ReportTemplateRead])
@@ -202,14 +201,14 @@ async def create_report_template(
     )
     if duplicate:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="当前项目已有同名模板")
-    content = await read_docx_upload(file, settings)
+    content, placeholders = await read_docx_upload(file, settings)
     template = ReportTemplate(project_id=project_id, name=clean_name)
     session.add(template)
     target_path: Path | None = None
     try:
         session.flush()
         version_id = str(uuid.uuid4())
-        target_path, placeholders = store_template_version(
+        target_path = store_template_version(
             settings,
             template,
             1,
@@ -268,7 +267,7 @@ async def add_report_template_version(
 ) -> dict:
     settings = settings_from(request)
     template = load_template(session, template_id)
-    content = await read_docx_upload(file, settings)
+    content, placeholders = await read_docx_upload(file, settings)
     current_max = (
         session.scalar(
             select(func.max(ReportTemplateVersion.version_number)).where(
@@ -281,7 +280,7 @@ async def add_report_template_version(
     version_id = str(uuid.uuid4())
     target_path: Path | None = None
     try:
-        target_path, placeholders = store_template_version(
+        target_path = store_template_version(
             settings,
             template,
             version_number,

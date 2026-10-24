@@ -470,11 +470,6 @@ class Database:
                 connection.exec_driver_sql("PRAGMA foreign_keys=ON")
                 connection.commit()
 
-    def drop_all(self) -> None:
-        from app import models  # noqa: F401
-
-        Base.metadata.drop_all(self.engine)
-
     def dispose(self) -> None:
         self.engine.dispose()
 

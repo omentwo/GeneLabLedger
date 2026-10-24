@@ -31,9 +31,3 @@ def is_progid_registered(progid: str, *, ttl: float = CACHE_TTL_SECONDS) -> bool
     with _cache_lock:
         _cache[progid] = (now, registered)
     return registered
-
-
-def invalidate_engine_cache() -> None:
-    """Drop cached detections, e.g. after the user installs Office or WPS."""
-    with _cache_lock:
-        _cache.clear()

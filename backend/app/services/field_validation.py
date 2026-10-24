@@ -7,7 +7,7 @@ from typing import Literal
 
 from app.models import FieldDefinition
 
-IssueSeverity = Literal["suggestion", "warning", "error"]
+IssueSeverity = Literal["warning", "error"]
 
 
 @dataclass(frozen=True)
