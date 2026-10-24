@@ -42,7 +42,9 @@ export function useLedgerGridScrollFocus(deps: GridScrollFocusDeps): {
   keepGridFocusOnScroll: () => void;
   revealGridPasteTarget: (rowIndex: number, recordId: string | null) => void;
 } {
-  function keepGridFocusOnScroll(): void {
+  let trailingKeepTimer: number | undefined;
+
+  function restoreFocusToCard(): void {
     if (deps.isDisposed() || deps.selectionDragging.value) return;
     if (!deps.activeGridCell.value) return;
     // 只有焦点真正落回 body/documentElement 才补焦。焦点在其他交互元素
@@ -51,6 +53,19 @@ export function useLedgerGridScrollFocus(deps: GridScrollFocusDeps): {
     if (current !== document.body && current !== document.documentElement) return;
     if (deps.editingCell.value) void deps.commitActiveEdit();
     deps.cardRef.value?.focus({ preventScroll: true });
+  }
+
+  function keepGridFocusOnScroll(): void {
+    restoreFocusToCard();
+    // 当前滚动事件触发的虚拟列表重渲染晚于本监听：焦点格的卸载发生在
+    // 检查之后。若这是最后一次滚动，没有后续事件再来兜底，焦点会永远
+    // 卡在 body 上——追加一次渲染完成后的自检（Vue 渲染是微任务，
+    // 必然先于该定时器执行）。
+    if (trailingKeepTimer !== undefined) return;
+    trailingKeepTimer = window.setTimeout(() => {
+      trailingKeepTimer = undefined;
+      restoreFocusToCard();
+    }, 0);
   }
 
   function isRowVisible(rowIndex: number): boolean {

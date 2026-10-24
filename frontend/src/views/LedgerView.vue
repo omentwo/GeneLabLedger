@@ -1792,9 +1792,15 @@ function handleGridFocusIn(event: FocusEvent): void {
 }
 
 function gridTableBodyScrollElement(tableElement: HTMLElement): HTMLElement | null {
-  return tableElement.querySelector<HTMLElement>(
-    ".el-table-v2__main .el-table-v2__body",
-  );
+  // element-plus 的 el-vl 结构:body 是 overflow visible 的 wrapper,真正的原生
+  // 滚动容器是其第一个子 div(无类名);拖拽自动滚动、滚轮与粘贴回位都必须
+  // 读写它,读 wrapper 的 scrollTop 恒为 0,会让自动滚动第一帧就误判到底。
+  const body = tableElement.querySelector<HTMLElement>(".el-table-v2__main .el-table-v2__body");
+  if (!body) return null;
+  for (const child of body.children) {
+    if (child instanceof HTMLElement && child.scrollHeight > child.clientHeight) return child;
+  }
+  return body;
 }
 
 function recordSelectionRowFromElement(element: EventTarget | null): {
@@ -3865,13 +3871,9 @@ function bestFitColumn(field: FieldDefinition): void {
 function handleLedgerCellWheel(event: WheelEvent): void {
   const cell = gridCellFromElement(event.target);
   if (!cell || isGridCellEditing(cell)) return;
-  const tableRoot = ledgerTableCardRef.value;
-  if (!tableRoot) return;
-  const body = gridTableBodyScrollElement(tableRoot);
-  if (!body) return;
+  // 滚动本体交给 el-vl 的内部滚轮处理(真实滚动容器在其内部子 div);
+  // 这里若再手动 scrollTop 会与它叠加成双倍滚动。
   event.preventDefault();
-  body.scrollTop += event.deltaY;
-  body.scrollLeft += event.deltaX;
 }
 
 function bestFitAllColumns(event?: MouseEvent): void {
