@@ -41,6 +41,7 @@ from app.schemas import (
     ReportPrintRead,
     ReportTemplateDeleteResponse,
     ReportTemplateRead,
+    ReportTemplateVersionDeleteResponse,
     ReportTemplateVersionRead,
 )
 from app.services.docx_template import (
@@ -722,5 +723,64 @@ def delete_report_template(
     return ReportTemplateDeleteResponse(
         template_id=template.id,
         removed_template_directory=removed_template_directory,
+        cleanup_warnings=cleanup_warnings,
+    )
+
+
+@router.delete(
+    "/report-template-versions/{version_id}",
+    response_model=ReportTemplateVersionDeleteResponse,
+)
+def delete_report_template_version(
+    version_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> ReportTemplateVersionDeleteResponse:
+    version = load_version(session, version_id)
+    sibling_count = session.scalar(
+        select(func.count())
+        .select_from(ReportTemplateVersion)
+        .where(ReportTemplateVersion.template_id == version.template_id)
+    )
+    if sibling_count is None or sibling_count <= 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="模板仅剩一个版本，请改用删除模板",
+        )
+    cleanup_warnings: list[str] = []
+    file_path: Path | None = None
+    try:
+        template_root = settings_from(request).template_dir.resolve()
+        candidate = (template_root / version.storage_path).resolve()
+        candidate.relative_to(template_root)
+    except ValueError:
+        cleanup_warnings.append("版本文件路径不在受控目录内，已保留文件")
+    except OSError:
+        cleanup_warnings.append("版本文件路径无法校验，已保留文件")
+    else:
+        file_path = candidate
+    audit(
+        session,
+        "report_template.version.delete",
+        "report_template_version",
+        version.id,
+        {
+            "template_id": version.template_id,
+            "version_number": version.version_number,
+            "original_filename": version.original_filename,
+        },
+    )
+    session.delete(version)
+    session.commit()
+    removed_file = False
+    if file_path is not None and file_path.is_file():
+        try:
+            file_path.unlink()
+            removed_file = True
+        except OSError:
+            cleanup_warnings.append("版本文件未能清理，请稍后手动检查")
+    return ReportTemplateVersionDeleteResponse(
+        version_id=version.id,
+        removed_file=removed_file,
         cleanup_warnings=cleanup_warnings,
     )

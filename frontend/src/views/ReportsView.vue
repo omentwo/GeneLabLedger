@@ -17,6 +17,7 @@ import {
   addReportTemplateVersion,
   createReportTemplate,
   deleteReportTemplate,
+  deleteReportTemplateVersion,
   listPrintEngines,
   listPrinters,
   listReportTemplates,
@@ -611,6 +612,45 @@ async function removeTemplate(): Promise<void> {
   }
 }
 
+async function removeVersion(): Promise<void> {
+  const version = activeVersion.value;
+  const template = activeTemplate.value;
+  if (!version || !template) return;
+  if (template.versions.length <= 1) {
+    ElMessage.warning("模板仅剩一个版本，请改用删除模板");
+    return;
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确认删除版本 v${version.version_number}（${version.original_filename}）？该版本的占位符映射将一并删除，Word 文件将从磁盘移除。`,
+      "删除模板版本",
+      {
+        confirmButtonText: "删除该版本",
+        cancelButtonText: "取消",
+        type: "warning",
+      },
+    );
+  } catch (error) {
+    if (error === "cancel" || error === "close") return;
+    throw error;
+  }
+  loading.value = true;
+  try {
+    const result = await deleteReportTemplateVersion(version.id);
+    // 删除当前展示的版本时，loadTemplates 会按版本号回落到剩余的最新版本
+    await loadTemplates(template.id);
+    if (result.cleanup_warnings.length) {
+      ElMessage.warning(`模板版本已删除，但${result.cleanup_warnings.join("；")}`);
+    } else {
+      ElMessage.success(`已删除版本 v${version.version_number}`);
+    }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "模板版本删除失败");
+  } finally {
+    loading.value = false;
+  }
+}
+
 onMounted(() => {
   void loadPage();
 });
@@ -701,6 +741,23 @@ onMounted(() => {
               accept=".docx"
               @change="uploadVersion"
             />
+            <el-tooltip
+              content="仅剩一个版本，请改用删除模板"
+              placement="top"
+              :disabled="activeTemplate.versions.length > 1"
+            >
+              <span class="version-delete-anchor">
+                <el-button
+                  type="danger"
+                  plain
+                  :icon="Delete"
+                  :disabled="activeTemplate.versions.length <= 1"
+                  @click="removeVersion"
+                >
+                  删除版本
+                </el-button>
+              </span>
+            </el-tooltip>
             <el-button type="danger" plain :icon="Delete" @click="removeTemplate">
               删除模板
             </el-button>
@@ -1059,6 +1116,11 @@ onMounted(() => {
 
 .hidden-file-input {
   display: none;
+}
+
+/* 禁用按钮不触发鼠标事件，包一层锚点让 tooltip 仍可出现 */
+.version-delete-anchor {
+  display: inline-flex;
 }
 
 code {

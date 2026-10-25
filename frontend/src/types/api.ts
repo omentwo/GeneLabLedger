@@ -386,6 +386,12 @@ export interface ReportTemplateDeleteResult {
   cleanup_warnings: string[];
 }
 
+export interface ReportTemplateVersionDeleteResult {
+  version_id: string;
+  removed_file: boolean;
+  cleanup_warnings: string[];
+}
+
 export interface Printer {
   name: string;
   is_default: boolean;

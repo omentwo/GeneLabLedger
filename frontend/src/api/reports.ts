@@ -9,6 +9,7 @@ import type {
   ReportTemplate,
   ReportTemplateDeleteResult,
   ReportTemplateVersion,
+  ReportTemplateVersionDeleteResult,
 } from "@/types/api";
 
 export interface ReportMappingInput {
@@ -120,4 +121,15 @@ export function deleteReportTemplate(templateId: string): Promise<ReportTemplate
   return apiRequest<ReportTemplateDeleteResult>(`/report-templates/${templateId}`, {
     method: "DELETE",
   });
+}
+
+export function deleteReportTemplateVersion(
+  versionId: string,
+): Promise<ReportTemplateVersionDeleteResult> {
+  return apiRequest<ReportTemplateVersionDeleteResult>(
+    `/report-template-versions/${versionId}`,
+    {
+      method: "DELETE",
+    },
+  );
 }

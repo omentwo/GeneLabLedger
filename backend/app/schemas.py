@@ -834,6 +834,12 @@ class ReportTemplateDeleteResponse(BaseModel):
     cleanup_warnings: list[str] = Field(default_factory=list)
 
 
+class ReportTemplateVersionDeleteResponse(BaseModel):
+    version_id: str
+    removed_file: bool
+    cleanup_warnings: list[str] = Field(default_factory=list)
+
+
 class ReportBatchItem(BaseModel):
     project_record_id: str
 

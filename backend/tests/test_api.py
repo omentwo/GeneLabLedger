@@ -1017,6 +1017,85 @@ def test_report_template_create_copies_mappings_within_project(
     assert cross.json()["detail"] == "只能从同一项目的模板复制映射"
 
 
+def test_report_template_version_delete_removes_version_and_file(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    tb = seeded_projects["TB"]
+    created = client.post(
+        "/api/report-templates",
+        data={"project_id": tb["id"], "name": "可删版本模板"},
+        files={"file": ("v1.docx", docx_with_placeholders("case_no"), DOCX_MEDIA_TYPE)},
+    )
+    assert created.status_code == 201
+    template_id = created.json()["id"]
+    first = created.json()["versions"][0]
+    mapped = client.put(
+        f"/api/report-template-versions/{first['id']}/mappings",
+        json={
+            "mappings": [
+                {"placeholder": "case_no", "source_type": "fixed", "fixed_value": "V1"},
+            ]
+        },
+    )
+    assert mapped.status_code == 200
+    uploaded = client.post(
+        f"/api/report-templates/{template_id}/versions",
+        files={
+            "file": (
+                "v2.docx",
+                docx_with_placeholders("case_no", "reviewer"),
+                DOCX_MEDIA_TYPE,
+            )
+        },
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    second = uploaded.json()
+
+    version_dir = client.app.state.settings.template_dir / template_id
+    second_file = version_dir / f"v2-{second['id']}.docx"
+    assert second_file.is_file()
+
+    deleted = client.delete(f"/api/report-template-versions/{second['id']}")
+    assert deleted.status_code == 200
+    payload = deleted.json()
+    assert payload["version_id"] == second["id"]
+    assert payload["removed_file"] is True
+    assert payload["cleanup_warnings"] == []
+    assert not second_file.exists()
+    assert (version_dir / f"v1-{first['id']}.docx").is_file()
+
+    remaining = client.get("/api/report-templates").json()
+    template = next(item for item in remaining if item["id"] == template_id)
+    assert [version["version_number"] for version in template["versions"]] == [1]
+    kept_mappings = {item["placeholder"]: item for item in template["versions"][0]["mappings"]}
+    assert kept_mappings["case_no"]["source_type"] == "fixed"
+    assert kept_mappings["case_no"]["fixed_value"] == "V1"
+
+
+def test_report_template_version_delete_rejects_last_version(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    tb = seeded_projects["TB"]
+    created = client.post(
+        "/api/report-templates",
+        data={"project_id": tb["id"], "name": "单版本模板"},
+        files={"file": ("only.docx", docx_with_placeholders("case_no"), DOCX_MEDIA_TYPE)},
+    )
+    assert created.status_code == 201
+    template_id = created.json()["id"]
+    version_id = created.json()["versions"][0]["id"]
+
+    rejected = client.delete(f"/api/report-template-versions/{version_id}")
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"] == "模板仅剩一个版本，请改用删除模板"
+
+    remaining = client.get("/api/report-templates").json()
+    template = next(item for item in remaining if item["id"] == template_id)
+    assert [version["version_number"] for version in template["versions"]] == [1]
+
+
 def test_workbook_export_hides_metadata_columns(client: TestClient) -> None:
     content = workbook_bytes(
         client,
