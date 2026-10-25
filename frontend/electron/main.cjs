@@ -18,6 +18,11 @@ const QUICK_ENTRY_MIN_WIDTH = 620;
 const QUICK_ENTRY_MIN_HEIGHT = 460;
 const QUICK_ENTRY_DEFAULT_WIDTH = 820;
 const QUICK_ENTRY_DEFAULT_HEIGHT = 680;
+const TOOL_WINDOW_MIN_WIDTH = 720;
+const TOOL_WINDOW_MIN_HEIGHT = 520;
+const TOOL_WINDOW_DEFAULT_WIDTH = 1080;
+const TOOL_WINDOW_DEFAULT_HEIGHT = 760;
+const TOOL_WINDOW_TABS = ["fields", "reorder", "find-replace"];
 
 let mainWindow = null;
 let quickEntryWindow = null;
@@ -25,6 +30,11 @@ let quickEntryRendererReady = false;
 let quickEntryPendingContext = null;
 let quickEntryChangeRevision = 0;
 const pendingQuickEntryProjectChanges = new Map();
+let toolWindow = null;
+let toolRendererReady = false;
+let toolPendingContext = null;
+let toolChangeRevision = 0;
+const pendingToolProjectChanges = new Map();
 let backendProcess = null;
 let backendUrl = "";
 let backendShutdownToken = "";
@@ -32,6 +42,8 @@ let dataDirectory = "";
 let alwaysOnTop = false;
 let quickEntryBounds = null;
 let quickEntryBoundsTimer = null;
+let toolWindowBounds = null;
+let toolWindowBoundsTimer = null;
 let quitting = false;
 const closeGuardReady = new Set();
 const approvedWindowCloses = new Set();
@@ -51,7 +63,11 @@ const closeCoordinator = new WindowCloseCoordinator({
     const result = await dialog.showMessageBox(window, {
       type: "warning",
       title: "关闭前保存修改",
-      message: window === quickEntryWindow ? "快速录入中有未保存的草稿。" : "台账中有未保存的修改。",
+      message: window === quickEntryWindow
+        ? "快速录入中有未保存的草稿。"
+        : window === toolWindow
+          ? "台账工具窗口尚未完成当前操作。"
+          : "台账中有未保存的修改。",
       detail: "选择保存后关闭，或放弃未保存内容。取消会保留窗口和草稿。",
       buttons: ["保存后关闭", "放弃修改", "取消"],
       defaultId: 0,
@@ -62,14 +78,18 @@ const closeCoordinator = new WindowCloseCoordinator({
   },
   blocked: (message) => {
     const options = { type: "warning", title: "暂未关闭", message, buttons: ["返回修改"] };
-    const owner = BrowserWindow.getFocusedWindow?.() ?? [quickEntryWindow, mainWindow]
+    const owner = BrowserWindow.getFocusedWindow?.() ?? [quickEntryWindow, toolWindow, mainWindow]
       .find((window) => window && !window.isDestroyed() && window.isVisible());
     return owner ? dialog.showMessageBox(owner, options) : dialog.showMessageBox(options);
   },
 });
 
 function closeIpcWindow(event) {
-  return assertIpcSenderWindow(event, [mainWindow, quickEntryWindow], "拒绝来自非业务窗口的关闭调用");
+  return assertIpcSenderWindow(
+    event,
+    [mainWindow, quickEntryWindow, toolWindow],
+    "拒绝来自非业务窗口的关闭调用",
+  );
 }
 
 function requestRendererCloseState(window, action) {
@@ -142,7 +162,7 @@ function closeApprovedWindow(window) {
 
 function requestApplicationClose(restart = false) {
   if (quitting) return Promise.resolve(false);
-  const windows = [mainWindow, quickEntryWindow].filter((window) => window && !window.isDestroyed());
+  const windows = [mainWindow, quickEntryWindow, toolWindow].filter((window) => window && !window.isDestroyed());
   return closeCoordinator.request(windows, async () => {
     // Backend shutdown and relaunch happen only after every window approved.
     quitting = true;
@@ -211,19 +231,21 @@ function readDesktopSettings() {
           : "",
       alwaysOnTop: parsed.alwaysOnTop === true,
       quickEntryBounds: normalizeStoredBounds(parsed.quickEntryBounds),
+      toolWindowBounds: normalizeStoredBounds(parsed.toolWindowBounds),
     };
   } catch (error) {
     if (error?.code !== "ENOENT") {
       console.error("桌面设置读取失败", error);
     }
   }
-  return { dataDirectory: "", alwaysOnTop: false, quickEntryBounds: null };
+  return { dataDirectory: "", alwaysOnTop: false, quickEntryBounds: null, toolWindowBounds: null };
 }
 
 function writeDesktopSettings(
   nextDirectory,
   nextAlwaysOnTop = alwaysOnTop,
   nextQuickEntryBounds = quickEntryBounds,
+  nextToolWindowBounds = toolWindowBounds,
 ) {
   const directory = path.resolve(nextDirectory);
   fs.mkdirSync(settingsDirectory(), { recursive: true });
@@ -235,6 +257,7 @@ function writeDesktopSettings(
         dataDirectory: directory,
         alwaysOnTop: Boolean(nextAlwaysOnTop),
         quickEntryBounds: normalizeStoredBounds(nextQuickEntryBounds),
+        toolWindowBounds: normalizeStoredBounds(nextToolWindowBounds),
       },
       null,
       2,
@@ -394,6 +417,10 @@ function assertQuickEntryIpcSender(event) {
   return assertIpcSenderWindow(event, [quickEntryWindow], "拒绝来自非快速录入窗口的桌面调用");
 }
 
+function assertToolIpcSender(event) {
+  return assertIpcSenderWindow(event, [toolWindow], "拒绝来自非台账工具窗口的桌面调用");
+}
+
 function normalizeIdList(value) {
   if (!Array.isArray(value)) return [];
   return [
@@ -421,6 +448,24 @@ function rendererRoutePath(context) {
   if (context.selectedFieldIds.length) params.set("fields", context.selectedFieldIds.join(","));
   const query = params.toString();
   return `/quick-entry${query ? `?${query}` : ""}`;
+}
+
+function normalizeToolContext(payload) {
+  const tool = TOOL_WINDOW_TABS.includes(payload?.tool) ? payload.tool : "fields";
+  const mode = payload?.mode === "find" ? "find" : "replace";
+  return {
+    tool,
+    mode,
+    projectId:
+      typeof payload?.projectId === "string" ? payload.projectId.trim().slice(0, 160) : "",
+  };
+}
+
+function rendererToolRoutePath(context) {
+  const params = new URLSearchParams();
+  params.set("tool", context.tool);
+  if (context.projectId) params.set("project", context.projectId);
+  return `/ledger-tools?${params.toString()}`;
 }
 
 function rendererDevelopmentUrl() {
@@ -455,20 +500,13 @@ function loadRendererWindow(targetWindow, routePath = "") {
   return targetWindow.loadURL(routePath ? `${developmentUrl}/#${routePath}` : developmentUrl);
 }
 
-function restoredQuickEntryBounds() {
-  const saved = normalizeStoredBounds(quickEntryBounds);
+function restoredWindowBounds(saved, minimumWidth, minimumHeight, defaultWidth, defaultHeight) {
   if (!saved) {
-    return { width: QUICK_ENTRY_DEFAULT_WIDTH, height: QUICK_ENTRY_DEFAULT_HEIGHT };
+    return { width: defaultWidth, height: defaultHeight };
   }
   const workArea = screen.getDisplayMatching(saved).workArea;
-  const width = Math.min(
-    workArea.width,
-    Math.max(QUICK_ENTRY_MIN_WIDTH, saved.width),
-  );
-  const height = Math.min(
-    workArea.height,
-    Math.max(QUICK_ENTRY_MIN_HEIGHT, saved.height),
-  );
+  const width = Math.min(workArea.width, Math.max(minimumWidth, saved.width));
+  const height = Math.min(workArea.height, Math.max(minimumHeight, saved.height));
   return {
     width,
     height,
@@ -477,10 +515,30 @@ function restoredQuickEntryBounds() {
   };
 }
 
+function restoredQuickEntryBounds() {
+  return restoredWindowBounds(
+    normalizeStoredBounds(quickEntryBounds),
+    QUICK_ENTRY_MIN_WIDTH,
+    QUICK_ENTRY_MIN_HEIGHT,
+    QUICK_ENTRY_DEFAULT_WIDTH,
+    QUICK_ENTRY_DEFAULT_HEIGHT,
+  );
+}
+
+function restoredToolWindowBounds() {
+  return restoredWindowBounds(
+    normalizeStoredBounds(toolWindowBounds),
+    TOOL_WINDOW_MIN_WIDTH,
+    TOOL_WINDOW_MIN_HEIGHT,
+    TOOL_WINDOW_DEFAULT_WIDTH,
+    TOOL_WINDOW_DEFAULT_HEIGHT,
+  );
+}
+
 function persistQuickEntryBounds() {
   if (!quickEntryWindow || quickEntryWindow.isDestroyed()) return;
   quickEntryBounds = normalizeStoredBounds(quickEntryWindow.getNormalBounds());
-  if (dataDirectory) writeDesktopSettings(dataDirectory, alwaysOnTop, quickEntryBounds);
+  if (dataDirectory) writeDesktopSettings(dataDirectory, alwaysOnTop, quickEntryBounds, toolWindowBounds);
 }
 
 function scheduleQuickEntryBoundsPersistence() {
@@ -488,6 +546,20 @@ function scheduleQuickEntryBoundsPersistence() {
   quickEntryBoundsTimer = setTimeout(() => {
     quickEntryBoundsTimer = null;
     persistQuickEntryBounds();
+  }, 400);
+}
+
+function persistToolWindowBounds() {
+  if (!toolWindow || toolWindow.isDestroyed()) return;
+  toolWindowBounds = normalizeStoredBounds(toolWindow.getNormalBounds());
+  if (dataDirectory) writeDesktopSettings(dataDirectory, alwaysOnTop, quickEntryBounds, toolWindowBounds);
+}
+
+function scheduleToolWindowBoundsPersistence() {
+  if (toolWindowBoundsTimer) clearTimeout(toolWindowBoundsTimer);
+  toolWindowBoundsTimer = setTimeout(() => {
+    toolWindowBoundsTimer = null;
+    persistToolWindowBounds();
   }, 400);
 }
 
@@ -576,6 +648,80 @@ function showQuickEntryWindow(payload) {
       quickEntryPendingContext,
     );
     quickEntryPendingContext = null;
+  }
+}
+
+function createToolWindow(context) {
+  const bounds = restoredToolWindowBounds();
+  toolRendererReady = false;
+  toolPendingContext = null;
+  toolWindow = new BrowserWindow({
+    title: "台账工具 · 基因检测台账",
+    ...bounds,
+    minWidth: TOOL_WINDOW_MIN_WIDTH,
+    minHeight: TOOL_WINDOW_MIN_HEIGHT,
+    resizable: true,
+    show: false,
+    autoHideMenuBar: true,
+    backgroundColor: "#f7f8fa",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      additionalArguments: [
+        `--gene-ledger-backend-url=${backendUrl}`,
+        `--gene-ledger-data-directory=${dataDirectory}`,
+        "--gene-ledger-window-kind=ledger-tools",
+      ],
+    },
+  });
+  registerWindowCloseProtection(toolWindow);
+  toolWindow.webContents.on("before-input-event", (event, input) => {
+    if ((input.control || input.meta) && String(input.key).toLowerCase() === "w") {
+      event.preventDefault();
+      toolWindow?.close();
+    }
+  });
+  configureRendererNavigation(toolWindow);
+  toolWindow.webContents.on("did-start-navigation", (details) => {
+    if (!details.isMainFrame || details.isSameDocument) return;
+    toolRendererReady = false;
+  });
+  toolWindow.webContents.on("render-process-gone", () => {
+    toolRendererReady = false;
+  });
+  toolWindow.once("ready-to-show", () => {
+    if (!toolWindow || toolWindow.isDestroyed()) return;
+    toolWindow.show();
+    toolWindow.focus();
+  });
+  toolWindow.on("move", scheduleToolWindowBoundsPersistence);
+  toolWindow.on("resize", scheduleToolWindowBoundsPersistence);
+  toolWindow.on("close", persistToolWindowBounds);
+  toolWindow.on("closed", () => {
+    if (toolWindowBoundsTimer) clearTimeout(toolWindowBoundsTimer);
+    toolWindowBoundsTimer = null;
+    toolRendererReady = false;
+    toolPendingContext = null;
+    toolWindow = null;
+  });
+  void loadRendererWindow(toolWindow, rendererToolRoutePath(context));
+}
+
+function showToolWindow(payload) {
+  const context = normalizeToolContext(payload);
+  if (!toolWindow || toolWindow.isDestroyed()) {
+    createToolWindow(context);
+    return;
+  }
+  toolPendingContext = context;
+  if (toolWindow.isMinimized()) toolWindow.restore();
+  toolWindow.show();
+  toolWindow.focus();
+  if (toolRendererReady) {
+    toolWindow.webContents.send("gene-ledger:ledger-tools-open-requested", toolPendingContext);
+    toolPendingContext = null;
   }
 }
 
@@ -854,6 +1000,102 @@ function registerDesktopHandlers() {
     }
   });
 
+  ipcMain.handle("gene-ledger:open-ledger-tools", (event, payload) => {
+    assertTrustedIpcSender(event);
+    if (closeCoordinator.pending || quitting) throw new Error("请先完成当前关闭操作");
+    showToolWindow(payload);
+  });
+
+  ipcMain.handle("gene-ledger:ledger-tools-ready", (event) => {
+    assertToolIpcSender(event);
+    toolRendererReady = true;
+    if (toolPendingContext && toolWindow && !toolWindow.isDestroyed()) {
+      toolWindow.webContents.send("gene-ledger:ledger-tools-open-requested", toolPendingContext);
+      toolPendingContext = null;
+    }
+  });
+
+  ipcMain.handle("gene-ledger:ledger-tools-changed", (event, payload) => {
+    assertToolIpcSender(event);
+    const projectId =
+      typeof payload?.projectId === "string" ? payload.projectId.trim().slice(0, 160) : "";
+    const action = ["fields", "reorder", "replace"].includes(payload?.action)
+      ? payload.action
+      : "";
+    if (!projectId || !action) throw new Error("台账工具变更通知无效");
+    const revision = ++toolChangeRevision;
+    // 保留更重的刷新语义：未确认的 fields 变更不会被后续 reorder/replace 覆盖。
+    const previous = pendingToolProjectChanges.get(projectId);
+    pendingToolProjectChanges.set(projectId, {
+      revision,
+      action: previous?.action === "fields" || action === "fields" ? "fields" : action,
+    });
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("gene-ledger:ledger-tools-changed", {
+        projectId,
+        action,
+        revision,
+      });
+    }
+    if (action === "fields" && quickEntryRendererReady && quickEntryWindow && !quickEntryWindow.isDestroyed()) {
+      quickEntryWindow.webContents.send("gene-ledger:quick-entry-fields-changed", { projectId });
+    }
+  });
+
+  ipcMain.handle("gene-ledger:ledger-tools-project-selected", (event, payload) => {
+    assertToolIpcSender(event);
+    const projectId =
+      typeof payload?.projectId === "string" ? payload.projectId.trim().slice(0, 160) : "";
+    if (!projectId) throw new Error("台账工具项目切换通知无效");
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("gene-ledger:ledger-tools-project-selected", { projectId });
+    }
+  });
+
+  ipcMain.handle("gene-ledger:get-pending-tool-changes", (event) => {
+    assertTrustedIpcSender(event);
+    return [...pendingToolProjectChanges.entries()].map(([projectId, change]) => ({
+      projectId,
+      revision: change.revision,
+      action: change.action,
+    }));
+  });
+
+  ipcMain.handle("gene-ledger:acknowledge-tool-changes", (event, changes) => {
+    assertTrustedIpcSender(event);
+    if (!Array.isArray(changes)) return;
+    changes.forEach((change) => {
+      const projectId =
+        typeof change?.projectId === "string" ? change.projectId.trim().slice(0, 160) : "";
+      const revision = Number(change?.revision);
+      if (!projectId || !Number.isSafeInteger(revision) || revision <= 0) return;
+      const pending = pendingToolProjectChanges.get(projectId);
+      if (pending !== undefined && pending.revision <= revision) {
+        pendingToolProjectChanges.delete(projectId);
+      }
+    });
+  });
+
+  ipcMain.handle("gene-ledger:locate-ledger-record", (event, payload) => {
+    assertToolIpcSender(event);
+    const projectId =
+      typeof payload?.projectId === "string" ? payload.projectId.trim().slice(0, 160) : "";
+    const recordId =
+      typeof payload?.recordId === "string" ? payload.recordId.trim().slice(0, 160) : "";
+    const fieldId =
+      typeof payload?.fieldId === "string" ? payload.fieldId.trim().slice(0, 160) : "";
+    if (!projectId || !recordId) throw new Error("定位记录通知无效");
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    mainWindow.webContents.send("gene-ledger:ledger-tools-locate-record", {
+      projectId,
+      recordId,
+      fieldId,
+    });
+  });
+
   ipcMain.handle("gene-ledger:minimize-window", (event) => {
     assertTrustedIpcSender(event);
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize();
@@ -1009,6 +1251,7 @@ if (!singleInstance) {
       const desktopSettings = readDesktopSettings();
       alwaysOnTop = desktopSettings.alwaysOnTop;
       quickEntryBounds = desktopSettings.quickEntryBounds;
+      toolWindowBounds = desktopSettings.toolWindowBounds;
       registerDesktopHandlers();
       await startBackend();
       createMainWindow();

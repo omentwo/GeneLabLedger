@@ -15,7 +15,7 @@ import {
   Settings2 as Setting,
 } from "@lucide/vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 
 import {
   batchCreateFields,
@@ -42,16 +42,22 @@ import {
 } from "@/utils/ledgerColumnWidth";
 import type { DataType, FieldDefinition, LedgerTemplate } from "@/types/api";
 
+/**
+ * 项目与表头管理面板。本体是普通容器，不自带遮罩：
+ * - 主窗口（浏览器降级路径）由宿主包一层 el-dialog；
+ * - 台账工具窗口里作为页签面板直接嵌入。
+ * `embedded` 只决定「完成」按钮的语义：嵌入模式触发 close 事件（由宿主决定收尾动作）。
+ */
 const props = defineProps<{
-  modelValue: boolean;
   selectedProjectId: string;
+  embedded?: boolean;
 }>();
 
 const emit = defineEmits<{
-  "update:modelValue": [value: boolean];
-  changed: [];
+  changed: [projectId: string];
   "select-project": [projectId: string];
   "open-templates": [];
+  close: [];
 }>();
 
 const appStore = useAppStore();
@@ -144,10 +150,10 @@ function parseOptions(value: string): string[] {
   return result;
 }
 
-async function reloadAndNotify(): Promise<void> {
+async function reloadAndNotify(changedProjectId: string = currentProjectId.value): Promise<void> {
   await appStore.reloadProjects();
   syncCurrentProject();
-  emit("changed");
+  emit("changed", changedProjectId);
 }
 
 async function loadLedgerTemplates(): Promise<void> {
@@ -159,7 +165,6 @@ async function loadLedgerTemplates(): Promise<void> {
 }
 
 function openTemplates(): void {
-  emit("update:modelValue", false);
   emit("open-templates");
 }
 
@@ -178,7 +183,7 @@ async function addProject(): Promise<void> {
     currentProjectId.value = project.id;
     syncCurrentProject();
     emit("select-project", project.id);
-    emit("changed");
+    emit("changed", project.id);
     ElMessage.success("检测项目已添加");
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "项目添加失败");
@@ -237,7 +242,7 @@ async function duplicateCurrentProject(): Promise<void> {
     currentProjectId.value = copied.id;
     syncCurrentProject();
     emit("select-project", copied.id);
-    emit("changed");
+    emit("changed", copied.id);
     ElMessage.success("台账已完整复制");
   } catch (error) {
     if (error === "cancel" || error === "close") return;
@@ -259,7 +264,7 @@ async function moveProject(index: number, offset: -1 | 1): Promise<void> {
       updateProject(target.id, { sort_order: current.sort_order }),
     ]);
     await appStore.reloadProjects();
-    emit("changed");
+    emit("changed", currentProjectId.value);
     ElMessage.success("项目优先顺序已保存");
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "项目顺序保存失败");
@@ -283,7 +288,7 @@ async function removeProject(): Promise<void> {
     );
     await deleteProject(project.id);
     currentProjectId.value = "";
-    await reloadAndNotify();
+    await reloadAndNotify(project.id);
     if (currentProjectId.value) emit("select-project", currentProjectId.value);
     ElMessage.success("项目已删除");
   } catch (error) {
@@ -305,7 +310,7 @@ async function removeProject(): Promise<void> {
         saving.value = true;
         const result = await forceDeleteProject(project.id, confirmation.value.trim());
         currentProjectId.value = "";
-        await reloadAndNotify();
+        await reloadAndNotify(project.id);
         if (currentProjectId.value) emit("select-project", currentProjectId.value);
         const warning = result.cleanup_warnings.length ? `（${result.cleanup_warnings.join("；")}）` : "";
         ElMessage.success(
@@ -724,16 +729,18 @@ async function removeField(field: FieldDefinition): Promise<void> {
   }
 }
 
+onMounted(() => {
+  currentProjectId.value = props.selectedProjectId;
+  syncCurrentProject();
+  void loadLedgerTemplates();
+});
+
 watch(
-  () => props.modelValue,
-  (visible) => {
-    if (!visible) {
-      clearFieldDrag();
-      return;
+  () => props.selectedProjectId,
+  (projectId) => {
+    if (projectId && appStore.projects.some((project) => project.id === projectId)) {
+      currentProjectId.value = projectId;
     }
-    currentProjectId.value = props.selectedProjectId;
-    syncCurrentProject();
-    void loadLedgerTemplates();
   },
 );
 
@@ -744,7 +751,7 @@ watch(currentProjectId, () => {
 watch(
   () => appStore.projects,
   () => {
-    if (props.modelValue) syncCurrentProject();
+    syncCurrentProject();
   },
   { deep: true },
 );
@@ -753,14 +760,8 @@ onBeforeUnmount(clearFieldDrag);
 </script>
 
 <template>
-  <el-dialog
-    :model-value="modelValue"
-    title="管理检测项目与独立表头"
-    width="min(1120px, 94vw)"
-    destroy-on-close
-    @update:model-value="emit('update:modelValue', $event)"
-  >
-    <div class="manager-layout" v-loading="saving">
+  <div class="manager-root" v-loading="saving">
+    <div class="manager-layout">
       <aside class="project-panel">
         <div class="section-label">检测项目</div>
         <el-menu :default-active="currentProjectId" @select="currentProjectId = $event">
@@ -993,10 +994,10 @@ onBeforeUnmount(clearFieldDrag);
       </section>
     </div>
 
-    <template #footer>
-      <el-button @click="emit('update:modelValue', false)">完成</el-button>
-    </template>
-  </el-dialog>
+    <div class="manager-footer">
+      <el-button @click="emit('close')">完成</el-button>
+    </div>
+  </div>
 
   <el-dialog
     v-model="fieldDialogVisible"
@@ -1116,11 +1117,25 @@ onBeforeUnmount(clearFieldDrag);
 </template>
 
 <style scoped>
+.manager-root {
+  display: flex;
+  flex-direction: column;
+}
+
 .manager-layout {
   display: grid;
+  flex: 1;
   grid-template-columns: 250px minmax(0, 1fr);
   min-height: 600px;
   gap: 22px;
+}
+
+.manager-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 18px;
+  border-top: 1px solid var(--app-border);
+  padding-top: 12px;
 }
 
 .project-panel {

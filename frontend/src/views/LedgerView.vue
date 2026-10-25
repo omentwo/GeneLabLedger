@@ -59,8 +59,6 @@ import {
   commitCellBatch,
   previewCellBatch,
   FIND_REPLACE_RECORD_LIMIT,
-  previewReorderByDate,
-  applyReorderByDate,
   queryRecords,
   setRecordLock,
   setCellsHighlight,
@@ -90,9 +88,9 @@ import type {
   RecordCellBatchCommitResult,
   RecordBatchNewRecord,
   RecordCellChange,
-  RecordReorderByDatePreview,
 } from "@/types/api";
 import type {
+  LedgerRecordLocate,
   QuickEntryChangedPayload,
   QuickEntryProjectChange,
 } from "@/types/electron";
@@ -153,7 +151,8 @@ import { useLedgerGridClipboard } from "@/composables/useLedgerGridClipboard";
 import { useLedgerGridScrollFocus } from "@/composables/useLedgerGridScrollFocus";
 import { useLedgerCellSave, type ValidationCellRollbackSnapshot } from "@/composables/useLedgerCellSave";
 import { useLedgerRangeRefresh } from "@/composables/useLedgerRangeRefresh";
-import { useLedgerFindReplace } from "@/composables/useLedgerFindReplace";
+import { useLedgerFindReplace, type FindReplaceMode } from "@/composables/useLedgerFindReplace";
+import { useLedgerToolsWindows } from "@/composables/useLedgerToolsWindows";
 import { useLedgerDraftRows } from "@/composables/useLedgerDraftRows";
 import { useLedgerPersistDraft } from "@/composables/useLedgerPersistDraft";
 import { buildValidationPromptCopy } from "@/utils/validationPrompt";
@@ -312,10 +311,6 @@ const nativePreviewLoading = ref(false);
 const columnToolsVisible = ref(false);
 const columnToolsOpenFieldId = ref("");
 const columnToolsPosition = reactive({ left: 0, top: 0 });
-const reorderDialogVisible = ref(false);
-const reorderDate = ref("");
-const reorderPreview = ref<RecordReorderByDatePreview | null>(null);
-const reorderLoading = ref(false);
 type LedgerColumnToolsDraft = {
   text: string;
   options: string[];
@@ -803,7 +798,61 @@ async function requestPendingQuickEntryChanges(): Promise<void> {
 function handleLedgerWindowFocus(): void {
   if (preparingClose.value) return;
   void requestPendingQuickEntryChanges();
+  void requestPendingToolChanges();
 }
+
+function locateLedgerRecordFromTools(payload: LedgerRecordLocate): void {
+  if (payload.projectId && payload.projectId !== activeProjectId.value) {
+    selectProject(payload.projectId);
+  }
+  const rowIndex = tableRowIndexById.value.get(payload.recordId);
+  if (rowIndex === undefined) {
+    ElMessage.warning("该记录不在当前台账显示范围内，请调整筛选或显示范围后重试");
+    return;
+  }
+  const columnIndex = fields.value.findIndex((field) => field.id === payload.fieldId);
+  const position = clampGridCell({
+    rowIndex,
+    columnIndex: Math.max(0, columnIndex),
+  });
+  selectGridCell(position);
+  void focusGridCell(position);
+}
+
+// 台账工具窗口接入层：入口分流、ledger-tools-changed 变更队列、定位/项目切换。
+const {
+  openQuickEntry,
+  handleManageProjectsAction,
+  handleReorderAction,
+  handleFindReplaceAction,
+  reorderDialogVisible,
+  reorderDate,
+  reorderPreview,
+  reorderLoading,
+  loadReorderPreview,
+  confirmReorderByDate,
+  requestPendingToolChanges,
+  attachToolsWindowListeners,
+  disposeToolsWindowListeners,
+} = useLedgerToolsWindows({
+  getActiveProjectId: () => activeProjectId.value,
+  getCurrentProject: () => currentProject.value,
+  router,
+  managerVisible,
+  getFindReplaceMode: () => findReplaceMode.value,
+  getFindReplaceVisible: () => findReplaceVisible.value,
+  openFindReplace,
+  isDisposed: () => ledgerDisposed,
+  isPreparingClose: () => preparingClose.value,
+  hasPendingLedgerEdits,
+  invalidateProjectRecordCache,
+  loadRecords,
+  reloadProjects: () => appStore.reloadProjects(),
+  applyProjectLayout: applyLedgerProjectLayout,
+  persistProjectLayout: persistLedgerProjectLayout,
+  selectProject,
+  locateRecordInGrid: locateLedgerRecordFromTools,
+});
 
 type LedgerVirtualColumnKind = "selection" | "lock" | "field";
 type LedgerVirtualColumn = Column<unknown> & {
@@ -3133,7 +3182,6 @@ async function openLedgerNative(): Promise<void> {
   nativePreviewLoading.value = true;
   try {
     const task = await createLedgerNativePreview(currentProject.value.id, {
-      action: "open",
       scope,
       include_locked: showLockedRecords.value,
       cells,
@@ -3308,49 +3356,6 @@ async function saveLedgerRangeSettings(): Promise<void> {
   } finally {
     ledgerRangeSaving.value = false;
     if (pendingLedgerRangeApplication.value) scheduleLedgerRangeRefresh(activeProjectId.value);
-  }
-}
-
-function openReorderDialog(): void {
-  reorderDate.value = shanghaiDateKey(new Date());
-  reorderPreview.value = null;
-  reorderDialogVisible.value = true;
-}
-
-async function loadReorderPreview(): Promise<void> {
-  if (!reorderDate.value) {
-    ElMessage.warning("请选择需要重排的实验日期");
-    return;
-  }
-  reorderLoading.value = true;
-  try {
-    reorderPreview.value = await previewReorderByDate(activeProjectId.value, reorderDate.value);
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "重排预览失败");
-  } finally {
-    reorderLoading.value = false;
-  }
-}
-
-async function confirmReorderByDate(): Promise<void> {
-  const preview = reorderPreview.value;
-  if (!preview) return;
-  reorderLoading.value = true;
-  try {
-    const result = await applyReorderByDate(
-      activeProjectId.value,
-      preview.experiment_date,
-      preview.expected_order_hash,
-    );
-    preview.projects.forEach((project) => invalidateProjectRecordCache(project.project_id));
-    reorderDialogVisible.value = false;
-    await loadRecords(activeProjectId.value, { preserveHistory: true, preserveSelection: true });
-    ElMessage.success(`重排完成，共调整 ${result.changed_records} 条记录`);
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "按日期重排失败");
-    reorderPreview.value = null;
-  } finally {
-    reorderLoading.value = false;
   }
 }
 
@@ -3794,40 +3799,6 @@ function persistLedgerProjectLayout(projectId = activeProjectId.value): Promise<
       ElMessage.warning(error instanceof Error ? error.message : "台账布局设置保存失败");
     });
   return ledgerLayoutSaveQueue;
-}
-
-async function openQuickEntry(): Promise<void> {
-  const project = currentProject.value;
-  if (!project) return;
-  const selectedFieldIds = project.fields
-    .filter((field) => field.is_core || !field.hidden)
-    .sort((left, right) => left.sort_order - right.sort_order)
-    .map((field) => field.id);
-  const context = {
-    projectId: project.id,
-    selectedFieldIds,
-  };
-  const bridge = desktopBridge();
-  if (bridge) {
-    try {
-      await bridge.openQuickEntry(context);
-    } catch (error) {
-      ElMessage.error(error instanceof Error ? error.message : "快速录入窗口打开失败");
-    }
-    return;
-  }
-  const target = router.resolve({
-    name: "quick-entry",
-    query: {
-      project: context.projectId,
-      fields: context.selectedFieldIds.join(","),
-    },
-  }).href;
-  window.open(
-    target,
-    "gene-ledger-quick-entry",
-    "popup=yes,width=820,height=680,resizable=yes,scrollbars=no",
-  );
 }
 
 function fieldDefinitionById(fieldId: string): FieldDefinition | undefined {
@@ -4604,7 +4575,7 @@ function handleLedgerDocumentKeydown(event: KeyboardEvent): void {
     if (key === "f" || key === "h") {
       event.preventDefault();
       event.stopPropagation();
-      openFindReplace(key === "f" ? "find" : "replace", !findReplaceVisible.value);
+      handleFindReplaceAction(key === "f" ? "find" : "replace");
       return;
     }
   }
@@ -4629,6 +4600,7 @@ onMounted(() => {
   const bridge = desktopBridge();
   if (bridge?.windowKind === "main") {
     removeQuickEntryChangedListener = bridge.onQuickEntryChanged(handleQuickEntryChanged);
+    attachToolsWindowListeners();
     void requestPendingQuickEntryChanges();
   }
   void loadPreviewEngineSetting();
@@ -4645,6 +4617,7 @@ onBeforeUnmount(() => {
   if (quickEntryRetryTimer !== undefined) window.clearTimeout(quickEntryRetryTimer);
   quickEntryRetryTimer = undefined;
   quickEntryRetryPending.clear();
+  disposeToolsWindowListeners();
   cancelFindTermDebounce();
   ledgerHistory.clear();
   document.removeEventListener("click", handleRecordSelectionClickCapture, true);
@@ -4705,11 +4678,11 @@ onBeforeUnmount(() => {
       @open-quick-entry="openQuickEntry"
       @locked-visibility-change="handleLockedVisibilityChange"
       @toggle-export="exportVisible = !exportVisible"
-      @reorder="openReorderDialog"
-      @find-replace="openFindReplace()"
+      @reorder="handleReorderAction"
+      @find-replace="handleFindReplaceAction('replace')"
       @toggle-column-tools="toggleColumnTools"
       @best-fit-all="bestFitAllColumns($event)"
-      @manage-projects="managerVisible = true"
+      @manage-projects="handleManageProjectsAction"
       @save-preview-engine="savePreviewEngineSetting"
       @open-native="openLedgerNative"
       @save-range="saveLedgerRangeSettings"
@@ -5233,13 +5206,20 @@ onBeforeUnmount(() => {
     :selected-project-id="activeProjectId"
   />
 
-  <ProjectFieldManager
+  <el-dialog
     v-model="managerVisible"
-    :selected-project-id="activeProjectId"
-    @changed="handleManagerChanged"
-    @select-project="selectProject"
-    @open-templates="templateManagerVisible = true"
-  />
+    title="管理检测项目与独立表头"
+    width="min(1120px, 94vw)"
+    destroy-on-close
+  >
+    <ProjectFieldManager
+      :selected-project-id="activeProjectId"
+      @changed="handleManagerChanged"
+      @select-project="selectProject"
+      @open-templates="managerVisible = false; templateManagerVisible = true"
+      @close="managerVisible = false"
+    />
+  </el-dialog>
 
   <LedgerReorderDialog
     v-model:visible="reorderDialogVisible"

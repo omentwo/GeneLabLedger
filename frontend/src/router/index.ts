@@ -10,6 +10,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: "快速录入" },
   },
   {
+    path: "/ledger-tools",
+    name: "ledger-tools",
+    component: () => import("@/views/LedgerToolsView.vue"),
+    meta: { title: "台账工具" },
+  },
+  {
     path: "/",
     component: AppLayout,
     children: [

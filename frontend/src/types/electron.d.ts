@@ -1,6 +1,6 @@
 export interface GeneLedgerDesktopBridge {
   isElectron: true;
-  windowKind: "main" | "quick-entry";
+  windowKind: "main" | "quick-entry" | "ledger-tools";
   backendUrl: string;
   dataDirectory: string;
   clipboardFollowAvailable: boolean;
@@ -24,6 +24,13 @@ export interface GeneLedgerDesktopBridge {
   setAlwaysOnTop: (value: boolean) => Promise<boolean>;
   getWindowState: () => Promise<{ isMaximized: boolean; alwaysOnTop: boolean }>;
   openQuickEntry: (context: QuickEntryOpenContext) => Promise<void>;
+  openLedgerTools: (context: LedgerToolsOpenContext) => Promise<void>;
+  ledgerToolsReady: () => Promise<void>;
+  notifyLedgerToolsChanged: (payload: LedgerToolsChangedPayload) => Promise<void>;
+  selectProjectFromLedgerTools: (projectId: string) => Promise<void>;
+  getPendingToolChanges: () => Promise<LedgerToolsProjectChange[]>;
+  acknowledgeToolChanges: (changes: LedgerToolsProjectChange[]) => Promise<void>;
+  locateLedgerRecord: (payload: LedgerRecordLocate) => Promise<void>;
   quickEntryReady: () => Promise<void>;
   focusMainWindow: () => Promise<boolean>;
   notifyQuickEntryChanged: (payload: QuickEntryChangedPayload) => Promise<void>;
@@ -32,6 +39,18 @@ export interface GeneLedgerDesktopBridge {
   notifyQuickEntryFieldsChanged: (payload: QuickEntryFieldsChangedPayload) => Promise<void>;
   onQuickEntryOpenRequested: (
     listener: (context: QuickEntryOpenContext) => void,
+  ) => () => void;
+  onLedgerToolsOpenRequested: (
+    listener: (context: LedgerToolsOpenContext) => void,
+  ) => () => void;
+  onLedgerToolsChanged: (
+    listener: (payload: LedgerToolsChangedPayload) => void,
+  ) => () => void;
+  onLedgerToolsProjectSelected: (
+    listener: (payload: { projectId: string }) => void,
+  ) => () => void;
+  onLedgerToolsLocateRecord: (
+    listener: (payload: LedgerRecordLocate) => void,
   ) => () => void;
   onQuickEntryChanged: (
     listener: (payload: QuickEntryChangedPayload) => void,
@@ -91,6 +110,32 @@ export interface QuickEntryProjectChange {
 
 export interface QuickEntryFieldsChangedPayload {
   projectId: string;
+}
+
+export type LedgerToolsTab = "fields" | "reorder" | "find-replace";
+
+export interface LedgerToolsOpenContext {
+  tool: LedgerToolsTab;
+  mode?: "find" | "replace";
+  projectId: string;
+}
+
+export interface LedgerToolsChangedPayload {
+  projectId: string;
+  action: "fields" | "reorder" | "replace";
+  revision?: number;
+}
+
+export interface LedgerToolsProjectChange {
+  projectId: string;
+  revision: number;
+  action?: LedgerToolsChangedPayload["action"];
+}
+
+export interface LedgerRecordLocate {
+  projectId: string;
+  recordId: string;
+  fieldId: string;
 }
 
 declare global {

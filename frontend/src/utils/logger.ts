@@ -13,6 +13,7 @@ export type LogScope =
   | "window"
   | "ledger"
   | "quick-entry"
+  | "ledger-tools"
   | "reports"
   | "settings"
   | "clipboard";

@@ -32,6 +32,17 @@ contextBridge.exposeInMainWorld("geneLedgerDesktop", {
   setAlwaysOnTop: (value) => ipcRenderer.invoke("gene-ledger:set-always-on-top", Boolean(value)),
   getWindowState: () => ipcRenderer.invoke("gene-ledger:get-window-state"),
   openQuickEntry: (context) => ipcRenderer.invoke("gene-ledger:open-quick-entry", context),
+  openLedgerTools: (context) => ipcRenderer.invoke("gene-ledger:open-ledger-tools", context),
+  ledgerToolsReady: () => ipcRenderer.invoke("gene-ledger:ledger-tools-ready"),
+  notifyLedgerToolsChanged: (payload) =>
+    ipcRenderer.invoke("gene-ledger:ledger-tools-changed", payload),
+  selectProjectFromLedgerTools: (projectId) =>
+    ipcRenderer.invoke("gene-ledger:ledger-tools-project-selected", { projectId }),
+  getPendingToolChanges: () => ipcRenderer.invoke("gene-ledger:get-pending-tool-changes"),
+  acknowledgeToolChanges: (changes) =>
+    ipcRenderer.invoke("gene-ledger:acknowledge-tool-changes", changes),
+  locateLedgerRecord: (payload) =>
+    ipcRenderer.invoke("gene-ledger:locate-ledger-record", payload),
   quickEntryReady: () => ipcRenderer.invoke("gene-ledger:quick-entry-ready"),
   focusMainWindow: () => ipcRenderer.invoke("gene-ledger:focus-main-window"),
   notifyQuickEntryChanged: (payload) =>
@@ -46,6 +57,26 @@ contextBridge.exposeInMainWorld("geneLedgerDesktop", {
     const handler = (_event, context) => listener(context);
     ipcRenderer.on("gene-ledger:quick-entry-open-requested", handler);
     return () => ipcRenderer.removeListener("gene-ledger:quick-entry-open-requested", handler);
+  },
+  onLedgerToolsOpenRequested: (listener) => {
+    const handler = (_event, context) => listener(context);
+    ipcRenderer.on("gene-ledger:ledger-tools-open-requested", handler);
+    return () => ipcRenderer.removeListener("gene-ledger:ledger-tools-open-requested", handler);
+  },
+  onLedgerToolsChanged: (listener) => {
+    const handler = (_event, payload) => listener(payload);
+    ipcRenderer.on("gene-ledger:ledger-tools-changed", handler);
+    return () => ipcRenderer.removeListener("gene-ledger:ledger-tools-changed", handler);
+  },
+  onLedgerToolsProjectSelected: (listener) => {
+    const handler = (_event, payload) => listener(payload);
+    ipcRenderer.on("gene-ledger:ledger-tools-project-selected", handler);
+    return () => ipcRenderer.removeListener("gene-ledger:ledger-tools-project-selected", handler);
+  },
+  onLedgerToolsLocateRecord: (listener) => {
+    const handler = (_event, payload) => listener(payload);
+    ipcRenderer.on("gene-ledger:ledger-tools-locate-record", handler);
+    return () => ipcRenderer.removeListener("gene-ledger:ledger-tools-locate-record", handler);
   },
   onQuickEntryChanged: (listener) => {
     const handler = (_event, payload) => listener(payload);
