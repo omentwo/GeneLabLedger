@@ -56,8 +56,12 @@ const initializing = ref(false);
 const initializationError = ref("");
 const activeProjectId = ref("");
 // 一个工具窗口只承载一个工具（主进程按 tool 各建单例窗口），tool 由路由
-// 固定，open-requested 只刷新项目等上下文，不再切换工具。
-const tool = ref<LedgerToolsTab>("fields");
+// 在 setup 期即解析——避免先按默认值渲染错工具、bootstrap 后再整体替换；
+// open-requested 只刷新项目等上下文，不再切换工具。
+function normalizeRouteTool(value: unknown): LedgerToolsTab {
+  return TOOL_WINDOW_TABS.includes(value as LedgerToolsTab) ? (value as LedgerToolsTab) : "fields";
+}
+const tool = ref<LedgerToolsTab>(normalizeRouteTool(route.query.tool));
 const templateManagerVisible = ref(false);
 
 const activeProjectName = computed(
@@ -95,6 +99,16 @@ function handleToolProjectSelected(projectId: string): void {
       .selectProjectFromLedgerTools(projectId)
       .catch((error) => logError("ledger-tools", "项目切换同步失败", error));
   }
+}
+
+function handleFindReplaceProjectChange(projectId: string): void {
+  if (!projectId || projectId === activeProjectId.value) return;
+  activeProjectId.value = projectId;
+  // 换项目后旧预览作废；匹配项随 records 重算，命中游标由 watch 归零。
+  findReplacePreview.value = null;
+  findReplaceScopeCount.value = null;
+  void ensureRecordsLoaded();
+  handleToolProjectSelected(projectId);
 }
 
 function finishToolsSession(): void {
@@ -299,9 +313,6 @@ async function initialize(): Promise<void> {
   initializationError.value = "";
   try {
     await appStore.bootstrap();
-    const routeTool = TOOL_WINDOW_TABS.includes(route.query.tool as LedgerToolsTab)
-      ? (route.query.tool as LedgerToolsTab)
-      : "fields";
     const routeProject = typeof route.query.project === "string" ? route.query.project : "";
     const requestedProject = appStore.projects.some((project) => project.id === routeProject)
       ? routeProject
@@ -311,9 +322,8 @@ async function initialize(): Promise<void> {
       return;
     }
     activeProjectId.value = requestedProject;
-    tool.value = routeTool;
-    document.title = `${TOOL_TITLES[routeTool]} · 基因检测台账管理系统`;
-    if (routeTool === "find-replace") {
+    document.title = `${TOOL_TITLES[tool.value]} · 基因检测台账管理系统`;
+    if (tool.value === "find-replace") {
       openFindReplace(route.query.mode === "find" ? "find" : "replace", true);
       await ensureRecordsLoaded();
     }
@@ -389,7 +399,7 @@ onBeforeUnmount(() => {
     </div>
 
     <template v-else>
-      <section v-if="tool === 'fields'" class="tools-section">
+      <section v-if="tool === 'fields'" v-loading="initializing" class="tools-section">
         <ProjectFieldManager
           :selected-project-id="activeProjectId"
           embedded
@@ -400,7 +410,7 @@ onBeforeUnmount(() => {
         />
       </section>
 
-      <section v-else-if="tool === 'reorder'" class="tools-section">
+      <section v-else-if="tool === 'reorder'" v-loading="initializing" class="tools-section">
         <div class="tools-pane">
           <p class="tools-pane-note">
             仅重排当前项目中所选日期的记录，并按“病理号-蜡块号”的实验编排规则排序；其他日期记录的位置保持不变。
@@ -448,8 +458,26 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section v-else-if="tool === 'find-replace'" class="tools-section">
+      <section v-else-if="tool === 'find-replace'" v-loading="initializing" class="tools-section">
         <div v-loading="recordsLoading" class="tools-pane">
+          <div class="find-replace-project-row">
+            <span class="tools-field-label" id="find-replace-project-label">台账项目</span>
+            <el-select
+              class="find-replace-project-select"
+              :model-value="activeProjectId"
+              :disabled="findReplaceLoading"
+              placeholder="选择项目"
+              aria-labelledby="find-replace-project-label"
+              @change="handleFindReplaceProjectChange(String($event))"
+            >
+              <el-option
+                v-for="project in appStore.projects"
+                :key="project.id"
+                :label="project.name"
+                :value="project.id"
+              />
+            </el-select>
+          </div>
           <div class="find-replace-mode-switch" role="group" aria-label="查找模式">
             <el-button
               size="small"
@@ -602,6 +630,8 @@ onBeforeUnmount(() => {
   flex: 1;
   flex-direction: column;
   overflow: auto;
+  /* 竖向滚动条出现/消失时不让内容整体横移。 */
+  scrollbar-gutter: stable;
 }
 
 .tools-pane {
@@ -645,6 +675,16 @@ onBeforeUnmount(() => {
 
 .reorder-project-preview span {
   overflow-wrap: anywhere;
+}
+
+.find-replace-project-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.find-replace-project-select {
+  width: min(220px, 28vw);
 }
 
 .find-replace-mode-switch {

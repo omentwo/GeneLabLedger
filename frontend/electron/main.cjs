@@ -465,7 +465,13 @@ function assertToolIpcSender(event) {
 function toolState(tool) {
   let state = toolWindows.get(tool);
   if (!state) {
-    state = { window: null, rendererReady: false, pendingContext: null, boundsTimer: null };
+    state = {
+      window: null,
+      rendererReady: false,
+      pendingContext: null,
+      boundsTimer: null,
+      showFallbackTimer: null,
+    };
     toolWindows.set(tool, state);
   }
   return state;
@@ -737,7 +743,8 @@ function createToolWindow(tool, context) {
     resizable: true,
     show: false,
     autoHideMenuBar: true,
-    backgroundColor: "#f7f8fa",
+    // 对齐默认 paper 主题的 --app-bg，消除 resize/首帧期间与页面底色的色差。
+    backgroundColor: "#faf9f5",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -765,17 +772,23 @@ function createToolWindow(tool, context) {
   window.webContents.on("render-process-gone", () => {
     state.rendererReady = false;
   });
-  window.once("ready-to-show", () => {
-    if (state.window !== window || window.isDestroyed()) return;
-    window.show();
-    window.focus();
-  });
+  // ready-to-show 只代表空壳首帧（路由 chunk + bootstrap 数据还没就位），
+  // 此时显示会看到内容逐步拼装；等渲染层发出 ledger-tools-ready 再显示。
+  state.showFallbackTimer = setTimeout(() => {
+    state.showFallbackTimer = null;
+    if (state.window === window && !window.isDestroyed() && !window.isVisible()) {
+      window.show();
+      window.focus();
+    }
+  }, 5000);
   window.on("move", () => scheduleToolWindowBoundsPersistence(tool));
   window.on("resize", () => scheduleToolWindowBoundsPersistence(tool));
   window.on("close", () => persistToolWindowBounds(tool));
   window.on("closed", () => {
     if (state.boundsTimer) clearTimeout(state.boundsTimer);
     state.boundsTimer = null;
+    if (state.showFallbackTimer) clearTimeout(state.showFallbackTimer);
+    state.showFallbackTimer = null;
     state.rendererReady = false;
     state.pendingContext = null;
     if (state.window === window) state.window = null;
@@ -1087,6 +1100,15 @@ function registerDesktopHandlers() {
     const window = assertToolIpcSender(event);
     const entry = toolEntryByWindow(window);
     if (!entry) throw new Error("台账工具窗口状态无效");
+    if (entry.state.showFallbackTimer) {
+      clearTimeout(entry.state.showFallbackTimer);
+      entry.state.showFallbackTimer = null;
+    }
+    // 窗口第一次显示放在这里：渲染层 bootstrap 完成、界面成形后才可见。
+    if (!window.isVisible()) {
+      window.show();
+      window.focus();
+    }
     entry.state.rendererReady = true;
     if (entry.state.pendingContext && entry.state.window && !entry.state.window.isDestroyed()) {
       entry.state.window.webContents.send(

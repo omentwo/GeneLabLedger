@@ -4679,7 +4679,7 @@ onBeforeUnmount(() => {
       @locked-visibility-change="handleLockedVisibilityChange"
       @toggle-export="exportVisible = !exportVisible"
       @reorder="handleReorderAction"
-      @find-replace="handleFindReplaceAction('replace')"
+      @find-replace="handleFindReplaceAction('find')"
       @toggle-column-tools="toggleColumnTools"
       @best-fit-all="bestFitAllColumns($event)"
       @manage-projects="handleManageProjectsAction"

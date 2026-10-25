@@ -56,7 +56,7 @@ function fixture({ choices = [] } = {}) {
     isDestroyed() { return this.destroyed; }
     isMinimized() { return false; }
     isMaximized() { return false; }
-    isVisible() { this.visible = true; return true; }
+    isVisible() { return this.visible; }
     getBounds() { return this.normalBounds; }
     getNormalBounds() { return this.normalBounds; }
     setAlwaysOnTop(flag, level) { this.alwaysOnTopCalls.push([flag, level]); }
@@ -97,7 +97,9 @@ function fixture({ choices = [] } = {}) {
       return require(name);
     },
     module: { exports: {} }, __dirname: path.resolve(__dirname, ".."), process, console,
-    setTimeout, clearTimeout, Buffer, URL, URLSearchParams,
+    // unref：显示兜底等测试内不触发的定时器不应拖住测试进程退出。
+    setTimeout: (fn, ms) => { const timer = setTimeout(fn, ms); timer.unref?.(); return timer; },
+    clearTimeout, Buffer, URL, URLSearchParams,
   };
   const source = fs.readFileSync(path.resolve(__dirname, "../main.cjs"), "utf8");
   vm.runInNewContext(`${source}
@@ -168,6 +170,15 @@ test("three tool windows open independently with per-tool singletons", async () 
   assert.ok(String(findReplace.options.title).includes("查找替换"));
   assert.ok(String(findReplace.loadedUrl).includes("/ledger-tools?tool=find-replace"));
   assert.ok(String(reorder.options.title).includes("按日期重排"));
+
+  // 显示时机：创建后不立即可见（ready-to-show 空壳不再显示），
+  // 渲染层发出 ledger-tools-ready 后才 show + focus。
+  assert.equal(fields.isVisible(), false);
+  assert.equal(findReplace.isVisible(), false);
+  assert.equal(reorder.isVisible(), false);
+  await f.handlers.get("gene-ledger:ledger-tools-ready")(f.senderFor(findReplace));
+  assert.equal(findReplace.isVisible(), true);
+  assert.equal(fields.isVisible(), false);
 
   // 按 tool 各自单例：重复打开不建新窗口，就绪后补发 open-requested。
   await f.handlers.get("gene-ledger:ledger-tools-ready")(f.senderFor(findReplace));
