@@ -41,7 +41,7 @@ Electron 负责桌面边界和文件对话框，Vue 前端只通过 HTTP API 和
 | 测试与质量 | pytest、HTTPX、Vitest/jsdom、vue-tsc、Ruff、node:test |
 | Windows 发布 | GitHub Actions、PyInstaller sidecar、Electron 安装包 |
 
-前端和后端版本号保持一致（当前 2.4.6），分别位于 `frontend/package.json` 与 `backend/pyproject.toml`，后端 `/api/health` 返回同一版本。
+前端和后端版本号保持一致（当前 2.4.7），分别位于 `frontend/package.json` 与 `backend/pyproject.toml`，后端 `/api/health` 返回同一版本。
 
 ## 3. 启动模式与目录布局
 
