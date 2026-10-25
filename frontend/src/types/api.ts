@@ -95,13 +95,11 @@ export interface PreviewCapabilities {
   preferred_engine: "microsoft" | "wps" | null;
 }
 
-export type NativePreviewAction = "preview" | "open";
 export type NativePreviewStatus = "starting" | "open" | "completed" | "failed";
 
 export interface NativePreviewTask {
   job_id: string;
   status: NativePreviewStatus;
-  action: NativePreviewAction;
   print_engine: Exclude<PrintEngine, "auto">;
   document_type: "xlsx" | "docx";
   filename: string;

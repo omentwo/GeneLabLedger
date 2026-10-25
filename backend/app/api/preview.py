@@ -223,7 +223,6 @@ def create_ledger_native_preview(
             input_path=input_path,
             work_root=job_root,
             document_type="xlsx",
-            action=payload.action,
             engine=payload.print_engine,
         )
     except OfficePreviewError as error:

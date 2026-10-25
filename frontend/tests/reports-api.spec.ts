@@ -187,13 +187,12 @@ describe("report placeholder mappings", () => {
     });
   });
 
-  it("sends the native report action and selected engine", async () => {
+  it("sends the selected Office print engine with a native open request", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({
           job_id: "native-job",
           status: "open",
-          action: "open",
           print_engine: "word",
           document_type: "docx",
           filename: "report.docx",
@@ -204,7 +203,7 @@ describe("report placeholder mappings", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await nativePreviewReport("version-1", "record-1", "word", "open");
+    await nativePreviewReport("version-1", "record-1", "word");
 
     const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("/api/report-template-versions/version-1/native-preview");
@@ -212,7 +211,6 @@ describe("report placeholder mappings", () => {
       template_version_id: "version-1",
       record_ids: ["record-1"],
       print_engine: "word",
-      action: "open",
     });
   });
 

@@ -103,10 +103,9 @@ def test_missing_window_handle_does_not_fail_opening(window_system) -> None:
 
 
 @pytest.mark.parametrize("document_type", ["xlsx", "docx"])
-@pytest.mark.parametrize("action", ["open", "preview"])
 @pytest.mark.parametrize("engine", ["word", "wps"])
 def test_worker_activates_window_before_reporting_it_open(
-    monkeypatch, document_type: str, action: str, engine: str
+    monkeypatch, document_type: str, engine: str
 ) -> None:
     events = []
     opened = SimpleNamespace(Close=Mock())
@@ -130,22 +129,15 @@ def test_worker_activates_window_before_reporting_it_open(
 
     monkeypatch.setattr(office_preview, "_activate_native_window", activate)
     monkeypatch.setattr(office_preview, "_wait_for_native_document_close", lambda *_: events.append("wait"))
-    monkeypatch.setattr(office_preview, "_show_document_preview", lambda *_: events.append("preview"))
-    monkeypatch.setattr(office_preview, "_show_workbook_preview", lambda *_: events.append("preview"))
     connection = SimpleNamespace(
         send=lambda message: events.append(message[0]), close=lambda: events.append("close")
     )
 
-    office_preview._native_preview_worker(engine, "test-document", document_type, action, connection)
+    office_preview._native_preview_worker(engine, "test-document", document_type, connection)
 
-    assert events == [
-        "activate", "started", "preview" if action == "preview" else "wait", "completed", "close"
-    ]
+    assert events == ["activate", "started", "wait", "completed", "close"]
     assert application.Visible is True
+    # 打开动作交给用户收尾：worker 不得代替用户关闭文档或退出 Office。
+    opened.Close.assert_not_called()
+    application.Quit.assert_not_called()
     pythoncom.CoUninitialize.assert_called_once()
-    if action == "preview":
-        opened.Close.assert_called_once_with(False)
-        application.Quit.assert_called_once()
-    else:
-        opened.Close.assert_not_called()
-        application.Quit.assert_not_called()

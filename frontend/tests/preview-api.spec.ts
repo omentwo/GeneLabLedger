@@ -10,13 +10,12 @@ describe("ledger native preview API", () => {
     vi.unstubAllGlobals();
   });
 
-  it("sends the selected scope and native action", async () => {
+  it("sends the selected scope for the native open", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({
           job_id: "native-job",
           status: "open",
-          action: "preview",
           print_engine: "word",
           document_type: "xlsx",
           filename: "ledger.xlsx",
@@ -29,7 +28,6 @@ describe("ledger native preview API", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await createLedgerNativePreview("ledger-1", {
-      action: "preview",
       scope: "selection",
       cells: [{ record_id: "record-1", field_id: "field-1" }],
       print_engine: "word",
@@ -39,21 +37,19 @@ describe("ledger native preview API", () => {
     expect(url).toBe("/api/ledgers/ledger-1/native-preview");
     expect(options.method).toBe("POST");
     expect(JSON.parse(String(options.body))).toEqual({
-      action: "preview",
       scope: "selection",
       cells: [{ record_id: "record-1", field_id: "field-1" }],
       print_engine: "word",
     });
   });
 
-  it("sends the current-project scope for Excel or WPS preview", async () => {
+  it("sends the current-project scope for Excel or WPS open", async () => {
     expect(DEFAULT_LEDGER_PREVIEW_SCOPE).toBe("project");
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({
           job_id: "project-job",
           status: "open",
-          action: "open",
           print_engine: "wps",
           document_type: "xlsx",
           filename: "project.xlsx",
@@ -66,7 +62,6 @@ describe("ledger native preview API", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await createLedgerNativePreview("ledger-1", {
-      action: "open",
       scope: "project",
       include_locked: false,
       print_engine: "wps",
@@ -75,7 +70,6 @@ describe("ledger native preview API", () => {
     const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("/api/ledgers/ledger-1/native-preview");
     expect(JSON.parse(String(options.body))).toEqual({
-      action: "open",
       scope: "project",
       include_locked: false,
       print_engine: "wps",

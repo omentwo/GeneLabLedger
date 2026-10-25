@@ -230,7 +230,6 @@ def test_cross_directory_restore_uses_restored_report_templates(
             json={
                 "template_version_id": version["id"],
                 "record_ids": [record["id"]],
-                "action": "preview",
                 "print_engine": "auto",
             },
         )

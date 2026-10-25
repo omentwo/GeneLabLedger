@@ -851,7 +851,6 @@ class PrintEngineRead(BaseModel):
 
 
 PreviewScope = Literal["selection", "project", "filtered", "all"]
-NativePreviewAction = Literal["preview", "open"]
 NativePreviewStatus = Literal["starting", "open", "completed", "failed"]
 
 
@@ -869,7 +868,6 @@ class LedgerNativePreviewCreate(BaseModel):
     experiment_date: date | None = None
     report_generated: bool | None = None
     print_engine: Literal["auto", "wps", "word"] = "auto"
-    action: NativePreviewAction = "preview"
 
 
 class PreviewCapabilitiesRead(BaseModel):
@@ -886,13 +884,11 @@ class ReportNativePreviewCreate(BaseModel):
     template_version_id: str = Field(min_length=1, max_length=36)
     record_ids: list[str] = Field(min_length=1, max_length=1)
     print_engine: Literal["auto", "wps", "word"] = "auto"
-    action: NativePreviewAction = "preview"
 
 
 class NativePreviewRead(BaseModel):
     job_id: str
     status: NativePreviewStatus
-    action: NativePreviewAction
     print_engine: Literal["wps", "word"]
     document_type: Literal["xlsx", "docx"]
     filename: str

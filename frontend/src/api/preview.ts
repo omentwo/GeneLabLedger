@@ -1,6 +1,5 @@
 import { apiRequest } from "@/api/client";
 import type {
-  NativePreviewAction,
   NativePreviewTask,
   PreviewCapabilities,
   PrintEngine,
@@ -17,7 +16,6 @@ export function getPreviewCapabilities(): Promise<PreviewCapabilities> {
 export function createLedgerNativePreview(
   ledgerId: string,
   payload: {
-    action: NativePreviewAction;
     scope: LedgerPreviewScope;
     include_locked?: boolean;
     cells?: Array<{ record_id: string; field_id: string }>;

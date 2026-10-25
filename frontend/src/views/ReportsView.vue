@@ -429,7 +429,7 @@ async function directPrintSelected(): Promise<void> {
   }
 }
 
-async function openNativeReport(action: "preview" | "open"): Promise<void> {
+async function openNativeReport(): Promise<void> {
   if (!activeVersion.value || selectedRecords.value.length !== 1) {
     ElMessage.warning("请先选择一条记录和模板版本");
     return;
@@ -444,7 +444,6 @@ async function openNativeReport(action: "preview" | "open"): Promise<void> {
       activeVersion.value.id,
       selectedRecords.value[0]!.id,
       selectedPrintEngine.value,
-      action,
     );
     void monitorNativeReportJob(task).catch((error) => {
       ElMessage.error(error instanceof Error ? error.message : "Office/WPS 原生窗口状态读取失败");
@@ -851,14 +850,7 @@ onMounted(() => {
           <el-button
             :loading="nativePreviewLoading"
             :disabled="selectedRecords.length !== 1 || !nativeEngineAvailable(selectedPrintEngine)"
-            @click="openNativeReport('preview')"
-          >
-            {{ nativeEngineLabel() }} 原生预览
-          </el-button>
-          <el-button
-            :loading="nativePreviewLoading"
-            :disabled="selectedRecords.length !== 1 || !nativeEngineAvailable(selectedPrintEngine)"
-            @click="openNativeReport('open')"
+            @click="openNativeReport()"
           >
             使用 {{ nativeEngineLabel() }} 打开
           </el-button>

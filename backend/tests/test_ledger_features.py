@@ -34,7 +34,6 @@ class FakePreviewService:
         input_path: Path,
         work_root: Path,
         document_type: str,
-        action: str,
         engine: str = "auto",
     ) -> dict[str, object]:
         assert input_path.is_file()
@@ -43,7 +42,6 @@ class FakePreviewService:
         result = {
             "job_id": job_id,
             "status": "open",
-            "action": action,
             "print_engine": "word" if engine in {"auto", "word"} else "wps",
             "document_type": document_type,
             "filename": input_path.name,
@@ -313,12 +311,11 @@ def test_ledger_native_preview_task_uses_generated_snapshot(feature_client: Test
     project = feature_client.get("/api/projects").json()[0]
     response = feature_client.post(
         f"/api/ledgers/{project['id']}/native-preview",
-        json={"scope": "all", "action": "preview", "print_engine": "auto"},
+        json={"scope": "all", "print_engine": "auto"},
     )
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "open"
-    assert payload["action"] == "preview"
     assert payload["document_type"] == "xlsx"
     status_response = feature_client.get(f"/api/native-preview/{payload['job_id']}")
     assert status_response.status_code == 200
@@ -361,14 +358,12 @@ def test_ledger_current_project_native_preview_excludes_other_projects(
         json={
             "scope": "project",
             "include_locked": False,
-            "action": "open",
             "print_engine": "wps",
         },
     )
     assert native_preview.status_code == 200, native_preview.text
     native_payload = native_preview.json()
     assert native_payload["scope"] == "project"
-    assert native_payload["action"] == "open"
     assert native_payload["print_engine"] == "wps"
     preview_service = feature_client.app.state.preview_service
     assert isinstance(preview_service, FakePreviewService)
@@ -423,13 +418,11 @@ def test_report_native_preview_task_uses_rendered_docx(feature_client: TestClien
         json={
             "template_version_id": version["id"],
             "record_ids": [record["id"]],
-            "action": "open",
             "print_engine": "auto",
         },
     )
     assert response.status_code == 200
     assert response.json()["document_type"] == "docx"
-    assert response.json()["action"] == "open"
 
 
 def test_search_matches_project_name_in_ledger_and_native_preview(
@@ -469,7 +462,6 @@ def test_search_matches_project_name_in_ledger_and_native_preview(
         f"/api/ledgers/{project['id']}/native-preview",
         json={
             "scope": "all",
-            "action": "preview",
             "print_engine": "auto",
             "search": project["name"],
         },
@@ -488,7 +480,6 @@ def test_search_matches_project_name_in_ledger_and_native_preview(
         LedgerNativePreviewCreate(
             project_id=project["id"],
             scope="all",
-            action="preview",
             search=project["name"],
         ),
     )

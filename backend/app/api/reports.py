@@ -667,7 +667,6 @@ def native_preview_report(
             input_path=documents[0],
             work_root=job_root,
             document_type="docx",
-            action=payload.action,
             engine=payload.print_engine,
         )
     except (InvalidDocxTemplate, OfficePreviewError) as error:

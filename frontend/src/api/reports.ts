@@ -1,7 +1,6 @@
 import { apiRequest, jsonBody } from "@/api/client";
 import type {
   MappingSourceType,
-  NativePreviewAction,
   NativePreviewTask,
   PrintEngine,
   PrintEngineStatus,
@@ -103,7 +102,6 @@ export function nativePreviewReport(
   templateVersionId: string,
   recordId: string,
   printEngine: PrintEngine,
-  action: NativePreviewAction,
 ): Promise<NativePreviewTask> {
   return apiRequest<NativePreviewTask>(
     `/report-template-versions/${templateVersionId}/native-preview`,
@@ -113,7 +111,6 @@ export function nativePreviewReport(
         template_version_id: templateVersionId,
         record_ids: [recordId],
         print_engine: printEngine,
-        action,
       }),
     },
   );

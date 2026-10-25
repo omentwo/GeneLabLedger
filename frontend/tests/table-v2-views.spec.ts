@@ -81,7 +81,7 @@ beforeEach(() => {
   });
   vi.mocked(printReports).mockResolvedValue({ printer_name: "测试打印机", printed_count: 2, print_engine: "word" });
   vi.mocked(nativePreviewReport).mockResolvedValue({
-    job_id: "preview-1", status: "completed", action: "preview", print_engine: "word",
+    job_id: "preview-1", status: "completed", print_engine: "word",
     document_type: "docx", filename: "report.docx", error: null,
   });
   vi.mocked(replaceReportMappings).mockResolvedValue(structuredClone(template.versions[0]!));
@@ -203,7 +203,7 @@ describe("experiment Table V2 interactions", () => {
 });
 
 describe("report Table V2 interactions", () => {
-  it("restores route selection and refresh selection, previews one record and prints in ledger order", async () => {
+  it("restores route selection and refresh selection, opens one record and prints in ledger order", async () => {
     const rows = [record("26-1"), record("26-2"), record("26-3", { report_generated: true })];
     const container = await mountView(ReportsView, rows, "?records=26-1,26-3");
     const table = container.querySelector('[aria-label="报告打印记录表"]')!;
@@ -218,11 +218,11 @@ describe("report Table V2 interactions", () => {
     // 1 次深链首屏 + 1 次取消"显示已生成报告"后的服务端重载 + 1 次手动刷新
     await vi.waitFor(() => expect(listRecords).toHaveBeenCalledTimes(3));
     await nextTick();
-    expect(button(container, "Office/WPS 原生预览").disabled).toBe(false);
-    button(container, "Office/WPS 原生预览").click();
-    await vi.waitFor(() => expect(nativePreviewReport).toHaveBeenCalledWith("version-1", "26-1", "auto", "preview"));
+    expect(button(container, "使用 Office/WPS 打开").disabled).toBe(false);
+    button(container, "使用 Office/WPS 打开").click();
+    await vi.waitFor(() => expect(nativePreviewReport).toHaveBeenCalledWith("version-1", "26-1", "auto"));
     await check(table, "选择报告记录 26-2");
-    expect(button(container, "Office/WPS 原生预览").disabled).toBe(true);
+    expect(button(container, "使用 Office/WPS 打开").disabled).toBe(true);
     button(container, /直接打印\s*2\s*份/).click();
     await vi.waitFor(() => expect(printReports).toHaveBeenCalledWith("version-1", ["26-2", "26-1"], "测试打印机", "auto"));
     await inputValue(container.querySelector<HTMLInputElement>('input[placeholder="搜索病理号或任意台账内容"]')!, "26-1");

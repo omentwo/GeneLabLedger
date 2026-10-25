@@ -18,7 +18,6 @@ from uuid import uuid4
 from app.services.office_engines import is_progid_registered
 
 PreviewEngine = Literal["auto", "wps", "word"]
-NativePreviewAction = Literal["preview", "open"]
 NativePreviewStatus = Literal["starting", "open", "completed", "failed"]
 
 _PROGID_CANDIDATES: dict[str, tuple[str, ...]] = {
@@ -42,7 +41,6 @@ class PreviewEngineUnavailable(OfficePreviewError):
 @dataclass
 class NativePreviewJob:
     job_id: str
-    action: NativePreviewAction
     engine: str
     document_type: str
     input_path: Path
@@ -153,15 +151,11 @@ def _native_preview_worker(
     engine: str,
     input_path: str,
     document_type: str,
-    action: NativePreviewAction,
     connection: Connection,
 ) -> None:
-    """Keep a visible Office/WPS COM instance alive for a native user action."""
+    """Keep a visible Office/WPS COM instance alive until the user closes the document."""
 
     pythoncom = None
-    application = None
-    document = None
-    workbook = None
     try:
         import pythoncom as pythoncom_module
         import win32com.client
@@ -174,33 +168,18 @@ def _native_preview_worker(
         application = win32com.client.DispatchEx(progid)
         application.Visible = True
         try:
-            application.DisplayAlerts = action == "open"
+            application.DisplayAlerts = True
         except Exception:
             pass
 
         if document_type == "docx":
-            document = application.Documents.Open(
-                input_path,
-                False,
-                action == "preview",
-                False,
-            )
+            document = application.Documents.Open(input_path, False, False, False)
         else:
-            workbook = application.Workbooks.Open(
-                input_path,
-                False,
-                action == "preview",
-            )
-        _activate_native_window(application, document if document_type == "docx" else workbook)
+            document = application.Workbooks.Open(input_path, False, False)
+        _activate_native_window(application, document)
         connection.send(("started", _application_process_id(application)))
 
-        if action == "preview":
-            if document_type == "docx":
-                _show_document_preview(application, document)
-            else:
-                _show_workbook_preview(application, workbook)
-        else:
-            _wait_for_native_document_close(application, document_type)
+        _wait_for_native_document_close(application, document_type)
         connection.send(("completed", None))
     except Exception as error:
         try:
@@ -208,22 +187,6 @@ def _native_preview_worker(
         except (BrokenPipeError, EOFError, OSError):
             pass
     finally:
-        if action == "preview":
-            if document is not None:
-                try:
-                    document.Close(False)
-                except Exception:
-                    pass
-            if workbook is not None:
-                try:
-                    workbook.Close(False)
-                except Exception:
-                    pass
-            if application is not None:
-                try:
-                    application.Quit()
-                except Exception:
-                    pass
         gc.collect()
         if pythoncom is not None:
             try:
@@ -231,49 +194,6 @@ def _native_preview_worker(
             except Exception:
                 pass
         connection.close()
-
-
-def _show_document_preview(application: object, document: object) -> None:
-    try:
-        document.PrintPreview()
-        _wait_for_preview_view_exit(application)
-        return
-    except Exception:
-        # WPS exposes PrintPreview on Application as a property as well.
-        application.PrintPreview = True
-        _wait_for_preview_view_exit(application)
-
-
-def _show_workbook_preview(application: object, workbook: object) -> None:
-    try:
-        sheet = workbook.Worksheets(1)
-        try:
-            sheet.PrintPreview(False)
-        except TypeError:
-            sheet.PrintPreview()
-        _wait_for_preview_view_exit(application)
-        return
-    except Exception:
-        try:
-            try:
-                workbook.PrintPreview(False)
-            except TypeError:
-                workbook.PrintPreview()
-            _wait_for_preview_view_exit(application)
-        except Exception:
-            application.PrintPreview = True
-            _wait_for_preview_view_exit(application)
-
-
-def _wait_for_preview_view_exit(application: object) -> None:
-    while True:
-        try:
-            if not bool(application.PrintPreview):
-                return
-            _ = application.Hwnd
-        except Exception:
-            return
-        time.sleep(0.5)
 
 
 def _wait_for_native_document_close(application: object, document_type: str) -> None:
@@ -344,15 +264,12 @@ class OfficePreviewService:
         input_path: Path,
         work_root: Path,
         document_type: str,
-        action: NativePreviewAction,
         engine: PreviewEngine = "auto",
     ) -> dict[str, object]:
         if os.name != "nt":
             raise OfficePreviewError("Microsoft Office/WPS native windows are supported on Windows only.")
         if not input_path.is_file():
             raise OfficePreviewError("The temporary native preview document does not exist.")
-        if action not in {"preview", "open"}:
-            raise OfficePreviewError("Unsupported native preview action.")
         resolved = self.resolve_engine(engine, document_type)
         self.cleanup_native_previews(work_root.parent)
         work_root.mkdir(parents=True, exist_ok=True)
@@ -361,13 +278,12 @@ class OfficePreviewService:
         job_id = uuid4().hex
         process = context.Process(
             target=_native_preview_worker,
-            args=(resolved, str(input_path.resolve()), document_type, action, child),
+            args=(resolved, str(input_path.resolve()), document_type, child),
             name=f"ledger-native-{resolved}",
             daemon=True,
         )
         job = NativePreviewJob(
             job_id=job_id,
-            action=action,
             engine=resolved,
             document_type=document_type,
             input_path=input_path,
@@ -412,7 +328,6 @@ class OfficePreviewService:
             return {
                 "job_id": job.job_id,
                 "status": job.status,
-                "action": job.action,
                 "print_engine": job.engine,
                 "document_type": job.document_type,
                 "filename": job.input_path.name,
@@ -461,7 +376,7 @@ class OfficePreviewService:
                 job.process.terminate()
                 job.process.join(timeout=2)
                 _terminate_process(job.office_process_id)
-            if job.action == "preview" or job.status == "failed":
+            if job.status == "failed":
                 shutil.rmtree(job.work_root, ignore_errors=True)
 
     def cleanup_native_previews(self, preview_root: Path, max_age_seconds: int = 86_400) -> None:
