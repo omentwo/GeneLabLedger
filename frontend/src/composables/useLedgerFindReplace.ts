@@ -258,7 +258,8 @@ async function navigateFindMatch(direction: -1 | 1): Promise<void> {
   const targetFieldId = fields.value[targetPosition.columnIndex]?.id;
   if (!targetRowId || !targetFieldId) return;
   deps.selection.selectGridCell(targetPosition);
-  deps.tableRef.value?.scrollToRow(targetPosition.rowIndex, "center");
+  // "smart"：目标行已可见则不动，不可见则最小滚动，距离远则居中（WPS/Excel 语义）。
+  deps.tableRef.value?.scrollToRow(targetPosition.rowIndex, "smart");
   await nextTick();
 
   if (findReplaceMode.value !== "find") return;
@@ -280,8 +281,13 @@ async function navigateFindMatch(direction: -1 | 1): Promise<void> {
     rowIndex: Math.floor(currentEncodedMatch / currentFieldCount),
     columnIndex: currentEncodedMatch % currentFieldCount,
   };
-  deps.tableRef.value?.scrollToRow(currentPosition.rowIndex, "center");
+  deps.tableRef.value?.scrollToRow(currentPosition.rowIndex, "smart");
   await nextTick();
+  // scrollToRow 只保证纵向（横向滚点会被 grid 还原）；等虚拟行真正渲染出来
+  // 再 scrollIntoView 补横向对齐。nextTick 时常赶不上虚拟列表的滚动重渲，加一帧 rAF。
+  await new Promise<void>((resolve) => {
+    requestAnimationFrame(() => resolve());
+  });
   deps.gridEditorRoot(currentPosition)
     ?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }

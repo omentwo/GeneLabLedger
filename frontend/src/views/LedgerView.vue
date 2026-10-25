@@ -801,9 +801,18 @@ function handleLedgerWindowFocus(): void {
   void requestPendingToolChanges();
 }
 
-function locateLedgerRecordFromTools(payload: LedgerRecordLocate): void {
+async function locateLedgerRecordFromTools(payload: LedgerRecordLocate): Promise<void> {
   if (payload.projectId && payload.projectId !== activeProjectId.value) {
     selectProject(payload.projectId);
+    // selectProject 只切换项目 ID，记录由 activeProjectId 的 watcher 异步装载；
+    // 跨项目定位必须等装载完成，否则行号永远查不到。
+    if (projectLoadPromise) {
+      try {
+        await projectLoadPromise;
+      } catch {
+        // 装载失败时走下方行号提示，不在定位链路里二次报错。
+      }
+    }
   }
   const rowIndex = tableRowIndexById.value.get(payload.recordId);
   if (rowIndex === undefined) {
@@ -816,6 +825,14 @@ function locateLedgerRecordFromTools(payload: LedgerRecordLocate): void {
     columnIndex: Math.max(0, columnIndex),
   });
   selectGridCell(position);
+  // scrollToRow 不依赖虚拟行已渲染，任意距离都能滚；"smart" 已可见则不动、
+  // 远处则居中（WPS/Excel 语义）。等虚拟行渲染后再 focusGridCell 补横向对齐。
+  tableRef.value?.scrollToRow(rowIndex, "smart");
+  flashGridRecord(payload.recordId);
+  await nextTick();
+  await new Promise<void>((resolve) => {
+    requestAnimationFrame(() => resolve());
+  });
   void focusGridCell(position);
 }
 

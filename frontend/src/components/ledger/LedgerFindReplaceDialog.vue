@@ -52,7 +52,9 @@ function assignInputRef(element: unknown): void {
 
 <template>
   <el-dialog class="ledger-dialog" :model-value="visible"
-   @update:model-value="emit('update:visible', $event)" title="查找替换" width="660px" :close-on-click-modal="!loading" :close-on-press-escape="!loading" :show-close="!loading" @opened="emit('opened')" @closed="emit('closed')">
+   @update:model-value="emit('update:visible', $event)" title="查找替换" width="660px"
+   :modal="false" :lock-scroll="false"
+   :close-on-click-modal="!loading" :close-on-press-escape="!loading" :show-close="!loading" @opened="emit('opened')" @closed="emit('closed')">
     <div class="find-replace-mode-switch" role="group" aria-label="查找模式">
       <el-button
         size="small"

@@ -60,8 +60,10 @@ function fixture({ choices = [] } = {}) {
     getBounds() { return this.normalBounds; }
     getNormalBounds() { return this.normalBounds; }
     setAlwaysOnTop(flag, level) { this.alwaysOnTopCalls.push([flag, level]); }
-    show() { this.visible = true; }
-    focus() {}
+    show() { this.visible = true; this.showCalls = (this.showCalls ?? 0) + 1; }
+    focus() { this.focusCalls = (this.focusCalls ?? 0) + 1; }
+    restore() { this.visible = true; this.restoreCalls = (this.restoreCalls ?? 0) + 1; }
+    showInactive() { this.visible = true; this.showInactiveCalls = (this.showInactiveCalls ?? 0) + 1; }
     moveTop() {}
     loadURL(url) { this.loadedUrl = url; return Promise.resolve(); }
     loadFile() { return Promise.resolve(); }
@@ -233,7 +235,7 @@ test("tool changes fan out to main window (and quick entry for fields) with an a
   assert.equal(pending.length, 0);
 });
 
-test("locate request forwards the payload without raising the main window", async () => {
+test("locate request forwards the payload and surfaces the main window without stealing focus", async () => {
   const f = fixture();
   await openToolWindow(f, { tool: "find-replace", projectId: "p1" });
   const findReplace = f.windows[2];
@@ -244,8 +246,19 @@ test("locate request forwards the payload without raising the main window", asyn
   const located = main.sends.find(({ channel }) => channel === "gene-ledger:ledger-tools-locate-record");
   // vm 沙箱里的对象原型与测试环境不同，改用 JSON 形态比较。
   assert.equal(JSON.stringify(located.payload), JSON.stringify({ projectId: "p1", recordId: "r1", fieldId: "f1" }));
-  // 不抬升主窗口：主表在后台/并排完成滚动高亮，工具窗口保持前台。
-  assert.equal(main.isVisible(), false);
+  // 置顶但不抢焦点：showInactive 浮现主表，show/focus 不参与（那是抢焦点路径）。
+  assert.equal(main.isVisible(), true);
+  assert.equal(main.showInactiveCalls, 1);
+  assert.equal(main.restoreCalls ?? 0, 0);
+  assert.equal(main.showCalls ?? 0, 0);
+  assert.equal(main.focusCalls ?? 0, 0);
+  // 最小化状态下先还原再置顶。
+  main.isMinimized = () => true;
+  await f.handlers.get("gene-ledger:locate-ledger-record")(
+    f.senderFor(findReplace), { projectId: "p1", recordId: "r2", fieldId: "f2" },
+  );
+  assert.equal(main.restoreCalls, 1);
+  assert.equal(main.showInactiveCalls, 2);
   await assert.rejects(async () => f.handlers.get("gene-ledger:locate-ledger-record")(
     f.senderFor(findReplace), { projectId: "", recordId: "r1" },
   ));

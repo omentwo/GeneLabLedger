@@ -1191,8 +1191,11 @@ function registerDesktopHandlers() {
       typeof payload?.fieldId === "string" ? payload.fieldId.trim().slice(0, 160) : "";
     if (!projectId || !recordId) throw new Error("定位记录通知无效");
     if (!mainWindow || mainWindow.isDestroyed()) return;
-    // 不抬升主窗口（不 show/focus）：主表在后台或并排状态完成滚动高亮，
-    // 工具窗口保持前台，与 WPS/Excel 的查找下一个体验一致。
+    // 定位时把主窗口置顶但不激活（restore + showInactive）：主表可见地完成
+    // 滚动高亮，键盘焦点留在工具窗口，可继续点击/输入。与 show()+focus() 的
+    // 抢焦点抬升不同，不会把工具窗口压到后台。
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.showInactive();
     mainWindow.webContents.send("gene-ledger:ledger-tools-locate-record", {
       projectId,
       recordId,
