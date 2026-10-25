@@ -540,6 +540,7 @@ function rendererToolRoutePath(context) {
   const params = new URLSearchParams();
   params.set("tool", context.tool);
   if (context.projectId) params.set("project", context.projectId);
+  if (context.mode === "find") params.set("mode", "find");
   return `/ledger-tools?${params.toString()}`;
 }
 
@@ -1190,9 +1191,8 @@ function registerDesktopHandlers() {
       typeof payload?.fieldId === "string" ? payload.fieldId.trim().slice(0, 160) : "";
     if (!projectId || !recordId) throw new Error("定位记录通知无效");
     if (!mainWindow || mainWindow.isDestroyed()) return;
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
+    // 不抬升主窗口（不 show/focus）：主表在后台或并排状态完成滚动高亮，
+    // 工具窗口保持前台，与 WPS/Excel 的查找下一个体验一致。
     mainWindow.webContents.send("gene-ledger:ledger-tools-locate-record", {
       projectId,
       recordId,

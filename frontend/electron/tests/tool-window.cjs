@@ -233,7 +233,7 @@ test("tool changes fan out to main window (and quick entry for fields) with an a
   assert.equal(pending.length, 0);
 });
 
-test("locate request raises the main window and forwards the payload", async () => {
+test("locate request forwards the payload without raising the main window", async () => {
   const f = fixture();
   await openToolWindow(f, { tool: "find-replace", projectId: "p1" });
   const findReplace = f.windows[2];
@@ -244,6 +244,8 @@ test("locate request raises the main window and forwards the payload", async () 
   const located = main.sends.find(({ channel }) => channel === "gene-ledger:ledger-tools-locate-record");
   // vm 沙箱里的对象原型与测试环境不同，改用 JSON 形态比较。
   assert.equal(JSON.stringify(located.payload), JSON.stringify({ projectId: "p1", recordId: "r1", fieldId: "f1" }));
+  // 不抬升主窗口：主表在后台/并排完成滚动高亮，工具窗口保持前台。
+  assert.equal(main.isVisible(), false);
   await assert.rejects(async () => f.handlers.get("gene-ledger:locate-ledger-record")(
     f.senderFor(findReplace), { projectId: "", recordId: "r1" },
   ));

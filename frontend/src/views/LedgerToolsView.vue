@@ -11,7 +11,7 @@ import {
   previewReorderByDate,
   queryRecordIds as queryLedgerRecordIds,
 } from "@/api/records";
-import { useLedgerFindReplace } from "@/composables/useLedgerFindReplace";
+import { useLedgerFindReplace, type FindReplaceMode } from "@/composables/useLedgerFindReplace";
 import LedgerTemplateManager from "@/components/LedgerTemplateManager.vue";
 import ProjectFieldManager from "@/components/ProjectFieldManager.vue";
 import { useAppStore } from "@/stores/app";
@@ -212,6 +212,19 @@ function registerFindReplaceInput(element: { focus: () => void } | null): void {
   findReplaceInputRef.value = element;
 }
 
+// 查找模式固定全字段搜索（WPS/Excel 语义，无表头选择器）；
+// 替换必须落到具体表头（后端按 field_id 预览/提交），保留选择器。
+function switchFindReplaceMode(mode: FindReplaceMode): void {
+  setFindReplaceMode(mode);
+  if (mode === "find") {
+    findReplaceForm.fieldId = "";
+    return;
+  }
+  if (!findReplaceForm.fieldId) {
+    findReplaceForm.fieldId = toolFields.value[0]?.id ?? "";
+  }
+}
+
 const {
   findReplaceVisible,
   findReplaceLoading,
@@ -227,7 +240,6 @@ const {
   openFindReplace,
   runFindReplacePreview,
   commitFindReplace,
-  handleFindReplaceInputEnter,
   navigateFindMatch,
   cancelFindTermDebounce,
 } = useLedgerFindReplace({
@@ -265,10 +277,6 @@ const {
 // 工具窗口里查找/替换面板常驻，等价于对话框始终打开。
 findReplaceVisible.value = true;
 
-const canLocateInLedger = computed(
-  () => Boolean(bridge && bridge.windowKind === "ledger-tools" && findCurrentMatch.value),
-);
-
 function locateCurrentMatch(): void {
   const match = findCurrentMatch.value;
   if (!match || bridge?.windowKind !== "ledger-tools") return;
@@ -279,6 +287,30 @@ function locateCurrentMatch(): void {
       fieldId: match.fieldId,
     })
     .catch((error) => logError("ledger-tools", "定位主表记录失败", error));
+}
+
+// 上一个/下一个/Enter：跳转命中游标并把选择落到主表（不抢焦点）。
+async function navigateAndLocate(direction: -1 | 1): Promise<void> {
+  await navigateFindMatch(direction);
+  locateCurrentMatch();
+}
+
+// 查找按钮：跳到最近的匹配——已有命中时重新定位当前匹配，否则从当前
+// 位置向前找第一个。
+function findNearestMatch(): Promise<void> {
+  if (findCurrentMatch.value) {
+    locateCurrentMatch();
+    return Promise.resolve();
+  }
+  return navigateAndLocate(1);
+}
+
+// Enter = 查找下一个（WPS/Excel 语义），Shift+Enter = 上一个。
+async function handleFindInputEnter(event: KeyboardEvent): Promise<void> {
+  if (findReplaceMode.value !== "find") return;
+  event.preventDefault();
+  event.stopPropagation();
+  await navigateAndLocate(event.shiftKey ? -1 : 1);
 }
 
 // commitFindReplace 成功时会把 visible 置 false（对话框语义）；面板场景里
@@ -483,25 +515,24 @@ onBeforeUnmount(() => {
               size="small"
               :type="findReplaceMode === 'find' ? 'primary' : undefined"
               :aria-pressed="findReplaceMode === 'find'"
-              @click="setFindReplaceMode('find')"
+              @click="switchFindReplaceMode('find')"
             >查找</el-button>
             <el-button
               size="small"
               :type="findReplaceMode === 'replace' ? 'primary' : undefined"
               :aria-pressed="findReplaceMode === 'replace'"
-              @click="setFindReplaceMode('replace')"
+              @click="switchFindReplaceMode('replace')"
             >替换</el-button>
           </div>
           <p class="muted" v-if="findReplaceMode === 'find'">
-            在当前项目全部 {{ records.length.toLocaleString('zh-CN') }} 条记录中查找；点击“在主表中定位”可跳回台账高亮该单元格。
+            在当前项目全部 {{ records.length.toLocaleString('zh-CN') }} 条记录的所有表头中查找；匹配结果会自动在主表中定位。
           </p>
           <p class="muted" v-else>
             {{ findReplaceScopeLabel }}；单次最多 {{ FIND_REPLACE_RECORD_LIMIT.toLocaleString('zh-CN') }} 条记录。
           </p>
           <el-form label-position="top" :disabled="findReplaceLoading">
-            <el-form-item :label="findReplaceMode === 'find' ? '查找表头' : '指定表头'">
+            <el-form-item v-if="findReplaceMode === 'replace'" label="指定表头">
               <el-select v-model="findReplaceForm.fieldId" filterable>
-                <el-option v-if="findReplaceMode === 'find'" label="全部表头" value="" />
                 <el-option
                   v-for="field in toolFields"
                   :key="field.id"
@@ -517,7 +548,7 @@ onBeforeUnmount(() => {
                   v-model="findReplaceForm.find"
                   clearable
                   aria-label="查找内容"
-                  @keydown.enter="handleFindReplaceInputEnter"
+                  @keydown.enter="handleFindInputEnter"
                 />
               </el-form-item>
               <el-form-item v-if="findReplaceMode === 'replace'" label="替换为">
@@ -539,16 +570,12 @@ onBeforeUnmount(() => {
           <div v-if="findReplaceMode === 'find'" class="ledger-find-navigation">
             <span class="ledger-find-status" role="status" aria-live="polite">{{ findMatchStatus }}</span>
             <div>
-              <el-button
-                :disabled="!canLocateInLedger"
-                title="回到主窗口并高亮当前匹配单元格"
-                @click="locateCurrentMatch"
-              >在主表中定位</el-button>
-              <el-button :disabled="findMatches.length === 0" @click="navigateFindMatch(-1)">上一个</el-button>
+              <el-button :disabled="findMatches.length === 0" @click="findNearestMatch">查找</el-button>
+              <el-button :disabled="findMatches.length === 0" @click="navigateAndLocate(-1)">上一个</el-button>
               <el-button
                 type="primary"
                 :disabled="findMatches.length === 0"
-                @click="navigateFindMatch(1)"
+                @click="navigateAndLocate(1)"
               >下一个</el-button>
             </div>
           </div>
