@@ -826,14 +826,17 @@ async function locateLedgerRecordFromTools(payload: LedgerRecordLocate): Promise
   });
   selectGridCell(position);
   // scrollToRow 不依赖虚拟行已渲染，任意距离都能滚；"smart" 已可见则不动、
-  // 远处则居中（WPS/Excel 语义）。等虚拟行渲染后再 focusGridCell 补横向对齐。
+  // 远处则居中（WPS/Excel 语义）。定位不把 DOM 焦点搬进网格：查找框保持
+  // 键盘焦点，主表只更新选区、活动格（编辑栏）与闪烁高亮。
   tableRef.value?.scrollToRow(rowIndex, "smart");
   flashGridRecord(payload.recordId);
+  activeGridCell.value = position;
   await nextTick();
   await new Promise<void>((resolve) => {
     requestAnimationFrame(() => resolve());
   });
-  void focusGridCell(position);
+  // 横向兜底：scrollToRow 会还原横滚位置，等虚拟行渲染出来后只滚动不移焦。
+  gridEditorRoot(position)?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
 // 台账工具窗口接入层：入口分流、ledger-tools-changed 变更队列、定位/项目切换。
@@ -1336,6 +1339,7 @@ const { keepGridFocusOnScroll, revealGridPasteTarget, attachDocumentShortcuts } 
   handleKeydown: handleGridKeydown,
   handlePaste: handleGridPaste,
   isNativeClipboardTarget: (target) => nativeGridClipboardTarget(target),
+  isFocusOwnedElsewhere: () => findReplaceVisible.value,
 });
 let removeDocumentGridShortcuts: (() => void) | null = null;
 

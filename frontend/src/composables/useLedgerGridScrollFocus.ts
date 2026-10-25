@@ -42,6 +42,8 @@ export interface GridScrollFocusDeps {
   handlePaste: (event: ClipboardEvent) => void;
   /** 输入框/可编辑元素内让原生剪贴板行为接管。 */
   isNativeClipboardTarget: (target: EventTarget | null) => boolean;
+  /** 网格之外的浮层（查找替换等）正持有输入焦点时返回 true，补偿逻辑让路。 */
+  isFocusOwnedElsewhere?: () => boolean;
 }
 
 export function useLedgerGridScrollFocus(deps: GridScrollFocusDeps): {
@@ -58,6 +60,11 @@ export function useLedgerGridScrollFocus(deps: GridScrollFocusDeps): {
     if (typeof document === "undefined") return;
     if (deps.isDisposed() || deps.selectionDragging.value) return;
     if (!deps.activeGridCell.value) return;
+    // 焦点被网格之外的浮层（查找替换等）持有时让路，绝不抢回。
+    if (deps.isFocusOwnedElsewhere?.()) return;
+    // 本窗口没有 OS 焦点（如台账工具窗口正在前台）时，卡片补焦没有意义，
+    // 还会在用户切回窗口时平白多出一个持焦卡片。
+    if (!document.hasFocus()) return;
     // 只有焦点真正落回 body/documentElement 才补焦。焦点在其他交互元素
     // （工具栏按钮、查找框）上时绝不抢焦，否则破坏它们的键盘操作。
     const current = document.activeElement;
@@ -87,6 +94,7 @@ export function useLedgerGridScrollFocus(deps: GridScrollFocusDeps): {
   function restoreFocusAfterRender(): void {
     if (deps.isDisposed() || deps.selectionDragging.value) return;
     if (!deps.activeGridCell.value) return;
+    if (deps.isFocusOwnedElsewhere?.()) return;
     if (typeof document === "undefined") return;
     const current = document.activeElement;
     if (current !== document.body && current !== document.documentElement) return;
@@ -127,6 +135,8 @@ export function useLedgerGridScrollFocus(deps: GridScrollFocusDeps): {
   function handleDocumentKeydown(event: KeyboardEvent): void {
     if (deps.isDisposed() || deps.selectionDragging.value) return;
     if (!deps.activeGridCell.value) return;
+    // 浮层（查找替换等）持有焦点期间，document 级网格快捷键一律让路。
+    if (deps.isFocusOwnedElsewhere?.()) return;
     if (!isGridOwnedEventTarget(event.target)) return;
     deps.handleKeydown(event);
   }
@@ -134,6 +144,7 @@ export function useLedgerGridScrollFocus(deps: GridScrollFocusDeps): {
   function handleDocumentPaste(event: ClipboardEvent): void {
     if (deps.isDisposed() || deps.selectionDragging.value) return;
     if (!deps.activeGridCell.value) return;
+    if (deps.isFocusOwnedElsewhere?.()) return;
     if (!isGridOwnedEventTarget(event.target)) return;
     deps.handlePaste(event);
   }

@@ -235,7 +235,7 @@ test("tool changes fan out to main window (and quick entry for fields) with an a
   assert.equal(pending.length, 0);
 });
 
-test("locate request forwards the payload and surfaces the main window without stealing focus", async () => {
+test("locate request forwards the payload and only surfaces a minimized main window", async () => {
   const f = fixture();
   await openToolWindow(f, { tool: "find-replace", projectId: "p1" });
   const findReplace = f.windows[2];
@@ -246,19 +246,18 @@ test("locate request forwards the payload and surfaces the main window without s
   const located = main.sends.find(({ channel }) => channel === "gene-ledger:ledger-tools-locate-record");
   // vm 沙箱里的对象原型与测试环境不同，改用 JSON 形态比较。
   assert.equal(JSON.stringify(located.payload), JSON.stringify({ projectId: "p1", recordId: "r1", fieldId: "f1" }));
-  // 置顶但不抢焦点：showInactive 浮现主表，show/focus 不参与（那是抢焦点路径）。
-  assert.equal(main.isVisible(), true);
-  assert.equal(main.showInactiveCalls, 1);
+  // 主窗口可见时不动 Z 序：工具窗口保持最前、焦点不动（WPS/Excel 语义）。
+  assert.equal(main.showInactiveCalls ?? 0, 0);
   assert.equal(main.restoreCalls ?? 0, 0);
   assert.equal(main.showCalls ?? 0, 0);
   assert.equal(main.focusCalls ?? 0, 0);
-  // 最小化状态下先还原再置顶。
+  // 最小化状态下才还原并置顶（不激活，不抢键盘焦点）。
   main.isMinimized = () => true;
   await f.handlers.get("gene-ledger:locate-ledger-record")(
     f.senderFor(findReplace), { projectId: "p1", recordId: "r2", fieldId: "f2" },
   );
   assert.equal(main.restoreCalls, 1);
-  assert.equal(main.showInactiveCalls, 2);
+  assert.equal(main.showInactiveCalls, 1);
   await assert.rejects(async () => f.handlers.get("gene-ledger:locate-ledger-record")(
     f.senderFor(findReplace), { projectId: "", recordId: "r1" },
   ));

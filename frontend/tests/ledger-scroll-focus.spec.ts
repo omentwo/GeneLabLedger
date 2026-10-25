@@ -85,23 +85,36 @@ describe("useLedgerGridScrollFocus", () => {
     const { deps, card, focusSpy } = buildDeps();
     const { keepGridFocusOnScroll } = useLedgerGridScrollFocus(deps);
     expect(document.activeElement).toBe(document.body);
+    // jsdom 在文档从未聚焦过时 hasFocus() 返回 false；这里显式钉住
+    // "本窗口持有 OS 焦点"这一前提（守卫的另一分支有独立用例覆盖）。
+    const originalHasFocus = document.hasFocus.bind(document);
+    document.hasFocus = () => true;
+    try {
+      keepGridFocusOnScroll();
 
-    keepGridFocusOnScroll();
-
-    expect(focusSpy).toHaveBeenCalledWith({ preventScroll: true });
-    expect(document.activeElement).toBe(card);
+      expect(focusSpy).toHaveBeenCalledWith({ preventScroll: true });
+      expect(document.activeElement).toBe(card);
+    } finally {
+      document.hasFocus = originalHasFocus;
+    }
   });
 
   it("焦点已在卡片上时后续滚动帧全部早退", () => {
     const { deps, focusSpy } = buildDeps();
     const { keepGridFocusOnScroll } = useLedgerGridScrollFocus(deps);
-    keepGridFocusOnScroll();
-    expect(focusSpy).toHaveBeenCalledTimes(1);
+    const originalHasFocus = document.hasFocus.bind(document);
+    document.hasFocus = () => true;
+    try {
+      keepGridFocusOnScroll();
+      expect(focusSpy).toHaveBeenCalledTimes(1);
 
-    focusSpy.mockClear();
-    keepGridFocusOnScroll();
-    keepGridFocusOnScroll();
-    expect(focusSpy).not.toHaveBeenCalled();
+      focusSpy.mockClear();
+      keepGridFocusOnScroll();
+      keepGridFocusOnScroll();
+      expect(focusSpy).not.toHaveBeenCalled();
+    } finally {
+      document.hasFocus = originalHasFocus;
+    }
   });
 
   it("焦点在其他交互元素上时不抢焦", () => {
@@ -129,6 +142,36 @@ describe("useLedgerGridScrollFocus", () => {
     const disposed = buildDeps({ isDisposed: () => true });
     useLedgerGridScrollFocus(disposed.deps).keepGridFocusOnScroll();
     expect(disposed.focusSpy).not.toHaveBeenCalled();
+  });
+
+  it("焦点被网格外的浮层（查找替换）持有时补偿让路，键盘路由同样让路", () => {
+    const { deps, focusSpy } = buildDeps({ isFocusOwnedElsewhere: () => true });
+    const { keepGridFocusOnScroll, attachDocumentShortcuts } = useLedgerGridScrollFocus(deps);
+    const detach = attachDocumentShortcuts();
+    try {
+      keepGridFocusOnScroll();
+      expect(focusSpy).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(document.body);
+
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "d", ctrlKey: true, bubbles: true }));
+      expect(deps.handleKeydown).not.toHaveBeenCalled();
+    } finally {
+      detach();
+    }
+  });
+
+  it("本窗口没有 OS 焦点（工具窗口在前台）时不向卡片补焦", () => {
+    const { deps, focusSpy } = buildDeps();
+    const { keepGridFocusOnScroll } = useLedgerGridScrollFocus(deps);
+    const originalHasFocus = document.hasFocus.bind(document);
+    document.hasFocus = () => false;
+    try {
+      keepGridFocusOnScroll();
+      expect(focusSpy).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(document.body);
+    } finally {
+      document.hasFocus = originalHasFocus;
+    }
   });
 
   it("编辑态单元格滚出视野时先提交编辑再补焦", () => {

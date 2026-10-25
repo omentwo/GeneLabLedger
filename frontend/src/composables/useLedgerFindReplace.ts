@@ -204,14 +204,25 @@ function selectedRecordIdsForReplace(): string[] {
   }
   return records.value.map((record) => record.id);
 }
-function focusFindReplaceInput(): void {
+function focusFindReplaceInput(options: { select?: boolean } = {}): void {
+  const shouldSelect = options.select !== false;
   void nextTick(() => {
     findReplaceInputRef.value?.focus();
     const focusedElement = document.activeElement;
-    if (focusedElement instanceof HTMLInputElement) focusedElement.select();
+    if (shouldSelect && focusedElement instanceof HTMLInputElement) focusedElement.select();
   });
 }
 async function navigateFindMatch(direction: -1 | 1): Promise<void> {
+  try {
+    await navigateFindMatchCursor(direction);
+  } finally {
+    // WPS/Excel 手感：导航后焦点回到查找框且不全选，光标原样保留，
+    // 可以接着打字或直接 Enter 继续查找。
+    focusFindReplaceInput({ select: false });
+  }
+}
+
+async function navigateFindMatchCursor(direction: -1 | 1): Promise<void> {
   const matches = findMatches.value;
   const fieldCount = fields.value.length;
   if (findReplaceMode.value !== "find" || !matches.length || !fieldCount) return;

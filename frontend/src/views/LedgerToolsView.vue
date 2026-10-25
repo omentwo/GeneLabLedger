@@ -570,11 +570,12 @@ onBeforeUnmount(() => {
           <div v-if="findReplaceMode === 'find'" class="ledger-find-navigation">
             <span class="ledger-find-status" role="status" aria-live="polite">{{ findMatchStatus }}</span>
             <div>
-              <el-button :disabled="findMatches.length === 0" @click="findNearestMatch">查找</el-button>
-              <el-button :disabled="findMatches.length === 0" @click="navigateAndLocate(-1)">上一个</el-button>
+              <el-button :disabled="findMatches.length === 0" @mousedown.prevent @click="findNearestMatch">查找</el-button>
+              <el-button :disabled="findMatches.length === 0" @mousedown.prevent @click="navigateAndLocate(-1)">上一个</el-button>
               <el-button
                 type="primary"
                 :disabled="findMatches.length === 0"
+                @mousedown.prevent
                 @click="navigateAndLocate(1)"
               >下一个</el-button>
             </div>

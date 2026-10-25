@@ -116,8 +116,8 @@ function assignInputRef(element: unknown): void {
     <div v-if="mode === 'find'" class="ledger-find-navigation">
       <span class="ledger-find-status" role="status" aria-live="polite">{{ matchStatus }}</span>
       <div>
-        <el-button :disabled="matchCount === 0" @click="emit('navigate', -1)">上一个</el-button>
-        <el-button type="primary" :disabled="matchCount === 0" @click="emit('navigate', 1)">
+        <el-button :disabled="matchCount === 0" @mousedown.prevent @click="emit('navigate', -1)">上一个</el-button>
+        <el-button type="primary" :disabled="matchCount === 0" @mousedown.prevent @click="emit('navigate', 1)">
           下一个
         </el-button>
       </div>
