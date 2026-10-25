@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  createReportTemplate,
   deleteReportTemplate,
   nativePreviewReport,
   printReports,
@@ -10,6 +11,60 @@ import {
 describe("report placeholder mappings", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("passes the copy-from version when creating a template with inherited mappings", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "template-1",
+          project_id: "project-1",
+          project_name: "TB",
+          name: "新模板",
+          versions: [],
+          created_at: "2026-10-25T00:00:00",
+        }),
+        { status: 201, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createReportTemplate(
+      "project-1",
+      "新模板",
+      new File(["docx"], "template.docx"),
+      "version-9",
+    );
+
+    const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/report-templates");
+    expect(options.method).toBe("POST");
+    const form = options.body as FormData;
+    expect(form.get("project_id")).toBe("project-1");
+    expect(form.get("name")).toBe("新模板");
+    expect(form.get("copy_mappings_from_version_id")).toBe("version-9");
+  });
+
+  it("omits the copy-from field when creating a template without inherited mappings", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "template-1",
+          project_id: "project-1",
+          project_name: "TB",
+          name: "新模板",
+          versions: [],
+          created_at: "2026-10-25T00:00:00",
+        }),
+        { status: 201, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createReportTemplate("project-1", "新模板", new File(["docx"], "template.docx"));
+
+    const [, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect((options.body as FormData).get("copy_mappings_from_version_id")).toBeNull();
   });
 
   it("allows any placeholder to map to any selected ledger field id", async () => {

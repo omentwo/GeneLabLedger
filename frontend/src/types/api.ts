@@ -360,6 +360,17 @@ export interface ReportTemplateVersion {
   placeholders: string[];
   mappings: ReportMapping[];
   created_at: string;
+  /** 仅创建版本/新建模板的响应携带：相对映射继承来源的差异 */
+  mapping_diff?: ReportMappingDiff | null;
+}
+
+export interface ReportMappingDiff {
+  carried_from_version_id: string | null;
+  carried_from_version_number: number | null;
+  carried_over: number;
+  carried_fixed: string[];
+  new_placeholders: string[];
+  dropped_placeholders: string[];
 }
 
 export interface ReportTemplate {

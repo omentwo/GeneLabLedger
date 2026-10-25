@@ -800,6 +800,223 @@ def test_direct_print_uses_temporary_docx_and_document_download_is_removed(
     assert "/api/reports/documents" not in client.get("/openapi.json").json()["paths"]
 
 
+def docx_with_placeholders(*placeholders: str) -> bytes:
+    paragraphs = "".join(f"<w:p><w:r><w:t>{{{{{name}}}}}</w:t></w:r></w:p>" for name in placeholders)
+    document_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"<w:body>{paragraphs}</w:body></w:document>"
+    )
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="xml" ContentType="application/xml"/></Types>'
+    )
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("word/document.xml", document_xml)
+    return stream.getvalue()
+
+
+def test_report_version_upload_carries_mappings_from_latest_version(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    tb = seeded_projects["TB"]
+    created = client.post(
+        "/api/report-templates",
+        data={"project_id": tb["id"], "name": "继承模板"},
+        files={
+            "file": (
+                "v1.docx",
+                docx_with_placeholders("case_no", "experiment_no"),
+                DOCX_MEDIA_TYPE,
+            )
+        },
+    )
+    assert created.status_code == 201
+    first = created.json()["versions"][0]
+    mapped = client.put(
+        f"/api/report-template-versions/{first['id']}/mappings",
+        json={
+            "mappings": [
+                {"placeholder": "case_no", "source_type": "pathology_with_block"},
+                {
+                    "placeholder": "experiment_no",
+                    "source_type": "fixed",
+                    "fixed_value": "2026-Q4",
+                },
+            ]
+        },
+    )
+    assert mapped.status_code == 200
+
+    uploaded = client.post(
+        f"/api/report-templates/{created.json()['id']}/versions",
+        files={
+            "file": (
+                "v2.docx",
+                docx_with_placeholders("case_no", "experiment_no", "reviewer"),
+                DOCX_MEDIA_TYPE,
+            )
+        },
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    payload = uploaded.json()
+    diff = payload["mapping_diff"]
+    assert diff["carried_from_version_number"] == 1
+    assert diff["carried_over"] == 2
+    assert diff["carried_fixed"] == ["experiment_no"]
+    assert diff["new_placeholders"] == ["reviewer"]
+    assert diff["dropped_placeholders"] == []
+    mappings = {item["placeholder"]: item for item in payload["mappings"]}
+    assert mappings["case_no"]["source_type"] == "pathology_with_block"
+    assert mappings["experiment_no"]["source_type"] == "fixed"
+    assert mappings["experiment_no"]["fixed_value"] == "2026-Q4"
+    assert mappings["reviewer"]["source_type"] == "unmapped"
+
+
+def test_report_version_upload_can_skip_or_reject_mapping_carry(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    tb = seeded_projects["TB"]
+    created = client.post(
+        "/api/report-templates",
+        data={"project_id": tb["id"], "name": "跳过继承模板"},
+        files={"file": ("v1.docx", docx_with_placeholders("case_no"), DOCX_MEDIA_TYPE)},
+    )
+    assert created.status_code == 201
+    template_id = created.json()["id"]
+    version_id = created.json()["versions"][0]["id"]
+    mapped = client.put(
+        f"/api/report-template-versions/{version_id}/mappings",
+        json={"mappings": [{"placeholder": "case_no", "source_type": "fixed", "fixed_value": "X"}]},
+    )
+    assert mapped.status_code == 200
+
+    skipped = client.post(
+        f"/api/report-templates/{template_id}/versions",
+        data={"carry_mappings_from": "none"},
+        files={"file": ("v2.docx", docx_with_placeholders("case_no"), DOCX_MEDIA_TYPE)},
+    )
+    assert skipped.status_code == 201
+    diff = skipped.json()["mapping_diff"]
+    assert diff["carried_from_version_id"] is None
+    assert diff["carried_over"] == 0
+    assert all(item["source_type"] == "unmapped" for item in skipped.json()["mappings"])
+
+    other = client.post(
+        "/api/report-templates",
+        data={"project_id": tb["id"], "name": "另一个模板"},
+        files={"file": ("a.docx", docx_with_placeholders("case_no"), DOCX_MEDIA_TYPE)},
+    )
+    assert other.status_code == 201
+    rejected = client.post(
+        f"/api/report-templates/{template_id}/versions",
+        data={"carry_mappings_from": other.json()["versions"][0]["id"]},
+        files={"file": ("v3.docx", docx_with_placeholders("case_no"), DOCX_MEDIA_TYPE)},
+    )
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"] == "映射继承来源必须是该模板自身的版本"
+
+
+def test_report_version_carry_treats_deleted_field_as_new_placeholder(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    tb = seeded_projects["TB"]
+    field = client.post(
+        f"/api/projects/{tb['id']}/fields",
+        json={"label": "送检单位"},
+    )
+    assert field.status_code == 201
+    created = client.post(
+        "/api/report-templates",
+        data={"project_id": tb["id"], "name": "字段继承模板"},
+        files={"file": ("v1.docx", docx_with_placeholders("case_no", "sender"), DOCX_MEDIA_TYPE)},
+    )
+    assert created.status_code == 201
+    version_id = created.json()["versions"][0]["id"]
+    mapped = client.put(
+        f"/api/report-template-versions/{version_id}/mappings",
+        json={
+            "mappings": [
+                {
+                    "placeholder": "case_no",
+                    "source_type": "field",
+                    "field_id": field.json()["id"],
+                },
+            ]
+        },
+    )
+    assert mapped.status_code == 200
+    deleted = client.delete(f"/api/projects/fields/{field.json()['id']}")
+    assert deleted.status_code == 204
+
+    uploaded = client.post(
+        f"/api/report-templates/{created.json()['id']}/versions",
+        files={"file": ("v2.docx", docx_with_placeholders("case_no", "sender"), DOCX_MEDIA_TYPE)},
+    )
+    assert uploaded.status_code == 201
+    payload = uploaded.json()
+    diff = payload["mapping_diff"]
+    assert diff["carried_over"] == 0
+    assert sorted(diff["new_placeholders"]) == ["case_no", "sender"]
+    assert all(item["source_type"] == "unmapped" for item in payload["mappings"])
+
+
+def test_report_template_create_copies_mappings_within_project(
+    client: TestClient,
+    seeded_projects: dict[str, dict],
+) -> None:
+    tb = seeded_projects["TB"]
+    source = client.post(
+        "/api/report-templates",
+        data={"project_id": tb["id"], "name": "复制来源模板"},
+        files={"file": ("a.docx", docx_with_placeholders("case_no"), DOCX_MEDIA_TYPE)},
+    )
+    assert source.status_code == 201
+    source_version_id = source.json()["versions"][0]["id"]
+    mapped = client.put(
+        f"/api/report-template-versions/{source_version_id}/mappings",
+        json={"mappings": [{"placeholder": "case_no", "source_type": "fixed", "fixed_value": "LAB"}]},
+    )
+    assert mapped.status_code == 200
+
+    copied = client.post(
+        "/api/report-templates",
+        data={
+            "project_id": tb["id"],
+            "name": "复制目标模板",
+            "copy_mappings_from_version_id": source_version_id,
+        },
+        files={"file": ("b.docx", docx_with_placeholders("case_no", "extra"), DOCX_MEDIA_TYPE)},
+    )
+    assert copied.status_code == 201, copied.text
+    diff = copied.json()["versions"][0]["mapping_diff"]
+    assert diff["carried_from_version_number"] == 1
+    assert diff["carried_over"] == 1
+    assert diff["carried_fixed"] == ["case_no"]
+    assert diff["new_placeholders"] == ["extra"]
+    copied_mappings = {item["placeholder"]: item for item in copied.json()["versions"][0]["mappings"]}
+    assert copied_mappings["case_no"]["source_type"] == "fixed"
+    assert copied_mappings["case_no"]["fixed_value"] == "LAB"
+
+    cross = client.post(
+        "/api/report-templates",
+        data={
+            "project_id": seeded_projects["BRAFV600E"]["id"],
+            "name": "跨项目复制模板",
+            "copy_mappings_from_version_id": source_version_id,
+        },
+        files={"file": ("c.docx", docx_with_placeholders("case_no"), DOCX_MEDIA_TYPE)},
+    )
+    assert cross.status_code == 422
+    assert cross.json()["detail"] == "只能从同一项目的模板复制映射"
+
+
 def test_workbook_export_hides_metadata_columns(client: TestClient) -> None:
     content = workbook_bytes(
         client,

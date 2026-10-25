@@ -44,6 +44,7 @@ import type {
   PrintEngineStatus,
   Printer as PrinterInfo,
   ProjectRecord,
+  ReportMappingDiff,
   ReportTemplate,
   ReportTemplateVersion,
   NativePreviewTask,
@@ -73,6 +74,9 @@ const createDialogVisible = ref(false);
 const createProjectId = ref("");
 const createName = ref("");
 const createFile = ref<File | null>(null);
+const createCopyFromVersionId = ref("");
+/** 会话级反馈：刚上传的版本从哪个版本继承了映射、哪些需要复核（方案 A：不落库）。 */
+const carryNotice = ref<ReportMappingDiff | null>(null);
 const versionFileInput = ref<HTMLInputElement>();
 
 const activeTemplate = computed(() =>
@@ -134,6 +138,24 @@ const createFileLabel = computed(
     createFile.value?.name ??
     `点击选择包含 ${placeholderText("占位符")} 的 DOCX 文件`,
 );
+
+const pendingMappingCount = computed(
+  () => mappings.value.filter((mapping) => mapping.source_type === "unmapped").length,
+);
+
+const createCopyOptions = computed(() =>
+  templates.value.flatMap((template) => {
+    if (template.project_id !== createProjectId.value) return [];
+    const latest = latestVersion(template);
+    return latest
+      ? [{ label: `${template.name}（v${latest.version_number}）`, value: latest.id }]
+      : [];
+  }),
+);
+
+watch(createProjectId, () => {
+  createCopyFromVersionId.value = "";
+});
 
 const sourceTypeLabels: Record<MappingSourceType, string> = {
   unmapped: "暂不映射",
@@ -201,6 +223,7 @@ function latestVersion(template: ReportTemplate): ReportTemplateVersion | undefi
 
 function setActiveVersion(versionId: string): void {
   activeVersionId.value = versionId;
+  carryNotice.value = null;
   const version = activeVersion.value;
   mappings.value = (version?.placeholders ?? []).map((placeholder) => {
     const saved = version?.mappings.find((mapping) => mapping.placeholder === placeholder);
@@ -456,12 +479,22 @@ async function submitTemplate(): Promise<void> {
       createProjectId.value,
       createName.value.trim(),
       createFile.value,
+      createCopyFromVersionId.value,
     );
     createDialogVisible.value = false;
     createName.value = "";
     createFile.value = null;
+    createCopyFromVersionId.value = "";
     await loadTemplates(created.id);
-    ElMessage.success("模板已保存并识别占位符");
+    const diff = created.versions[0]?.mapping_diff ?? null;
+    carryNotice.value = diff;
+    if (diff && diff.carried_over > 0) {
+      ElMessage.success(
+        `模板已保存，继承 ${diff.carried_over} 项映射，${diff.new_placeholders.length} 个占位符待映射`,
+      );
+    } else {
+      ElMessage.success("模板已保存并识别占位符");
+    }
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "模板上传失败");
   } finally {
@@ -483,9 +516,48 @@ async function uploadVersion(event: Event): Promise<void> {
     const version = await addReportTemplateVersion(activeTemplate.value.id, file);
     await loadTemplates(activeTemplate.value.id);
     setActiveVersion(version.id);
-    ElMessage.success(`已添加模板版本 v${version.version_number}`);
+    const diff = version.mapping_diff ?? null;
+    carryNotice.value = diff;
+    if (diff && diff.carried_over > 0) {
+      ElMessage.success(
+        `已从 v${diff.carried_from_version_number} 继承 ${diff.carried_over} 项映射，${diff.new_placeholders.length} 个占位符待映射`,
+      );
+    } else {
+      ElMessage.success(`已添加模板版本 v${version.version_number}`);
+    }
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "模板版本上传失败");
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function resetMappings(): Promise<void> {
+  const version = activeVersion.value;
+  if (!version) return;
+  try {
+    await ElMessageBox.confirm(
+      `确认把 v${version.version_number} 的全部占位符重置为“暂不映射”？`,
+      "清空重配",
+      {
+        confirmButtonText: "清空",
+        cancelButtonText: "取消",
+        type: "warning",
+      },
+    );
+  } catch (error) {
+    if (error === "cancel" || error === "close") return;
+    throw error;
+  }
+  loading.value = true;
+  try {
+    // PUT 空 payload 即全量重置：接口语义是“未出现的占位符一律回到暂不映射”
+    await replaceReportMappings(version.id, []);
+    await loadTemplates(activeTemplateId.value);
+    setActiveVersion(version.id);
+    ElMessage.success("已重置为暂不映射");
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "映射重置失败");
   } finally {
     loading.value = false;
   }
@@ -638,9 +710,33 @@ onMounted(() => {
 
         <template v-if="activeVersion">
           <div class="mapping-help">
-            当前版本共识别 {{ activeVersion.placeholders.length }} 个占位符。
+            当前版本共识别 {{ activeVersion.placeholders.length }} 个占位符，其中
+            {{ pendingMappingCount }} 个待映射。
             所有占位符完成映射或明确设为“留空”后，才能直接打印报告。
           </div>
+          <el-alert
+            v-if="carryNotice"
+            class="carry-notice"
+            :type="carryNotice.carried_fixed.length ? 'warning' : 'info'"
+            :closable="true"
+            @close="carryNotice = null"
+          >
+            <template #title>
+              已继承 v{{ carryNotice.carried_from_version_number }} 的
+              {{ carryNotice.carried_over }} 项映射<template v-if="carryNotice.new_placeholders.length">
+                ，新增待映射 {{ carryNotice.new_placeholders.length }} 项</template>
+            </template>
+            <div v-if="carryNotice.carried_fixed.length">
+              固定文字为原样继承，建议复核：{{
+                carryNotice.carried_fixed.map(placeholderText).join("、")
+              }}
+            </div>
+            <div v-if="carryNotice.dropped_placeholders.length">
+              以下旧占位符在本版本已不存在：{{
+                carryNotice.dropped_placeholders.map(placeholderText).join("、")
+              }}
+            </div>
+          </el-alert>
           <div
             class="workspace-table-surface mapping-table-surface"
             aria-label="报告占位符映射表"
@@ -685,6 +781,14 @@ onMounted(() => {
             </el-auto-resizer>
           </div>
           <div class="mapping-actions">
+            <el-button
+              v-if="activeVersion.mappings.some((mapping) => mapping.source_type !== 'unmapped')"
+              type="danger"
+              plain
+              @click="resetMappings"
+            >
+              清空重配
+            </el-button>
             <el-button type="primary" @click="saveMappings">保存占位符映射</el-button>
           </div>
         </template>
@@ -837,6 +941,21 @@ onMounted(() => {
           placeholder="例如：TB 基因检测报告"
         />
       </el-form-item>
+      <el-form-item label="从同项目的模板复制映射（可选）">
+        <el-select
+          v-model="createCopyFromVersionId"
+          clearable
+          style="width: 100%"
+          placeholder="选择后按占位符名称继承其最新版本的映射"
+        >
+          <el-option
+            v-for="option in createCopyOptions"
+            :key="option.value"
+            :label="option.label"
+            :value="option.value"
+          />
+        </el-select>
+      </el-form-item>
       <el-form-item label="Word 模板（.docx）">
         <label class="file-drop">
           <el-icon><DocumentAdd /></el-icon>
@@ -934,6 +1053,10 @@ onMounted(() => {
   background: var(--app-surface-soft);
   padding: 10px 14px;
   font-size: 12px;
+}
+
+.carry-notice {
+  margin: 10px 14px 0;
 }
 
 .mapping-actions {

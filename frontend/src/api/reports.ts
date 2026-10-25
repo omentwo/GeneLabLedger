@@ -28,11 +28,15 @@ export function createReportTemplate(
   projectId: string,
   name: string,
   file: File,
+  copyMappingsFromVersionId = "",
 ): Promise<ReportTemplate> {
   const form = new FormData();
   form.append("project_id", projectId);
   form.append("name", name);
   form.append("file", file);
+  if (copyMappingsFromVersionId) {
+    form.append("copy_mappings_from_version_id", copyMappingsFromVersionId);
+  }
   return apiRequest<ReportTemplate>("/report-templates", {
     method: "POST",
     body: form,

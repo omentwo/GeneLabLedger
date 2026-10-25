@@ -159,6 +159,96 @@ def store_template_version(
     return target_path
 
 
+def resolve_carry_source(template: ReportTemplate, carry_flag: str) -> ReportTemplateVersion | None:
+    """解析映射继承来源：空串取最新版本，"none" 显式关闭，其余必须是本模板的版本 ID。"""
+    if carry_flag == "none":
+        return None
+    if not carry_flag:
+        return template.versions[-1] if template.versions else None
+    source = next((version for version in template.versions if version.id == carry_flag), None)
+    if source is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="映射继承来源必须是该模板自身的版本",
+        )
+    return source
+
+
+def load_copy_source(
+    session: Session,
+    copy_from_version_id: str,
+    project_id: str,
+) -> ReportTemplateVersion | None:
+    """新建模板时的映射复制来源；字段定义挂在项目下，跨项目复制没有意义。"""
+    if not copy_from_version_id:
+        return None
+    source = load_version(session, copy_from_version_id)
+    if source.template.project_id != project_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="只能从同一项目的模板复制映射",
+        )
+    return source
+
+
+def create_mappings_with_carryover(
+    session: Session,
+    template: ReportTemplate,
+    version_id: str,
+    placeholders: list[str],
+    source_version: ReportTemplateVersion | None,
+) -> dict:
+    """按占位符名称从 source_version 继承映射；对不上的落回 unmapped 并进 diff。
+
+    fixed 文字原样继承，但打印兜底拦不住过期的固定值，单独列出供界面复核。
+    """
+    source_mappings = (
+        {mapping.placeholder: mapping for mapping in source_version.mappings}
+        if source_version is not None
+        else {}
+    )
+    carried_over = 0
+    carried_fixed: list[str] = []
+    new_placeholders: list[str] = []
+    for placeholder in placeholders:
+        mapping = ReportMapping(template_version_id=version_id, placeholder=placeholder)
+        source = source_mappings.get(placeholder)
+        if source is None or source.source_type == "unmapped":
+            new_placeholders.append(placeholder)
+        elif source.source_type == "field":
+            # field_id 是 SET NULL 外键：来源版本可能留着 source_type="field" 的脏映射
+            field = session.get(FieldDefinition, source.field_id) if source.field_id else None
+            if not field or field.project_id != template.project_id:
+                new_placeholders.append(placeholder)
+            else:
+                mapping.source_type = "field"
+                mapping.field_id = source.field_id
+                carried_over += 1
+        else:
+            mapping.source_type = source.source_type
+            if source.source_type == "fixed":
+                mapping.fixed_value = source.fixed_value
+                carried_fixed.append(placeholder)
+            carried_over += 1
+        session.add(mapping)
+    known = set(placeholders)
+    dropped = [
+        placeholder
+        for placeholder in (source_version.placeholders if source_version is not None else [])
+        if placeholder not in known
+    ]
+    return {
+        "carried_from_version_id": source_version.id if source_version is not None else None,
+        "carried_from_version_number": (
+            source_version.version_number if source_version is not None else None
+        ),
+        "carried_over": carried_over,
+        "carried_fixed": carried_fixed,
+        "new_placeholders": new_placeholders,
+        "dropped_placeholders": dropped,
+    }
+
+
 @router.get("/report-templates", response_model=list[ReportTemplateRead])
 def list_report_templates(
     project_id: str | None = None,
@@ -184,6 +274,7 @@ async def create_report_template(
     project_id: str = Form(...),
     name: str = Form(...),
     file: UploadFile = File(...),
+    copy_mappings_from_version_id: str = Form(""),
     session: Session = Depends(get_session),
 ) -> dict:
     settings = settings_from(request)
@@ -201,6 +292,7 @@ async def create_report_template(
     )
     if duplicate:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="当前项目已有同名模板")
+    copy_source = load_copy_source(session, copy_mappings_from_version_id, project_id)
     content, placeholders = await read_docx_upload(file, settings)
     template = ReportTemplate(project_id=project_id, name=clean_name)
     session.add(template)
@@ -225,20 +317,25 @@ async def create_report_template(
         )
         session.add(version)
         session.flush()
-        for placeholder in placeholders:
-            session.add(
-                ReportMapping(
-                    template_version_id=version.id,
-                    placeholder=placeholder,
-                    source_type="unmapped",
-                )
-            )
+        mapping_diff = create_mappings_with_carryover(
+            session,
+            template,
+            version.id,
+            placeholders,
+            copy_source,
+        )
         audit(
             session,
             "report_template.create",
             "report_template",
             template.id,
-            {"project_id": project_id, "name": clean_name, "placeholders": placeholders},
+            {
+                "project_id": project_id,
+                "name": clean_name,
+                "placeholders": placeholders,
+                "copied_from_version_id": mapping_diff["carried_from_version_id"],
+                "carried_over": mapping_diff["carried_over"],
+            },
         )
         session.commit()
     except IntegrityError as error:
@@ -251,7 +348,9 @@ async def create_report_template(
         if target_path:
             shutil.rmtree(target_path.parent, ignore_errors=True)
         raise
-    return template_dict(load_template(session, template.id))
+    result = template_dict(load_template(session, template.id))
+    result["versions"][0]["mapping_diff"] = mapping_diff
+    return result
 
 
 @router.post(
@@ -263,10 +362,12 @@ async def add_report_template_version(
     template_id: str,
     request: Request,
     file: UploadFile = File(...),
+    carry_mappings_from: str = Form(""),
     session: Session = Depends(get_session),
 ) -> dict:
     settings = settings_from(request)
     template = load_template(session, template_id)
+    carry_source = resolve_carry_source(template, carry_mappings_from)
     content, placeholders = await read_docx_upload(file, settings)
     current_max = (
         session.scalar(
@@ -297,20 +398,24 @@ async def add_report_template_version(
         )
         session.add(version)
         session.flush()
-        for placeholder in placeholders:
-            session.add(
-                ReportMapping(
-                    template_version_id=version.id,
-                    placeholder=placeholder,
-                    source_type="unmapped",
-                )
-            )
+        mapping_diff = create_mappings_with_carryover(
+            session,
+            template,
+            version.id,
+            placeholders,
+            carry_source,
+        )
         audit(
             session,
             "report_template.version.create",
             "report_template_version",
             version.id,
-            {"template_id": template.id, "version_number": version_number},
+            {
+                "template_id": template.id,
+                "version_number": version_number,
+                "carried_from_version_id": mapping_diff["carried_from_version_id"],
+                "carried_over": mapping_diff["carried_over"],
+            },
         )
         session.commit()
     except IntegrityError as error:
@@ -326,7 +431,9 @@ async def add_report_template_version(
         if target_path:
             target_path.unlink(missing_ok=True)
         raise
-    return template_version_dict(load_version(session, version.id))
+    result = template_version_dict(load_version(session, version.id))
+    result["mapping_diff"] = mapping_diff
+    return result
 
 
 @router.put(

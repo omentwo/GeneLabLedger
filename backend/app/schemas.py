@@ -799,6 +799,15 @@ class ReportMappingRead(BaseModel):
     fixed_value: str | None
 
 
+class ReportMappingDiffRead(BaseModel):
+    carried_from_version_id: str | None
+    carried_from_version_number: int | None
+    carried_over: int
+    carried_fixed: list[str]
+    new_placeholders: list[str]
+    dropped_placeholders: list[str]
+
+
 class ReportTemplateVersionRead(BaseModel):
     id: str
     version_number: int
@@ -806,6 +815,8 @@ class ReportTemplateVersionRead(BaseModel):
     placeholders: list[str]
     mappings: list[ReportMappingRead]
     created_at: datetime
+    # 仅创建版本/新建模板的响应携带：相对继承来源版本的映射差异
+    mapping_diff: ReportMappingDiffRead | None = None
 
 
 class ReportTemplateRead(BaseModel):
