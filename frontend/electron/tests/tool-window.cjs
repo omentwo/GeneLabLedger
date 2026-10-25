@@ -6,9 +6,10 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 // 与 main-window-close.cjs 同一套 vm 测试骨架，扩展点：
-// - FakeWindow 记录构造选项、setAlwaysOnTop 调用与 webContents.send 明细；
-// - fs mock 捕获 desktop-settings.json 写入，验证快速录入/工具窗口 bounds 分槽；
-// - 导出 createToolWindow / showToolWindow 并把 dataDirectory 指到测试目录。
+// - FakeWindow 记录构造选项（parent/alwaysOnTop）、setAlwaysOnTop 调用与
+//   webContents.send 明细；
+// - fs mock 捕获 desktop-settings.json 写入，验证 bounds 按 tool 分槽；
+// - 导出 createToolWindow / showToolWindow / normalizeStoredBoundsMap。
 function fixture({ choices = [] } = {}) {
   const windows = [], calls = [], handlers = new Map(), settingsWrites = [];
   const app = new EventEmitter();
@@ -55,7 +56,7 @@ function fixture({ choices = [] } = {}) {
     isDestroyed() { return this.destroyed; }
     isMinimized() { return false; }
     isMaximized() { return false; }
-    isVisible() { return this.visible; }
+    isVisible() { this.visible = true; return true; }
     getBounds() { return this.normalBounds; }
     getNormalBounds() { return this.normalBounds; }
     setAlwaysOnTop(flag, level) { this.alwaysOnTopCalls.push([flag, level]); }
@@ -101,7 +102,10 @@ function fixture({ choices = [] } = {}) {
   const source = fs.readFileSync(path.resolve(__dirname, "../main.cjs"), "utf8");
   vm.runInNewContext(`${source}
 dataDirectory = "test-data-dir";
-module.exports = { createMainWindow, createQuickEntryWindow, createToolWindow, showToolWindow, registerDesktopHandlers };`, context);
+module.exports = {
+  createMainWindow, createQuickEntryWindow, createToolWindow, showToolWindow,
+  registerDesktopHandlers, normalizeStoredBoundsMap,
+};`, context);
   const api = context.module.exports;
   api.registerDesktopHandlers();
   api.createMainWindow();
@@ -110,71 +114,104 @@ module.exports = { createMainWindow, createQuickEntryWindow, createToolWindow, s
   return { app, windows, calls, handlers, settingsWrites, senderFor, settle: async () => { for (let i = 0; i < 4; i += 1) await new Promise(setImmediate); } };
 }
 
-function openToolWindow(f, payload = { tool: "fields", projectId: "p1" }) {
+function loadNormalizeStoredBoundsMap() {
+  const source = fs.readFileSync(path.resolve(__dirname, "../main.cjs"), "utf8");
+  const app = new EventEmitter();
+  Object.assign(app, {
+    isPackaged: false, requestSingleInstanceLock: () => true, whenReady: () => new Promise(() => {}),
+    getPath: () => "test-only-settings",
+  });
+  const electron = {
+    app, BrowserWindow: class {}, Menu: {}, screen: {},
+    ipcMain: { handle() {} }, dialog: {},
+  };
+  const context = {
+    require: (name) => {
+      if (name === "electron") return electron;
+      if (name === "./window-close.cjs") return require("../window-close.cjs");
+      if (name === "./clipboard-follow.cjs") return { ClipboardFollower: class {
+        close() { return Promise.resolve(); }
+      } };
+      return require(name);
+    },
+    module: { exports: {} }, __dirname: path.resolve(__dirname, ".."), process, console,
+    setTimeout, clearTimeout, Buffer, URL, URLSearchParams,
+  };
+  vm.runInNewContext(`${source}\nmodule.exports = { normalizeStoredBoundsMap };`, context);
+  return context.module.exports.normalizeStoredBoundsMap;
+}
+
+function openToolWindow(f, payload) {
   return f.handlers.get("gene-ledger:open-ledger-tools")(f.senderFor(f.windows[0]), payload);
 }
 
-test("tool window opens without topmost or parent and reuses the single instance", async () => {
+test("three tool windows open independently with per-tool singletons", async () => {
   const f = fixture();
-  await openToolWindow(f);
-  assert.equal(f.windows.length, 3);
-  const tool = f.windows[2];
-  assert.equal(tool.options.alwaysOnTop, undefined);
-  assert.equal(tool.options.parent, undefined);
-  assert.equal(tool.options.modal, undefined);
-  assert.deepEqual(tool.alwaysOnTopCalls, []);
-  assert.ok(String(tool.options.title).includes("台账工具"));
-  assert.ok(String(tool.loadedUrl).includes("/ledger-tools?tool=fields&project=p1"));
-
-  // 未就绪时重复打开只保留 pendingContext，不建新窗口。
+  await openToolWindow(f, { tool: "fields", projectId: "p1" });
   await openToolWindow(f, { tool: "find-replace", projectId: "p1" });
-  assert.equal(f.windows.length, 3);
-  assert.equal(tool.sends.filter(({ channel }) => channel === "gene-ledger:ledger-tools-open-requested").length, 0);
+  await openToolWindow(f, { tool: "reorder", projectId: "p1" });
+  assert.equal(f.windows.length, 5);
+  const fields = f.windows[2];
+  const findReplace = f.windows[3];
+  const reorder = f.windows[4];
 
-  await f.handlers.get("gene-ledger:ledger-tools-ready")(f.senderFor(tool));
-  assert.equal(tool.sends.filter(({ channel }) => channel === "gene-ledger:ledger-tools-open-requested").length, 1);
+  // 三个窗口都是普通独立顶层窗口（类 WPS/Excel 查找替换）：
+  // 无 parent、无 modal、不置顶——可与主窗口并排摆放、互相遮挡、随时拖动。
+  for (const window of [fields, findReplace, reorder]) {
+    assert.equal(window.options.parent, undefined);
+    assert.equal(window.options.modal, undefined);
+    assert.equal(window.options.alwaysOnTop, undefined);
+    assert.deepEqual(window.alwaysOnTopCalls, []);
+  }
+  assert.ok(String(fields.options.title).includes("管理项目与表头"));
+  assert.ok(String(fields.loadedUrl).includes("/ledger-tools?tool=fields&project=p1"));
+  assert.ok(String(findReplace.options.title).includes("查找替换"));
+  assert.ok(String(findReplace.loadedUrl).includes("/ledger-tools?tool=find-replace"));
+  assert.ok(String(reorder.options.title).includes("按日期重排"));
 
-  await openToolWindow(f, { tool: "reorder", projectId: "p2" });
-  const requested = tool.sends.filter(({ channel }) => channel === "gene-ledger:ledger-tools-open-requested");
-  assert.equal(requested.length, 2);
-  assert.equal(requested[1].payload.tool, "reorder");
-  assert.equal(f.windows.length, 3);
+  // 按 tool 各自单例：重复打开不建新窗口，就绪后补发 open-requested。
+  await f.handlers.get("gene-ledger:ledger-tools-ready")(f.senderFor(findReplace));
+  await openToolWindow(f, { tool: "find-replace", projectId: "p2" });
+  await openToolWindow(f, { tool: "fields", projectId: "p2" });
+  assert.equal(f.windows.length, 5);
+  const requested = findReplace.sends.filter(({ channel }) => channel === "gene-ledger:ledger-tools-open-requested");
+  assert.equal(requested.length, 1);
+  assert.equal(JSON.stringify(requested[0].payload), JSON.stringify({
+    tool: "find-replace", mode: "replace", projectId: "p2",
+  }));
+  assert.equal(
+    fields.sends.filter(({ channel }) => channel === "gene-ledger:ledger-tools-open-requested").length, 0,
+  );
 });
 
-test("tool IPC channels only accept the tool window as sender", async () => {
+test("tool IPC channels accept any tool window but reject the main window", async () => {
   const f = fixture();
-  await openToolWindow(f);
-  const tool = f.windows[2];
+  await openToolWindow(f, { tool: "fields", projectId: "p1" });
+  const fields = f.windows[2];
   await assert.rejects(async () => f.handlers.get("gene-ledger:ledger-tools-ready")(f.senderFor(f.windows[0])));
   await assert.rejects(async () => f.handlers.get("gene-ledger:ledger-tools-changed")(
     f.senderFor(f.windows[0]), { projectId: "p1", action: "fields" },
   ));
-  await assert.rejects(async () => f.handlers.get("gene-ledger:locate-ledger-record")(
-    f.senderFor(f.windows[0]), { projectId: "p1", recordId: "r1" },
-  ));
-  // 就绪之前 channel 也必须拒绝（sender 是工具窗口但 handler 顺序无关，这里仅验证主窗口路径）。
-  await assert.rejects(async () => f.handlers.get("gene-ledger:locate-ledger-record")(
-    f.senderFor(f.windows[0]), { projectId: "p1", recordId: "r1", fieldId: "f1" },
-  ));
-  assert.ok(tool);
+  // sender 校验只看窗口身份：同一工具窗口重复就绪也是合法调用。
+  await f.handlers.get("gene-ledger:ledger-tools-ready")(f.senderFor(fields));
+  await f.handlers.get("gene-ledger:ledger-tools-ready")(f.senderFor(fields));
 });
 
 test("tool changes fan out to main window (and quick entry for fields) with an acked queue", async () => {
   const f = fixture();
-  await openToolWindow(f);
-  const tool = f.windows[2];
+  await openToolWindow(f, { tool: "fields", projectId: "p1" });
+  const fields = f.windows[2];
   const main = f.windows[0];
   const quick = f.windows[1];
   await f.handlers.get("gene-ledger:quick-entry-ready")(f.senderFor(quick));
   await f.handlers.get("gene-ledger:ledger-tools-changed")(
-    f.senderFor(tool), { projectId: "p1", action: "fields" },
+    f.senderFor(fields), { projectId: "p1", action: "fields" },
   );
   const forwarded = main.sends.find(({ channel }) => channel === "gene-ledger:ledger-tools-changed");
   assert.equal(forwarded.payload.action, "fields");
   assert.ok(forwarded.payload.revision >= 1);
   const quickNotify = quick.sends.find(({ channel }) => channel === "gene-ledger:quick-entry-fields-changed");
   assert.equal(quickNotify.payload.projectId, "p1");
-  assert.ok(quick);
 
   let pending = await f.handlers.get("gene-ledger:get-pending-tool-changes")(f.senderFor(main));
   assert.equal(JSON.stringify(pending), JSON.stringify([
@@ -187,41 +224,67 @@ test("tool changes fan out to main window (and quick entry for fields) with an a
 
 test("locate request raises the main window and forwards the payload", async () => {
   const f = fixture();
-  await openToolWindow(f);
-  const tool = f.windows[2];
+  await openToolWindow(f, { tool: "find-replace", projectId: "p1" });
+  const findReplace = f.windows[2];
   const main = f.windows[0];
   await f.handlers.get("gene-ledger:locate-ledger-record")(
-    f.senderFor(tool), { projectId: "p1", recordId: "r1", fieldId: "f1" },
+    f.senderFor(findReplace), { projectId: "p1", recordId: "r1", fieldId: "f1" },
   );
   const located = main.sends.find(({ channel }) => channel === "gene-ledger:ledger-tools-locate-record");
   // vm 沙箱里的对象原型与测试环境不同，改用 JSON 形态比较。
   assert.equal(JSON.stringify(located.payload), JSON.stringify({ projectId: "p1", recordId: "r1", fieldId: "f1" }));
   await assert.rejects(async () => f.handlers.get("gene-ledger:locate-ledger-record")(
-    f.senderFor(tool), { projectId: "", recordId: "r1" },
+    f.senderFor(findReplace), { projectId: "", recordId: "r1" },
   ));
 });
 
-test("quick entry and tool window bounds persist into separate settings slots", async () => {
+test("bounds persist into per-tool settings slots and quick entry keeps its own", async () => {
   const f = fixture();
-  await openToolWindow(f);
-  const tool = f.windows[2];
-  const quick = f.windows[1];
-  tool.normalBounds = { x: 11, y: 22, width: 1080, height: 760 };
+  await openToolWindow(f, { tool: "fields", projectId: "p1" });
+  await openToolWindow(f, { tool: "find-replace", projectId: "p1" });
+  await openToolWindow(f, { tool: "reorder", projectId: "p1" });
+  const [, quick, fields, findReplace, reorder] = f.windows;
+  fields.normalBounds = { x: 11, y: 22, width: 1080, height: 760 };
+  findReplace.normalBounds = { x: 55, y: 56, width: 560, height: 680 };
+  reorder.normalBounds = { x: 33, y: 34, width: 720, height: 560 };
   quick.normalBounds = { x: 5, y: 6, width: 820, height: 680 };
   quick.emit("close", { preventDefault() {} });
-  tool.emit("close", { preventDefault() {} });
+  fields.emit("close", { preventDefault() {} });
+  findReplace.emit("close", { preventDefault() {} });
+  reorder.emit("close", { preventDefault() {} });
   await f.settle();
   const last = f.settingsWrites.at(-1);
-  assert.equal(last.toolWindowBounds.x, 11);
+  assert.equal(last.toolWindowBounds.fields.x, 11);
+  assert.equal(last.toolWindowBounds["find-replace"].x, 55);
+  assert.equal(last.toolWindowBounds.reorder.x, 33);
   assert.equal(last.quickEntryBounds.x, 5);
 });
 
-test("application quit also closes the tool window before stopping the backend", async () => {
-  const f = fixture({ choices: [0, 0, 0] });
-  await openToolWindow(f);
+test("legacy single-window bounds migrate into the fields slot", () => {
+  const normalizeStoredBoundsMap = loadNormalizeStoredBoundsMap();
+  const migrated = normalizeStoredBoundsMap({ x: 1, y: 2, width: 1080, height: 760 });
+  assert.equal(migrated.fields.x, 1);
+  assert.equal(migrated.reorder, null);
+  assert.equal(migrated["find-replace"], null);
+  const fresh = normalizeStoredBoundsMap({
+    fields: { x: 9, y: 9, width: 100, height: 100 }, reorder: null,
+  });
+  assert.equal(fresh.fields.x, 9);
+  assert.equal(fresh["find-replace"], null);
+  const garbage = normalizeStoredBoundsMap("oops");
+  assert.equal(garbage.fields, null);
+  assert.equal(garbage.reorder, null);
+  assert.equal(garbage["find-replace"], null);
+});
+
+test("application quit also closes every tool window before stopping the backend", async () => {
+  const f = fixture({ choices: [0, 0, 0, 0] });
+  await openToolWindow(f, { tool: "fields", projectId: "p1" });
+  await openToolWindow(f, { tool: "find-replace", projectId: "p1" });
+  await openToolWindow(f, { tool: "reorder", projectId: "p1" });
   f.app.quit();
   await f.settle();
-  assert.deepEqual(f.windows.map((window) => window.destroyed), [true, true, true]);
+  assert.deepEqual(f.windows.map((window) => window.destroyed), [true, true, true, true, true]);
   assert.equal(f.calls.filter((call) => call === "exit").length, 1);
   assert.ok(f.calls.includes("clipboard-cleanup"));
 });

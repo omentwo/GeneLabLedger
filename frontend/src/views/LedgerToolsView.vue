@@ -41,6 +41,11 @@ import type {
  */
 
 const TOOL_WINDOW_TABS: LedgerToolsTab[] = ["fields", "reorder", "find-replace"];
+const TOOL_TITLES: Record<LedgerToolsTab, string> = {
+  fields: "管理项目与表头",
+  reorder: "按日期重排",
+  "find-replace": "查找替换",
+};
 const RECORD_PAGE_SIZE = 10_000;
 
 const appStore = useAppStore();
@@ -50,7 +55,9 @@ const bridge = desktopBridge();
 const initializing = ref(false);
 const initializationError = ref("");
 const activeProjectId = ref("");
-const activeTab = ref<LedgerToolsTab>("fields");
+// 一个工具窗口只承载一个工具（主进程按 tool 各建单例窗口），tool 由路由
+// 固定，open-requested 只刷新项目等上下文，不再切换工具。
+const tool = ref<LedgerToolsTab>("fields");
 const templateManagerVisible = ref(false);
 
 const activeProjectName = computed(
@@ -272,6 +279,7 @@ watch(findReplaceVisible, (visible) => {
 
 function applyContext(context: LedgerToolsOpenContext): void {
   if (initializing.value) return;
+  if (context.tool !== tool.value) return; // 窗口按工具单例，不跨工具复用。
   if (
     context.projectId &&
     appStore.projects.some((project) => project.id === context.projectId) &&
@@ -279,8 +287,7 @@ function applyContext(context: LedgerToolsOpenContext): void {
   ) {
     activeProjectId.value = context.projectId;
   }
-  activeTab.value = context.tool;
-  if (context.tool === "find-replace") {
+  if (tool.value === "find-replace") {
     void ensureRecordsLoaded();
     openFindReplace(context.mode === "find" ? "find" : "replace", true);
   }
@@ -304,7 +311,8 @@ async function initialize(): Promise<void> {
       return;
     }
     activeProjectId.value = requestedProject;
-    activeTab.value = routeTool;
+    tool.value = routeTool;
+    document.title = `${TOOL_TITLES[routeTool]} · 基因检测台账管理系统`;
     if (routeTool === "find-replace") {
       openFindReplace(route.query.mode === "find" ? "find" : "replace", true);
       await ensureRecordsLoaded();
@@ -321,7 +329,7 @@ function retryInitialize(): void {
 }
 
 function refreshOnFocus(): void {
-  if (activeTab.value === "find-replace" && activeProjectId.value && !recordsLoading.value) {
+  if (tool.value === "find-replace" && activeProjectId.value && !recordsLoading.value) {
     void ensureRecordsLoaded();
   }
 }
@@ -368,7 +376,7 @@ onBeforeUnmount(() => {
   <div class="ledger-tools-page">
     <header class="ledger-tools-header">
       <div>
-        <h1 class="ledger-tools-title">台账工具</h1>
+        <h1 class="ledger-tools-title">{{ TOOL_TITLES[tool] }}</h1>
         <p class="ledger-tools-subtitle">
           当前项目：<strong>{{ activeProjectName || "—" }}</strong>
         </p>
@@ -380,8 +388,8 @@ onBeforeUnmount(() => {
       <el-button @click="retryInitialize">重试</el-button>
     </div>
 
-    <el-tabs v-else v-model="activeTab" class="ledger-tools-tabs">
-      <el-tab-pane label="管理项目与表头" name="fields">
+    <template v-else>
+      <section v-if="tool === 'fields'" class="tools-section">
         <ProjectFieldManager
           :selected-project-id="activeProjectId"
           embedded
@@ -390,9 +398,9 @@ onBeforeUnmount(() => {
           @open-templates="templateManagerVisible = true"
           @close="finishToolsSession"
         />
-      </el-tab-pane>
+      </section>
 
-      <el-tab-pane label="按日期重排" name="reorder">
+      <section v-else-if="tool === 'reorder'" class="tools-section">
         <div class="tools-pane">
           <p class="tools-pane-note">
             仅重排当前项目中所选日期的记录，并按“病理号-蜡块号”的实验编排规则排序；其他日期记录的位置保持不变。
@@ -438,9 +446,9 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </div>
-      </el-tab-pane>
+      </section>
 
-      <el-tab-pane label="查找替换" name="find-replace">
+      <section v-else-if="tool === 'find-replace'" class="tools-section">
         <div v-loading="recordsLoading" class="tools-pane">
           <div class="find-replace-mode-switch" role="group" aria-label="查找模式">
             <el-button
@@ -543,10 +551,11 @@ onBeforeUnmount(() => {
             </el-button>
           </div>
         </div>
-      </el-tab-pane>
-    </el-tabs>
+      </section>
+    </template>
 
     <LedgerTemplateManager
+      v-if="tool === 'fields'"
       v-model="templateManagerVisible"
       :selected-project-id="activeProjectId"
     />
@@ -587,16 +596,11 @@ onBeforeUnmount(() => {
   justify-items: start;
 }
 
-.ledger-tools-tabs {
+.tools-section {
   display: flex;
   min-height: 0;
   flex: 1;
   flex-direction: column;
-}
-
-.ledger-tools-tabs :deep(.el-tabs__content) {
-  min-height: 0;
-  flex: 1;
   overflow: auto;
 }
 

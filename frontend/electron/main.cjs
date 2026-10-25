@@ -18,11 +18,36 @@ const QUICK_ENTRY_MIN_WIDTH = 620;
 const QUICK_ENTRY_MIN_HEIGHT = 460;
 const QUICK_ENTRY_DEFAULT_WIDTH = 820;
 const QUICK_ENTRY_DEFAULT_HEIGHT = 680;
-const TOOL_WINDOW_MIN_WIDTH = 720;
-const TOOL_WINDOW_MIN_HEIGHT = 520;
-const TOOL_WINDOW_DEFAULT_WIDTH = 1080;
-const TOOL_WINDOW_DEFAULT_HEIGHT = 760;
-const TOOL_WINDOW_TABS = ["fields", "reorder", "find-replace"];
+// 台账工具一窗一事：三个窗口都是普通独立顶层窗口（无 parent、无 modal、
+// 不置顶），与 WPS/Excel 的查找替换一致——打开后可与主表来回切换焦点、
+// 并排摆放；被主窗口盖住时点任务栏或窗口即可召回。
+const TOOL_WINDOW_SPECS = {
+  fields: {
+    title: "管理项目与表头 · 基因检测台账",
+    closeMessage: "项目与表头管理尚未完成当前操作。",
+    minWidth: 720,
+    minHeight: 520,
+    defaultWidth: 1080,
+    defaultHeight: 760,
+  },
+  reorder: {
+    title: "按日期重排 · 基因检测台账",
+    closeMessage: "按日期重排尚未完成当前操作。",
+    minWidth: 640,
+    minHeight: 480,
+    defaultWidth: 720,
+    defaultHeight: 560,
+  },
+  "find-replace": {
+    title: "查找替换 · 基因检测台账",
+    closeMessage: "查找替换尚未完成当前操作。",
+    minWidth: 480,
+    minHeight: 520,
+    defaultWidth: 560,
+    defaultHeight: 680,
+  },
+};
+const TOOL_WINDOW_TOOLS = Object.keys(TOOL_WINDOW_SPECS);
 
 let mainWindow = null;
 let quickEntryWindow = null;
@@ -30,9 +55,7 @@ let quickEntryRendererReady = false;
 let quickEntryPendingContext = null;
 let quickEntryChangeRevision = 0;
 const pendingQuickEntryProjectChanges = new Map();
-let toolWindow = null;
-let toolRendererReady = false;
-let toolPendingContext = null;
+const toolWindows = new Map();
 let toolChangeRevision = 0;
 const pendingToolProjectChanges = new Map();
 let backendProcess = null;
@@ -42,8 +65,7 @@ let dataDirectory = "";
 let alwaysOnTop = false;
 let quickEntryBounds = null;
 let quickEntryBoundsTimer = null;
-let toolWindowBounds = null;
-let toolWindowBoundsTimer = null;
+let toolWindowBounds = { fields: null, reorder: null, "find-replace": null };
 let quitting = false;
 const closeGuardReady = new Set();
 const approvedWindowCloses = new Set();
@@ -65,8 +87,8 @@ const closeCoordinator = new WindowCloseCoordinator({
       title: "关闭前保存修改",
       message: window === quickEntryWindow
         ? "快速录入中有未保存的草稿。"
-        : window === toolWindow
-          ? "台账工具窗口尚未完成当前操作。"
+        : toolWindowFor(window)
+          ? TOOL_WINDOW_SPECS[toolWindowFor(window)].closeMessage
           : "台账中有未保存的修改。",
       detail: "选择保存后关闭，或放弃未保存内容。取消会保留窗口和草稿。",
       buttons: ["保存后关闭", "放弃修改", "取消"],
@@ -78,7 +100,7 @@ const closeCoordinator = new WindowCloseCoordinator({
   },
   blocked: (message) => {
     const options = { type: "warning", title: "暂未关闭", message, buttons: ["返回修改"] };
-    const owner = BrowserWindow.getFocusedWindow?.() ?? [quickEntryWindow, toolWindow, mainWindow]
+    const owner = BrowserWindow.getFocusedWindow?.() ?? [quickEntryWindow, ...activeToolWindows(), mainWindow]
       .find((window) => window && !window.isDestroyed() && window.isVisible());
     return owner ? dialog.showMessageBox(owner, options) : dialog.showMessageBox(options);
   },
@@ -87,7 +109,7 @@ const closeCoordinator = new WindowCloseCoordinator({
 function closeIpcWindow(event) {
   return assertIpcSenderWindow(
     event,
-    [mainWindow, quickEntryWindow, toolWindow],
+    [mainWindow, quickEntryWindow, ...activeToolWindows()],
     "拒绝来自非业务窗口的关闭调用",
   );
 }
@@ -162,7 +184,7 @@ function closeApprovedWindow(window) {
 
 function requestApplicationClose(restart = false) {
   if (quitting) return Promise.resolve(false);
-  const windows = [mainWindow, quickEntryWindow, toolWindow].filter((window) => window && !window.isDestroyed());
+  const windows = [mainWindow, quickEntryWindow, ...activeToolWindows()].filter((window) => window && !window.isDestroyed());
   return closeCoordinator.request(windows, async () => {
     // Backend shutdown and relaunch happen only after every window approved.
     quitting = true;
@@ -213,6 +235,20 @@ function normalizeStoredBounds(value) {
   };
 }
 
+function normalizeStoredBoundsMap(value) {
+  const result = { fields: null, reorder: null, "find-replace": null };
+  if (!value || typeof value !== "object") return result;
+  // 2.4.5 及之前只存单个工具窗口的 bounds；视为 fields 的初始位置迁移过来。
+  if (Number.isFinite(Number(value.x))) {
+    result.fields = normalizeStoredBounds(value);
+    return result;
+  }
+  for (const tool of TOOL_WINDOW_TOOLS) {
+    if (tool in value) result[tool] = normalizeStoredBounds(value[tool]);
+  }
+  return result;
+}
+
 function settingsDirectory() {
   return path.join(app.getPath("userData"), "settings");
 }
@@ -231,14 +267,19 @@ function readDesktopSettings() {
           : "",
       alwaysOnTop: parsed.alwaysOnTop === true,
       quickEntryBounds: normalizeStoredBounds(parsed.quickEntryBounds),
-      toolWindowBounds: normalizeStoredBounds(parsed.toolWindowBounds),
+      toolWindowBounds: normalizeStoredBoundsMap(parsed.toolWindowBounds),
     };
   } catch (error) {
     if (error?.code !== "ENOENT") {
       console.error("桌面设置读取失败", error);
     }
   }
-  return { dataDirectory: "", alwaysOnTop: false, quickEntryBounds: null, toolWindowBounds: null };
+  return {
+    dataDirectory: "",
+    alwaysOnTop: false,
+    quickEntryBounds: null,
+    toolWindowBounds: { fields: null, reorder: null, "find-replace": null },
+  };
 }
 
 function writeDesktopSettings(
@@ -257,7 +298,7 @@ function writeDesktopSettings(
         dataDirectory: directory,
         alwaysOnTop: Boolean(nextAlwaysOnTop),
         quickEntryBounds: normalizeStoredBounds(nextQuickEntryBounds),
-        toolWindowBounds: normalizeStoredBounds(nextToolWindowBounds),
+        toolWindowBounds: normalizeStoredBoundsMap(nextToolWindowBounds),
       },
       null,
       2,
@@ -418,7 +459,35 @@ function assertQuickEntryIpcSender(event) {
 }
 
 function assertToolIpcSender(event) {
-  return assertIpcSenderWindow(event, [toolWindow], "拒绝来自非台账工具窗口的桌面调用");
+  return assertIpcSenderWindow(event, activeToolWindows(), "拒绝来自非台账工具窗口的桌面调用");
+}
+
+function toolState(tool) {
+  let state = toolWindows.get(tool);
+  if (!state) {
+    state = { window: null, rendererReady: false, pendingContext: null, boundsTimer: null };
+    toolWindows.set(tool, state);
+  }
+  return state;
+}
+
+function activeToolWindows() {
+  return [...toolWindows.values()]
+    .map((state) => state.window)
+    .filter((window) => window && !window.isDestroyed());
+}
+
+function toolEntryByWindow(window) {
+  for (const [tool, state] of toolWindows) {
+    if (state.window && !state.window.isDestroyed() && state.window === window) {
+      return { tool, state };
+    }
+  }
+  return null;
+}
+
+function toolWindowFor(window) {
+  return toolEntryByWindow(window)?.tool ?? null;
 }
 
 function normalizeIdList(value) {
@@ -451,7 +520,7 @@ function rendererRoutePath(context) {
 }
 
 function normalizeToolContext(payload) {
-  const tool = TOOL_WINDOW_TABS.includes(payload?.tool) ? payload.tool : "fields";
+  const tool = TOOL_WINDOW_TOOLS.includes(payload?.tool) ? payload.tool : "fields";
   const mode = payload?.mode === "find" ? "find" : "replace";
   return {
     tool,
@@ -525,13 +594,14 @@ function restoredQuickEntryBounds() {
   );
 }
 
-function restoredToolWindowBounds() {
+function restoredToolWindowBounds(tool) {
+  const spec = TOOL_WINDOW_SPECS[tool];
   return restoredWindowBounds(
-    normalizeStoredBounds(toolWindowBounds),
-    TOOL_WINDOW_MIN_WIDTH,
-    TOOL_WINDOW_MIN_HEIGHT,
-    TOOL_WINDOW_DEFAULT_WIDTH,
-    TOOL_WINDOW_DEFAULT_HEIGHT,
+    normalizeStoredBounds(toolWindowBounds[tool]),
+    spec.minWidth,
+    spec.minHeight,
+    spec.defaultWidth,
+    spec.defaultHeight,
   );
 }
 
@@ -549,17 +619,19 @@ function scheduleQuickEntryBoundsPersistence() {
   }, 400);
 }
 
-function persistToolWindowBounds() {
-  if (!toolWindow || toolWindow.isDestroyed()) return;
-  toolWindowBounds = normalizeStoredBounds(toolWindow.getNormalBounds());
+function persistToolWindowBounds(tool) {
+  const state = toolState(tool);
+  if (!state.window || state.window.isDestroyed()) return;
+  toolWindowBounds[tool] = normalizeStoredBounds(state.window.getNormalBounds());
   if (dataDirectory) writeDesktopSettings(dataDirectory, alwaysOnTop, quickEntryBounds, toolWindowBounds);
 }
 
-function scheduleToolWindowBoundsPersistence() {
-  if (toolWindowBoundsTimer) clearTimeout(toolWindowBoundsTimer);
-  toolWindowBoundsTimer = setTimeout(() => {
-    toolWindowBoundsTimer = null;
-    persistToolWindowBounds();
+function scheduleToolWindowBoundsPersistence(tool) {
+  const state = toolState(tool);
+  if (state.boundsTimer) clearTimeout(state.boundsTimer);
+  state.boundsTimer = setTimeout(() => {
+    state.boundsTimer = null;
+    persistToolWindowBounds(tool);
   }, 400);
 }
 
@@ -651,15 +723,17 @@ function showQuickEntryWindow(payload) {
   }
 }
 
-function createToolWindow(context) {
-  const bounds = restoredToolWindowBounds();
-  toolRendererReady = false;
-  toolPendingContext = null;
-  toolWindow = new BrowserWindow({
-    title: "台账工具 · 基因检测台账",
+function createToolWindow(tool, context) {
+  const spec = TOOL_WINDOW_SPECS[tool];
+  const bounds = restoredToolWindowBounds(tool);
+  const state = toolState(tool);
+  state.rendererReady = false;
+  state.pendingContext = null;
+  const window = new BrowserWindow({
+    title: spec.title,
     ...bounds,
-    minWidth: TOOL_WINDOW_MIN_WIDTH,
-    minHeight: TOOL_WINDOW_MIN_HEIGHT,
+    minWidth: spec.minWidth,
+    minHeight: spec.minHeight,
     resizable: true,
     show: false,
     autoHideMenuBar: true,
@@ -676,52 +750,54 @@ function createToolWindow(context) {
       ],
     },
   });
-  registerWindowCloseProtection(toolWindow);
-  toolWindow.webContents.on("before-input-event", (event, input) => {
+  registerWindowCloseProtection(window);
+  window.webContents.on("before-input-event", (event, input) => {
     if ((input.control || input.meta) && String(input.key).toLowerCase() === "w") {
       event.preventDefault();
-      toolWindow?.close();
+      window.close();
     }
   });
-  configureRendererNavigation(toolWindow);
-  toolWindow.webContents.on("did-start-navigation", (details) => {
+  configureRendererNavigation(window);
+  window.webContents.on("did-start-navigation", (details) => {
     if (!details.isMainFrame || details.isSameDocument) return;
-    toolRendererReady = false;
+    state.rendererReady = false;
   });
-  toolWindow.webContents.on("render-process-gone", () => {
-    toolRendererReady = false;
+  window.webContents.on("render-process-gone", () => {
+    state.rendererReady = false;
   });
-  toolWindow.once("ready-to-show", () => {
-    if (!toolWindow || toolWindow.isDestroyed()) return;
-    toolWindow.show();
-    toolWindow.focus();
+  window.once("ready-to-show", () => {
+    if (state.window !== window || window.isDestroyed()) return;
+    window.show();
+    window.focus();
   });
-  toolWindow.on("move", scheduleToolWindowBoundsPersistence);
-  toolWindow.on("resize", scheduleToolWindowBoundsPersistence);
-  toolWindow.on("close", persistToolWindowBounds);
-  toolWindow.on("closed", () => {
-    if (toolWindowBoundsTimer) clearTimeout(toolWindowBoundsTimer);
-    toolWindowBoundsTimer = null;
-    toolRendererReady = false;
-    toolPendingContext = null;
-    toolWindow = null;
+  window.on("move", () => scheduleToolWindowBoundsPersistence(tool));
+  window.on("resize", () => scheduleToolWindowBoundsPersistence(tool));
+  window.on("close", () => persistToolWindowBounds(tool));
+  window.on("closed", () => {
+    if (state.boundsTimer) clearTimeout(state.boundsTimer);
+    state.boundsTimer = null;
+    state.rendererReady = false;
+    state.pendingContext = null;
+    if (state.window === window) state.window = null;
   });
-  void loadRendererWindow(toolWindow, rendererToolRoutePath(context));
+  state.window = window;
+  void loadRendererWindow(window, rendererToolRoutePath(context));
 }
 
-function showToolWindow(payload) {
-  const context = normalizeToolContext(payload);
-  if (!toolWindow || toolWindow.isDestroyed()) {
-    createToolWindow(context);
+function showToolWindow(tool, payload) {
+  const context = normalizeToolContext({ ...payload, tool });
+  const state = toolState(tool);
+  if (!state.window || state.window.isDestroyed()) {
+    createToolWindow(tool, context);
     return;
   }
-  toolPendingContext = context;
-  if (toolWindow.isMinimized()) toolWindow.restore();
-  toolWindow.show();
-  toolWindow.focus();
-  if (toolRendererReady) {
-    toolWindow.webContents.send("gene-ledger:ledger-tools-open-requested", toolPendingContext);
-    toolPendingContext = null;
+  state.pendingContext = context;
+  if (state.window.isMinimized()) state.window.restore();
+  state.window.show();
+  state.window.focus();
+  if (state.rendererReady) {
+    state.window.webContents.send("gene-ledger:ledger-tools-open-requested", state.pendingContext);
+    state.pendingContext = null;
   }
 }
 
@@ -1003,15 +1079,21 @@ function registerDesktopHandlers() {
   ipcMain.handle("gene-ledger:open-ledger-tools", (event, payload) => {
     assertTrustedIpcSender(event);
     if (closeCoordinator.pending || quitting) throw new Error("请先完成当前关闭操作");
-    showToolWindow(payload);
+    const tool = TOOL_WINDOW_TOOLS.includes(payload?.tool) ? payload.tool : "fields";
+    showToolWindow(tool, payload);
   });
 
   ipcMain.handle("gene-ledger:ledger-tools-ready", (event) => {
-    assertToolIpcSender(event);
-    toolRendererReady = true;
-    if (toolPendingContext && toolWindow && !toolWindow.isDestroyed()) {
-      toolWindow.webContents.send("gene-ledger:ledger-tools-open-requested", toolPendingContext);
-      toolPendingContext = null;
+    const window = assertToolIpcSender(event);
+    const entry = toolEntryByWindow(window);
+    if (!entry) throw new Error("台账工具窗口状态无效");
+    entry.state.rendererReady = true;
+    if (entry.state.pendingContext && entry.state.window && !entry.state.window.isDestroyed()) {
+      entry.state.window.webContents.send(
+        "gene-ledger:ledger-tools-open-requested",
+        entry.state.pendingContext,
+      );
+      entry.state.pendingContext = null;
     }
   });
 
