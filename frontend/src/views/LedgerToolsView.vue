@@ -173,7 +173,6 @@ const activeGridCell = ref<GridCellPosition | null>(null);
 const gridSelectionAnchor = ref<GridCellPosition | null>(null);
 const gridCellRange = ref(null);
 const selectedGridCellKeys = ref(new Set<string>());
-const findReplaceInputRef = ref<{ focus: () => void } | null>(null);
 
 async function loadProjectRecords(projectId: string): Promise<void> {
   recordsLoading.value = true;
@@ -209,6 +208,8 @@ async function ensureRecordsLoaded(): Promise<void> {
 }
 
 function registerFindReplaceInput(element: { focus: () => void } | null): void {
+  // 输入框实例必须注册到 composable 持有的 ref：openFindReplace、导航、
+  // 模式切换的内置聚焦都只认它，注册到本地 ref 会让这些调用落空。
   findReplaceInputRef.value = element;
 }
 
@@ -236,11 +237,13 @@ const {
   findMatches,
   findCurrentMatch,
   findMatchStatus,
+  findReplaceInputRef,
   setFindReplaceMode,
   openFindReplace,
   runFindReplacePreview,
   commitFindReplace,
   navigateFindMatch,
+  focusFindReplaceInput,
   cancelFindTermDebounce,
 } = useLedgerFindReplace({
   fields: toolFields,
@@ -373,6 +376,13 @@ function retryInitialize(): void {
 function refreshOnFocus(): void {
   if (tool.value === "find-replace" && activeProjectId.value && !recordsLoading.value) {
     void ensureRecordsLoaded();
+  }
+  // WPS/Excel 手感：窗口获得焦点且用户未停留在任何输入控件时，光标回到
+  // 查找框直接打字。首次显示时 openFindReplace 的聚焦可能发生在窗口可见
+  // 之前而落空，这里在主进程 show()+focus() 之后兜底。
+  if (tool.value === "find-replace") {
+    const active = document.activeElement;
+    if (!active || active === document.body) focusFindReplaceInput({ select: false });
   }
 }
 

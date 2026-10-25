@@ -703,6 +703,8 @@ async function handleOpenRequest(context: QuickEntryOpenContext): Promise<void> 
   }
   if (!context.projectId || context.projectId === activeProjectId.value) {
     if (activeProjectId.value) await refreshProjectData(activeProjectId.value);
+    // 项目未变时 activateProject 不会执行，重复打开窗口后光标要回到病理号输入。
+    focusPathology();
     return;
   }
   await refreshProjectData(context.projectId);
@@ -1347,6 +1349,10 @@ async function initialize(): Promise<void> {
 function refreshOnFocus(): void {
   if (preparingClose.value) return;
   if (activeProjectId.value) void refreshProjectData(activeProjectId.value);
+  // WPS/Excel 手感：窗口获得焦点且用户未停留在任何输入控件时，光标回到
+  // 病理号输入，直接打字即可录入；正在编辑其他字段时不抢焦点。
+  const active = document.activeElement;
+  if (!active || active === document.body) focusPathology();
 }
 
 function refreshRecordsPeriodically(): void {
@@ -1687,7 +1693,6 @@ onBeforeUnmount(() => {
               v-model="combinedPathologyInput"
               size="large"
               clearable
-              autofocus
               placeholder="例如 A-20260907-3"
               @keydown="handleCombinedPathologyKeydown"
             />

@@ -66,7 +66,8 @@ export function useLedgerFindReplace(deps: LedgerFindReplaceDeps): {
   navigateFindMatch: (direction: -1 | 1) => Promise<void>;
   /** 视图卸载时清理防抖定时器。 */
   cancelFindTermDebounce: () => void;
-  focusFindReplaceInput: () => void;
+  /** 聚焦查找内容输入框；默认全选旧词便于直接覆盖，select:false 保留光标位置。 */
+  focusFindReplaceInput: (options?: { select?: boolean }) => void;
   restoreFindReplaceGridFocus: () => void;
 } {
   const { fields, tableRows, tableRowIndexById, records } = deps;
