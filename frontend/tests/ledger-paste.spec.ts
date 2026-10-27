@@ -114,6 +114,9 @@ interface LedgerState {
   contextCut: () => Promise<void>;
   contextCopy: () => Promise<void>;
   loadRecords: (projectId?: string, options?: { showLoading?: boolean; preserveHistory?: boolean; preserveSelection?: boolean }) => Promise<boolean>;
+  handleGridFocusOut: (event: FocusEvent) => void;
+  handleLedgerCellEditorBlur: () => void;
+  handleLedgerCellEditorKeydown: (event: KeyboardEvent) => void;
   cancelValidationPanel: () => void;
   undoLedger: () => Promise<void>;
   redoLedger: () => Promise<void>;
@@ -1084,5 +1087,135 @@ describe("ledger paste requests", () => {
     expect(state.records).toEqual([]);
     expect(state.recordTotal).toBe(0);
     await nextTick();
+  });
+});
+
+describe("ledger IME input", () => {
+  beforeEach(() => {
+    database.set("A", [record("A", "record-A")]);
+  });
+
+  function imeKeydown(key: string): KeyboardEvent {
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    // 输入法首键：isComposing 仍是 false，浏览器只给 keyCode 229。
+    Object.defineProperty(event, "keyCode", { value: 229 });
+    return event;
+  }
+
+  it("opens the editor instead of writing the pinyin first letter into the cell", async () => {
+    const state = await mountLedger();
+    const position = { rowIndex: 0, columnIndex: 2 };
+    state.selectGridCell(position);
+    const target = cellTarget(state, position);
+
+    const event = imeKeydown("n");
+    target.dispatchEvent(event);
+    await nextTick();
+
+    // 不能掐掉输入法（否则组合状态会挂死），也不能把 "n" 当成内容写进单元格。
+    expect(event.defaultPrevented).toBe(false);
+    expect(state.records[0]!.values["A-note"] ?? "").toBe("");
+    expect(state.editingGridCell).toMatchObject(position);
+  });
+
+  it("still starts editing with the typed character for plain ASCII input", async () => {
+    const state = await mountLedger();
+    const position = { rowIndex: 0, columnIndex: 2 };
+    state.selectGridCell(position);
+    const target = cellTarget(state, position);
+
+    const event = new KeyboardEvent("keydown", { key: "n", bubbles: true, cancelable: true });
+    target.dispatchEvent(event);
+    await nextTick();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(state.records[0]!.values["A-note"]).toBe("n");
+    expect(state.editingGridCell).toMatchObject(position);
+  });
+
+  it("does not commit the cell when Enter picks an IME candidate", async () => {
+    const state = await mountLedger();
+    const note = state.fields[2]!;
+    state.editingGridCell = { rowIndex: 0, columnIndex: 2 };
+    state.editingGridSnapshot = { rowId: "record-A", fieldId: note.id, value: "ni" };
+
+    const event = imeKeydown("Enter");
+    state.handleLedgerCellEditorKeydown(event);
+    await nextTick();
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(state.editingGridSnapshot).not.toBeNull();
+    expect(mocks.previewCellBatch).not.toHaveBeenCalled();
+  });
+});
+
+describe("ledger duplicate pathology warning", () => {
+  function answerDuplicatePathologyWarning(): void {
+    const perform = mocks.previewCellBatch.getMockImplementation()!;
+    mocks.previewCellBatch.mockImplementation(async (...args: unknown[]) => {
+      const preview = await perform(...args) as RecordCellBatchPreview;
+      return {
+        ...preview,
+        issues: [{
+          record_id: "record-A",
+          field_id: "A-pathology",
+          severity: "warning" as const,
+          message: "病理号“record-A”已存在",
+        }],
+      };
+    });
+  }
+
+  async function openDuplicatePanel(state: LedgerState) {
+    const pathology = state.fields.find((item) => item.system_key === "pathology_number")!;
+    const row = state.records[0]!;
+    state.setValue(row, pathology, "record-A-dup");
+    expect(await state.saveField(row, pathology)).toBe(false);
+    expect(state.validationPanel).toMatchObject({ title: "发现重复病理号" });
+    return { pathology, row };
+  }
+
+  beforeEach(() => {
+    database.set("A", [record("A", "record-A")]);
+  });
+
+  it("keeps the open panel instead of re-running the pre-check on a repeated save", async () => {
+    const state = await mountLedger();
+    answerDuplicatePathologyWarning();
+    const { pathology, row } = await openDuplicatePanel(state);
+    const panel = state.validationPanel;
+    const previewCalls = mocks.previewCellBatch.mock.calls.length;
+
+    // 面板打开后，失焦补偿会再次进入同一格的保存：必须原样让路，
+    // 不能"关掉面板 → 重新预检查 → 再弹一次"（那就是闪动的来源）。
+    expect(await state.saveField(row, pathology)).toBe(false);
+    expect(state.validationPanel).toBe(panel);
+    expect(mocks.previewCellBatch).toHaveBeenCalledTimes(previewCalls);
+  });
+
+  it("does not commit the active edit when focus moves into a modal overlay", async () => {
+    const state = await mountLedger();
+    answerDuplicatePathologyWarning();
+    const { pathology } = await openDuplicatePanel(state);
+    const previewCalls = mocks.previewCellBatch.mock.calls.length;
+    state.editingGridCell = { rowIndex: 0, columnIndex: 0 };
+    state.editingGridSnapshot = { rowId: "record-A", fieldId: pathology.id, value: "record-A-dup" };
+
+    const overlay = document.createElement("div");
+    overlay.className = "el-overlay";
+    const button = document.createElement("button");
+    overlay.append(button);
+    document.body.append(overlay);
+    try {
+      button.focus();
+      const event = new FocusEvent("focusout");
+      Object.defineProperty(event, "relatedTarget", { value: button });
+      state.handleGridFocusOut(event);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(mocks.previewCellBatch).toHaveBeenCalledTimes(previewCalls);
+      expect(state.editingGridSnapshot).not.toBeNull();
+    } finally {
+      overlay.remove();
+    }
   });
 });

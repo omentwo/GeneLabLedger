@@ -182,6 +182,9 @@ import {
   type LedgerSortState,
 } from "@/utils/ledgerTableView";
 import { getRecordFieldValue as valueFor } from "@/utils/recordFieldValue";
+import { isImeComposingKeydown, beginEditForImeKey } from "@/utils/imeKeydown";
+import { ledgerCellElement } from "@/utils/ledgerCellFocus";
+import { focusOwnedByModalOverlay, modalOverlayOwnsFocus } from "@/utils/ledgerModalFocus";
 import { summarizeLedgerSelection } from "@/utils/ledgerSelectionStats";
 import {
   readLastLedgerProjectId,
@@ -1339,7 +1342,20 @@ const { keepGridFocusOnScroll, revealGridPasteTarget, attachDocumentShortcuts } 
   handleKeydown: handleGridKeydown,
   handlePaste: handleGridPaste,
   isNativeClipboardTarget: (target) => nativeGridClipboardTarget(target),
-  isFocusOwnedElsewhere: () => findReplaceVisible.value,
+  // 校验确认面板等模态浮层打开期间同样让路：否则渲染后的补焦会把焦点从
+  // 面板里抢回卡片，面板焦点陷阱再抢回去，形成逐帧焦点回环。
+  isFocusOwnedElsewhere: () => modalOverlayOwnsFocus(
+    Boolean(
+      validationPanel.value
+      || findReplaceVisible.value
+      || exportVisible.value
+      || highlightDialogVisible.value
+      || reorderDialogVisible.value
+      || managerVisible.value
+      || templateManagerVisible.value
+    ),
+    document.activeElement,
+  ),
 });
 let removeDocumentGridShortcuts: (() => void) | null = null;
 
@@ -1548,19 +1564,12 @@ function gridFillPreviewValue(rowIndex: number, columnIndex: number): string | n
     : null;
 }
 
-/** 属性选择器引号内仅需转义反斜杠与双引号；不依赖 jsdom 未实现的 CSS.escape。 */
-function cssAttrValue(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-
 function gridEditorRoot(position: GridCellPosition): HTMLElement | null {
   const root = ledgerTableCardRef.value;
   if (!root) return null;
   const rowId = tableRows.value[position.rowIndex]?.id;
   if (!rowId) return null;
-  return root.querySelector<HTMLElement>(
-    `[data-row-id="${cssAttrValue(rowId)}"][data-field-index="${position.columnIndex}"]`,
-  );
+  return ledgerCellElement(root, rowId, position.columnIndex);
 }
 
 function clearGridEditorTextSelection(editor: HTMLElement | null): void {
@@ -1792,7 +1801,11 @@ function updateLedgerCellEditorValue(value: string): void {
 }
 
 function handleLedgerCellEditorBlur(): void {
-  if (editingGridCell.value) void finishGridCellEdit(true, false);
+  if (!editingGridCell.value) return;
+  // 焦点交给模态浮层（校验确认面板等）不算"用户离开单元格"，不提交：
+  // 提交会再次走校验、关掉刚弹出的面板，然后被重开的对话框再抢一次焦点。
+  if (focusOwnedByModalOverlay(document.activeElement)) return;
+  void finishGridCellEdit(true, false);
 }
 
 function handleLedgerCellEditorKeydown(event: KeyboardEvent): void {
@@ -1806,7 +1819,7 @@ function handleLedgerCellEditorKeydown(event: KeyboardEvent): void {
     toggleLedgerCellEditorExpanded();
     return;
   }
-  if (event.isComposing || !editingGridCell.value) return;
+  if (isImeComposingKeydown(event) || !editingGridCell.value) return;
   if (event.key === "Escape") {
     event.preventDefault();
     event.stopPropagation();
@@ -1841,6 +1854,10 @@ function handleGridFocusOut(event: FocusEvent): void {
   if (!editing) return;
   const relatedTarget = event.relatedTarget instanceof Element ? event.relatedTarget : null;
   if (relatedTarget?.closest(".ledger-cell-editor-bar")) return;
+  // 焦点进入模态浮层（校验确认面板、查找替换、导出面板等）：这是浮层接管
+  // 焦点，不是用户去编辑别的格子，绝不能提交——否则面板一弹出就触发一次
+  // 保存，保存把面板关掉、预检查回来又重开，形成面板闪动 + 焦点回环。
+  if (focusOwnedByModalOverlay(relatedTarget)) return;
   const relatedCell = gridCellFromElement(event.relatedTarget);
   if (sameGridCell(relatedCell, editing)) return;
   window.setTimeout(() => {
@@ -1848,6 +1865,7 @@ function handleGridFocusOut(event: FocusEvent): void {
     const activeElement = document.activeElement;
     if (activeElement instanceof Element && activeElement.closest(".ledger-cell-editor-bar")) return;
     if (sameGridCell(gridCellFromElement(activeElement), editing)) return;
+    if (focusOwnedByModalOverlay(activeElement)) return;
     const dropdown = document.querySelector<HTMLElement>(".el-select-dropdown");
     if (dropdown?.contains(activeElement)) return;
     void finishGridCellEdit(true, false);
@@ -2427,6 +2445,8 @@ function handleGridKeydown(event: KeyboardEvent): void {
   }
 
   if (isGridCellEditing(cell)) {
+    // 输入法正在处理这个按键时，Enter/Escape/Tab 属于选词，不是提交/取消/跳格。
+    if (isImeComposingKeydown(event)) return;
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
@@ -2464,6 +2484,8 @@ function handleGridKeydown(event: KeyboardEvent): void {
     return;
   }
 
+  // 输入法首键：只打开编辑器，不注入首字母、不掐掉输入法（见 utils/imeKeydown）。
+  if (beginEditForImeKey(event, gridCellData(cell)?.record, () => enterGridCellEdit(cell))) return;
   if (
     event.key.length === 1 &&
     !event.ctrlKey &&

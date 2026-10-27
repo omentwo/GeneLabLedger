@@ -468,9 +468,11 @@ export function useLedgerCellSave(deps: LedgerCellSaveDeps): {
     }
     if (record.locked) return false;
     const key = persistedKey(record.id, field.id);
-    if (validationPanel.value?.cellKeys.includes(key)) {
-      dismissValidationPanel();
-    }
+    // 面板正为这个单元格等待用户确认：此时再走一遍保存，只会先把面板关掉
+    // （对话框销毁、焦点落回 body），预检查回来又弹一次，被重开的对话框
+    // 再抢一次焦点——面板随渲染节拍反复开合，页面闪动且点不动。
+    // 值真的改了会先经 setValue 关掉面板，能走到这里说明没有新内容要存。
+    if (validationPanel.value?.cellKeys.includes(key)) return false;
     const initialBefore = persistedValues.get(key) ?? "";
     const current = valueFor(record, field);
     if (current === initialBefore) {
