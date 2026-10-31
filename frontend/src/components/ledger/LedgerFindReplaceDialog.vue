@@ -138,11 +138,15 @@ function assignInputRef(element: unknown): void {
     <template #footer>
       <el-button :disabled="loading" @click="emit('update:visible', false)">取消</el-button>
       <template v-if="mode === 'replace'">
-        <el-button :loading="loading" @click="emit('preview')">预览</el-button>
+        <el-button :loading="loading" :disabled="!find.trim()" @click="emit('preview')">预览</el-button>
         <el-button
           type="primary"
           :loading="loading"
-          :disabled="!preview?.matched_count || preview.issues.some((issue) => issue.severity === 'error')"
+          :disabled="
+            !find.trim() ||
+            !preview?.matched_count ||
+            preview.issues.some((issue) => issue.severity === 'error')
+          "
           @click="emit('commit')"
         >
           确认替换

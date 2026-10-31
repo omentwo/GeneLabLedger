@@ -272,7 +272,12 @@ def _complex_record_statement(
         expression = _query_field_expression(field)
         if item.operator == "contains":
             text = item.value or ""
-            filters.append(func.lower(cast(expression, String)).like(f"%{text.lower()}%"))
+            # 转义 LIKE 通配符：让 % / _ 按字面匹配，避免服务端计数与
+            # 用户预期（以及客户端二次过滤）不一致。
+            escaped = text.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            filters.append(
+                func.lower(cast(expression, String)).like(f"%{escaped}%", escape="\\")
+            )
         elif item.operator == "equals":
             filters.append(
                 or_(expression.is_(None), cast(expression, String) == "")
@@ -443,6 +448,10 @@ def _replace_text(
     case_sensitive: bool,
 ) -> str | None:
     if match_mode == "whole":
+        # 完整单元格匹配同样拒绝空查找词：空字符串与所有空单元格恒等，
+        # 会把替换内容批量写进整列空白（数据破坏）。
+        if not find:
+            raise HTTPException(status_code=422, detail="查找内容不能为空")
         matches = value == find if case_sensitive else value.casefold() == find.casefold()
         return replacement if matches else None
     if not find:

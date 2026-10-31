@@ -104,6 +104,7 @@ def health(request: Request, session: Session = Depends(get_session)) -> dict:
     return {
         "status": "ok",
         "database": "ok",
+        "version": request.app.version,
         "print_engines": printer_service.engine_statuses(),
     }
 
@@ -118,14 +119,16 @@ def list_audit_logs(
     filters = []
     if search and search.strip():
         term = search.strip().casefold()
-        pattern = f"%{term}%"
+        # 转义 LIKE 通配符，审计搜索按字面匹配 % / _。
+        escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
         filters.extend(
             [
-                AuditLog.actor.ilike(pattern),
-                AuditLog.action.ilike(pattern),
-                AuditLog.entity_type.ilike(pattern),
-                AuditLog.entity_id.ilike(pattern),
-                cast(AuditLog.details, String).ilike(pattern),
+                AuditLog.actor.ilike(pattern, escape="\\"),
+                AuditLog.action.ilike(pattern, escape="\\"),
+                AuditLog.entity_type.ilike(pattern, escape="\\"),
+                AuditLog.entity_id.ilike(pattern, escape="\\"),
+                cast(AuditLog.details, String).ilike(pattern, escape="\\"),
             ]
         )
         matching_actions = [

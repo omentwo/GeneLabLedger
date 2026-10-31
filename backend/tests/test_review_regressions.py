@@ -4,7 +4,7 @@ import pytest
 from test_docx_template import split_placeholder_docx
 
 from app.api.ledger_templates import _clean_fields
-from app.models import ProjectRecord
+from app.models import ProjectRecord, RecordValue
 from app.schemas import LedgerTemplateField
 from app.services.docx_template import InvalidDocxTemplate, render_docx
 
@@ -29,16 +29,35 @@ def test_numeric_filters_exclude_partial_and_invalid_numbers(client, seeded_proj
             "data_type": "number",
         },
     ).json()
-    for value in ("abc", "3 pcs", "0", "3.5", "1e1", "", "NaN", "Infinity"):
+    # 单元格类型校验上线后，非法数字在写入路径就被拒绝；这里把非法值作为存量
+    # 数据直接种库，继续保护筛选对历史脏数据的健壮性。
+    for value in ("0", "3.5", "1e1"):
         response = client.post(
             "/api/records",
             json={
                 "project_id": project["id"],
-                "pathology_number": value or "empty",
+                "pathology_number": value,
                 "values": {field["id"]: value},
             },
         )
         assert response.status_code == 201, response.text
+    response = client.post(
+        "/api/records",
+        json={
+            "project_id": project["id"],
+            "pathology_number": "empty",
+            "values": {field["id"]: ""},
+        },
+    )
+    assert response.status_code == 201, response.text
+    with client.app.state.database.session_factory() as session:
+        for index, value in enumerate(("abc", "3 pcs", "NaN", "Infinity"), start=20):
+            record = ProjectRecord(
+                project_id=project["id"], pathology_number=value, position=index
+            )
+            record.values.append(RecordValue(field_id=field["id"], value_text=value))
+            session.add(record)
+        session.commit()
     query = {
         "project_id": project["id"],
         "field_filters": [

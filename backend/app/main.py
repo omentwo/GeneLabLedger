@@ -31,6 +31,7 @@ from app.seed import seed_initial_data
 from app.services.database_backups import DatabaseBackupScheduler, apply_pending_restore
 from app.services.office_preview import OfficePreviewService
 from app.services.office_printing import OfficePrintService
+from app.version import APP_VERSION
 
 
 def create_app(
@@ -81,7 +82,7 @@ def create_app(
 
     app = FastAPI(
         title=app_settings.app_name,
-        version="2.3.5",
+        version=APP_VERSION,
         lifespan=lifespan,
     )
     app.add_middleware(

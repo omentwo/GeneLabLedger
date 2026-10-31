@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 DataType = Literal["text", "number", "date", "select"]
+
+# strip 先于 min_length：纯空白（含全角空格）在长度校验前就被剥成空串而拒绝。
+# 仅用于用户语义文本（名称/标签/病理号等）；id/token/哈希/列表字段不适用。
+NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+NonEmptyOptionalStr = Annotated[str | None, StringConstraints(strip_whitespace=True, min_length=1)]
 RecordStatus = Literal["待实验", "已完成"]
 _HEX_COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
 
@@ -76,7 +81,7 @@ class FieldRead(BaseModel):
 
 
 class FieldCreate(BaseModel):
-    label: str = Field(min_length=1, max_length=120)
+    label: NonEmptyStr = Field(max_length=120)
     data_type: DataType = "text"
     width: int = Field(default=120, ge=32, le=600)
     options: list[str] = Field(default_factory=list)
@@ -131,7 +136,7 @@ class FieldBatchCreateResponse(BaseModel):
 
 
 class FieldUpdate(BaseModel):
-    label: str | None = Field(default=None, min_length=1, max_length=120)
+    label: NonEmptyOptionalStr = Field(default=None, max_length=120)
     data_type: DataType | None = None
     sort_order: int | None = Field(default=None, ge=0)
     width: int | None = Field(default=None, ge=32, le=600)
@@ -169,7 +174,7 @@ class FieldReorder(BaseModel):
 
 
 class ProjectCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
+    name: NonEmptyStr = Field(max_length=120)
     template_id: str | None = Field(default=None, max_length=36)
 
     @field_validator("name")
@@ -179,7 +184,7 @@ class ProjectCreate(BaseModel):
 
 
 class ProjectUpdate(BaseModel):
-    name: str | None = Field(default=None, min_length=1, max_length=120)
+    name: NonEmptyOptionalStr = Field(default=None, max_length=120)
     sort_order: int | None = Field(default=None, ge=0)
     experiment_enabled: bool | None = None
     duplicate_pathology_warning_enabled: bool | None = None
@@ -237,8 +242,8 @@ class ProjectForceDeleteResponse(BaseModel):
 
 
 class LedgerTemplateField(BaseModel):
-    key: str = Field(min_length=1, max_length=120)
-    label: str = Field(min_length=1, max_length=120)
+    key: NonEmptyStr = Field(max_length=120)
+    label: NonEmptyStr = Field(max_length=120)
     data_type: DataType = "text"
     system_key: str | None = Field(default=None, max_length=64)
     is_core: bool = False
@@ -271,7 +276,7 @@ class LedgerTemplateField(BaseModel):
 
 
 class LedgerTemplateCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
+    name: NonEmptyStr = Field(max_length=120)
     description: str = Field(default="", max_length=500)
     fields: list[LedgerTemplateField] = Field(default_factory=list, max_length=200)
     source_project_id: str | None = Field(default=None, max_length=36)
@@ -288,7 +293,7 @@ class LedgerTemplateCreate(BaseModel):
 
 
 class LedgerTemplateUpdate(BaseModel):
-    name: str | None = Field(default=None, min_length=1, max_length=120)
+    name: NonEmptyOptionalStr = Field(default=None, max_length=120)
     description: str | None = Field(default=None, max_length=500)
     fields: list[LedgerTemplateField] | None = Field(default=None, max_length=200)
     source_project_id: str | None = Field(default=None, max_length=36)
@@ -317,7 +322,7 @@ class LedgerTemplateRead(BaseModel):
 
 class RecordCreate(BaseModel):
     project_id: str
-    pathology_number: str = Field(min_length=1, max_length=160)
+    pathology_number: NonEmptyStr = Field(max_length=160)
     block_number: str | None = Field(default=None, max_length=80)
     status: RecordStatus = "待实验"
     experiment_date: date | None = None
@@ -351,7 +356,9 @@ class RecordCreate(BaseModel):
 
 class RecordQuickCreate(BaseModel):
     project_id: str = Field(min_length=1, max_length=36)
-    combined_pathology_number: str = Field(min_length=3, max_length=241)
+    combined_pathology_number: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=3)
+    ] = Field(max_length=241)
 
     @field_validator("project_id", "combined_pathology_number")
     @classmethod
@@ -395,7 +402,7 @@ class RecordReorderByDateResult(BaseModel):
 
 
 class RecordUpdate(BaseModel):
-    pathology_number: str | None = Field(default=None, min_length=1, max_length=160)
+    pathology_number: NonEmptyOptionalStr = Field(default=None, max_length=160)
     block_number: str | None = Field(default=None, max_length=80)
     status: RecordStatus | None = None
     experiment_date: date | None = None
@@ -499,7 +506,7 @@ class RecordOperationSnapshot(BaseModel):
     id: str = Field(min_length=1, max_length=36)
     project_id: str = Field(min_length=1, max_length=36)
     position: int = Field(ge=1)
-    pathology_number: str = Field(min_length=1, max_length=160)
+    pathology_number: NonEmptyStr = Field(max_length=160)
     block_number: str | None = Field(default=None, max_length=80)
     status: RecordStatus
     experiment_date: date | None = None
@@ -665,7 +672,7 @@ class RecordCellChange(BaseModel):
 
 class RecordBatchNewRecord(BaseModel):
     client_id: str = Field(min_length=1, max_length=100)
-    pathology_number: str = Field(min_length=1, max_length=160)
+    pathology_number: NonEmptyStr = Field(max_length=160)
     block_number: str | None = Field(default=None, max_length=80)
     status: RecordStatus = "待实验"
     experiment_date: date | None = None
@@ -776,7 +783,7 @@ class RecordReplacePreviewRead(BaseModel):
 
 
 class ReportMappingInput(BaseModel):
-    placeholder: str = Field(min_length=1, max_length=240)
+    placeholder: NonEmptyStr = Field(max_length=240)
     source_type: MappingSourceType
     field_id: str | None = None
     fixed_value: str | None = None
@@ -869,6 +876,9 @@ class LedgerNativePreviewCreate(BaseModel):
     scope: PreviewScope = "filtered"
     include_locked: bool = True
     cells: list[PreviewCellTarget] = Field(default_factory=list, max_length=10000)
+    # WYSIWYG：scope="project" 时前端把当前筛选/显示范围下的记录 id 集合整体
+    # 传入（与 AG Grid 导出"先取筛选后行集"同一模式）；None 表示不做 id 过滤。
+    record_ids: list[str] | None = Field(default=None, max_length=10000)
     search: str | None = Field(default=None, max_length=240)
     status: str | None = Field(default=None, max_length=40)
     experiment_date: date | None = None
@@ -937,6 +947,7 @@ class AuditLogPageRead(BaseModel):
 class HealthRead(BaseModel):
     status: str
     database: str
+    version: str = ""
     print_engines: list[PrintEngineRead]
 
 

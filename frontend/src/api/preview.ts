@@ -19,6 +19,8 @@ export function createLedgerNativePreview(
     scope: LedgerPreviewScope;
     include_locked?: boolean;
     cells?: Array<{ record_id: string; field_id: string }>;
+    /** WYSIWYG：当前筛选/显示范围下的记录 id 集合（scope="project" 时使用）。 */
+    record_ids?: string[];
     search?: string;
     status?: string;
     experiment_date?: string;

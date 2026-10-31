@@ -56,6 +56,10 @@ def _search_filters(project_id: str, payload: LedgerNativePreviewCreate) -> list
 def _preview_filters(project_id: str, payload: LedgerNativePreviewCreate) -> list[Any]:
     if payload.scope == "project":
         filters: list[Any] = [ProjectRecord.project_id == project_id]
+        if payload.record_ids is not None:
+            # WYSIWYG：只打印前端当前筛选/显示范围下的那批记录（id 集合由
+            # /records/query/ids 取得），让"当前台账"与表格所见一致。
+            filters.append(ProjectRecord.id.in_(payload.record_ids))
         if not payload.include_locked:
             filters.append(ProjectRecord.locked.is_(False))
         return filters

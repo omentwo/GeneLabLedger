@@ -86,23 +86,25 @@ def record_search_filter(
     text = search.strip()
     if not text:
         return None
-    term = f"%{text}%"
+    # 转义 LIKE 通配符：搜索词中的 % / _ 按字面匹配，避免意外全表通配。
+    escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    term = f"%{escaped}%"
     value_match = (
         select(RecordValue.id)
         .where(
             RecordValue.record_id == ProjectRecord.id,
-            RecordValue.value_text.like(term),
+            RecordValue.value_text.like(term, escape="\\"),
         )
         .exists()
     )
     clauses: list[ColumnElement[bool]] = []
     if include_project_name:
-        clauses.append(ProjectRecord.project.has(Project.name.like(term)))
+        clauses.append(ProjectRecord.project.has(Project.name.like(term, escape="\\")))
     clauses.extend(
         [
-            ProjectRecord.pathology_number.like(term),
-            ProjectRecord.block_number.like(term),
-            ProjectRecord.experiment_number.like(term),
+            ProjectRecord.pathology_number.like(term, escape="\\"),
+            ProjectRecord.block_number.like(term, escape="\\"),
+            ProjectRecord.experiment_number.like(term, escape="\\"),
             value_match,
         ]
     )

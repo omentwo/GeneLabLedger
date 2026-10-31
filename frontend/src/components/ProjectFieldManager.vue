@@ -138,6 +138,20 @@ function syncCurrentProject(): void {
   workingFields.value = cloneFields(currentProject.value?.fields ?? []);
 }
 
+async function confirmDataTypeChange(field: FieldDefinition, next: DataType): Promise<void> {
+  if (field.data_type === next) return;
+  try {
+    await ElMessageBox.confirm(
+      "修改输入类型不会检查或转换已填写的内容：不符合新类型的值会被数字/日期筛选忽略，备选项也不再约束旧值。确定修改？",
+      "修改输入类型",
+      { confirmButtonText: "确定修改", cancelButtonText: "取消", type: "warning" },
+    );
+  } catch {
+    return; // 取消：不写入 workingFields，下拉自动回显旧类型。
+  }
+  field.data_type = next;
+}
+
 function parseOptions(value: string): string[] {
   const result: string[] = [];
   value
@@ -917,7 +931,11 @@ onBeforeUnmount(clearFieldDrag);
           </el-table-column>
           <el-table-column label="输入类型" width="140">
             <template #default="{ row }: { row: FieldDefinition }">
-              <el-select v-model="row.data_type" :disabled="row.is_core">
+              <el-select
+                :model-value="row.data_type"
+                :disabled="row.is_core"
+                @change="confirmDataTypeChange(row, String($event) as DataType)"
+              >
                 <el-option
                   v-for="(label, value) in dataTypeLabels"
                   :key="value"

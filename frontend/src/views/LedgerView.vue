@@ -3224,10 +3224,17 @@ async function openLedgerNative(): Promise<void> {
   }
   nativePreviewLoading.value = true;
   try {
+    // WYSIWYG：'当前台账'按当前筛选与显示范围取记录 id 集合，让原生预览与
+    // 表格所见一致（AG Grid 导出"先取筛选后行集"的同一模式）。
+    const recordIds =
+      scope === "project"
+        ? (await queryLedgerRecordIds(buildRecordQuery(activeProjectId.value))).record_ids
+        : undefined;
     const task = await createLedgerNativePreview(currentProject.value.id, {
       scope,
       include_locked: showLockedRecords.value,
       cells,
+      record_ids: recordIds,
       print_engine: previewEngine.value,
     });
     void monitorNativeLedgerJob(task).catch((error) => {
