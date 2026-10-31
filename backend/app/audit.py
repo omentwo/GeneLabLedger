@@ -56,15 +56,15 @@ def prune_audit_logs(
     total = session.scalar(select(func.count()).select_from(AuditLog)) or 0
     overflow = total - max_rows
     if overflow > 0:
-        oldest_ids = list(
-            session.scalars(
-                select(AuditLog.id)
-                .order_by(AuditLog.created_at.asc(), AuditLog.id.asc())
-                .limit(overflow)
-            )
+        # 子查询删除：id 列表由 SQLite 内部物化，不展开绑定参数，
+        # 避免溢出量超过 SQLITE_MAX_VARIABLE_NUMBER 时抛 too many SQL variables
+        # 导致启动崩溃循环。
+        oldest_ids = (
+            select(AuditLog.id)
+            .order_by(AuditLog.created_at.asc(), AuditLog.id.asc())
+            .limit(overflow)
         )
-        if oldest_ids:
-            deleted += (
-                session.execute(delete(AuditLog).where(AuditLog.id.in_(oldest_ids))).rowcount or 0
-            )
+        deleted += (
+            session.execute(delete(AuditLog).where(AuditLog.id.in_(oldest_ids))).rowcount or 0
+        )
     return deleted

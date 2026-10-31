@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import stat
 import tempfile
+import time
 import zipfile
 from contextlib import suppress
 from datetime import datetime, timedelta
@@ -42,6 +43,8 @@ BACKUP_FILENAME_PATTERN = re.compile(
 DAY_DIRECTORY_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 MAX_ARCHIVE_FILES = 20_000
 MAX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024 * 1024
+# 备份在源库被 EXCLUSIVE 锁住时的熔断上限；Connection.backup 会无限重试 BUSY。
+BACKUP_LOCK_DEADLINE_SECONDS = 60
 logger = logging.getLogger(__name__)
 
 
@@ -233,9 +236,31 @@ def _snapshot_database(database: Database, destination: Path) -> None:
             raise BackupError("无法取得 SQLite 数据库连接")
         target = sqlite3.connect(destination, timeout=30)
         _configure_sqlite_connection(target)
-        source.backup(target, pages=256, sleep=0.05)
+        # Connection.backup 的内部循环对 SQLITE_BUSY 无限重试，busy_timeout 只能
+        # 拉长每一步的等待、熔断不了整个循环；唯一进程内熔断手段是 progress 回调。
+        # 复现挂死需要 EXCLUSIVE 锁（大事务 cache spill / 提交瞬间），RESERVED 不阻塞。
+        deadline = time.monotonic() + BACKUP_LOCK_DEADLINE_SECONDS
+
+        def lock_watchdog(_status: int, _remaining: int, _pagecount: int) -> None:
+            if time.monotonic() > deadline:
+                raise BackupError(
+                    f"备份等待数据库锁超过 {BACKUP_LOCK_DEADLINE_SECONDS} 秒，已中止；请稍后重试"
+                )
+
+        source.backup(target, pages=256, sleep=0.05, progress=lock_watchdog)
     except sqlite3.Error as error:
         raise BackupError(f"SQLite 在线备份失败：{error}") from error
+    except Exception:
+        # 熔断/中断时目标文件已写入部分页：必须删除，否则备份目录里留下
+        # “大小正常但实际损坏”的文件，比没有备份更危险。捕获 Exception 而非
+        # 仅 BackupError：progress 回调里的任何异常都会原样向外传播。
+        if target is not None:
+            with suppress(Exception):
+                target.close()
+            target = None
+        with suppress(OSError):
+            destination.unlink(missing_ok=True)
+        raise
     finally:
         if target is not None:
             target.close()
@@ -589,23 +614,64 @@ def prepare_restore(settings: Settings, backup_path: Path) -> None:
         raise
 
 
+def _cleanup_restore_rollback_orphans(settings: Settings) -> None:
+    """清扫崩溃遗留的 rollback/staging 孤儿目录（正常路径结束时它们已被删除）。"""
+    with suppress(OSError):
+        temp_root = settings.data_dir / "temp"
+        if not temp_root.is_dir():
+            return
+        for entry in temp_root.iterdir():
+            if entry.is_dir() and (
+                entry.name.startswith("restore-rollback-")
+                or (entry.name == "database-restores")
+            ):
+                if entry.name == "database-restores":
+                    for staging_child in entry.iterdir():
+                        shutil.rmtree(staging_child, ignore_errors=True)
+                else:
+                    shutil.rmtree(entry, ignore_errors=True)
+
+
 def apply_pending_restore(settings: Settings) -> bool:
     marker = settings.data_dir / ".pending-database-restore.json"
     if not marker.is_file():
+        _cleanup_restore_rollback_orphans(settings)
         return False
     try:
         payload = json.loads(marker.read_text(encoding="utf-8"))
         staging = Path(str(payload["staging_directory"])).resolve()
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
-        raise BackupError("待恢复任务记录已损坏") from error
+        # marker 损坏发生在第一次 os.replace 之前：现有数据库完好，此时砖死启动
+        # 没有意义。隔离 marker 留证并按无恢复任务处理。
+        logger.warning("待恢复任务记录已损坏，已放弃本次恢复并保留现有数据库：%s", error)
+        with suppress(OSError):
+            marker.replace(marker.with_name(".pending-database-restore.json.failed"))
+        _cleanup_restore_rollback_orphans(settings)
+        return False
     staging_root = (settings.data_dir / "temp" / "database-restores").resolve()
     if staging == staging_root or staging_root not in staging.parents:
-        raise BackupError("待恢复目录不在受控范围内")
+        # 同 P1-3 原则：marker 指向受控范围之外说明记录已被篡改或损坏，
+        # 尚未触碰现有数据库，放弃任务而不是砖死启动。
+        logger.warning("待恢复目录不在受控范围内（%s），已放弃本次恢复并保留现有数据库", staging)
+        with suppress(OSError):
+            marker.replace(marker.with_name(".pending-database-restore.json.failed"))
+        _cleanup_restore_rollback_orphans(settings)
+        return False
     staged_database = staging / "ledger.db"
     staged_templates = staging / "templates"
-    _check_database(staged_database)
-    if not staged_templates.is_dir():
-        raise BackupError("待恢复任务缺少报告模板目录")
+    try:
+        _check_database(staged_database)
+        if not staged_templates.is_dir():
+            raise BackupError("待恢复任务缺少报告模板目录")
+    except (BackupError, OSError) as error:
+        # staging 目录被临时文件清理工具删除等情况：同样尚未触碰现有数据库，
+        # 放弃任务而不是让应用每次启动都失败。
+        logger.warning("待恢复数据校验失败，已放弃本次恢复并保留现有数据库：%s", error)
+        with suppress(OSError):
+            marker.replace(marker.with_name(".pending-database-restore.json.failed"))
+        shutil.rmtree(staging, ignore_errors=True)
+        _cleanup_restore_rollback_orphans(settings)
+        return False
     database_path = _settings_database_path(settings)
     current_templates = settings.template_dir.resolve()
     rollback = settings.data_dir / "temp" / f"restore-rollback-{uuid4().hex}"

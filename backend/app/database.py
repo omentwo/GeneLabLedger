@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
 import re
-import shutil
+import sqlite3
+import time
 from collections.abc import Generator
 from datetime import UTC, datetime
 from decimal import Decimal, DecimalException
@@ -12,6 +14,11 @@ from sqlalchemy import DateTime, create_engine, event, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.types import TypeDecorator
+
+logger = logging.getLogger(__name__)
+_wal_degradation_logged = False
+# 升级前备份在源库被 EXCLUSIVE 锁住时的熔断上限（与备份调度器同一机制）。
+SCHEMA_BACKUP_LOCK_DEADLINE_SECONDS = 60
 
 
 class UTCDateTime(TypeDecorator[datetime]):
@@ -82,6 +89,7 @@ def begin_immediate_write(session: Session) -> None:
 class Database:
     def __init__(self, database_url: str) -> None:
         connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
+        self._is_memory_database = ":memory:" in database_url
         self.engine = create_engine(database_url, connect_args=connect_args)
         if database_url.startswith("sqlite"):
             event.listen(self.engine, "connect", self._enable_sqlite_foreign_keys)
@@ -92,8 +100,7 @@ class Database:
             expire_on_commit=False,
         )
 
-    @staticmethod
-    def _enable_sqlite_foreign_keys(dbapi_connection: object, _: object) -> None:
+    def _enable_sqlite_foreign_keys(self, dbapi_connection: object, _: object) -> None:
         dbapi_connection.create_function(
             "strict_number",
             1,
@@ -103,6 +110,28 @@ class Database:
         dbapi_connection.create_collation(STRICT_DECIMAL_COLLATION, compare_strict_decimals)
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
+        # busy_timeout 只用于普通请求：锁竞争时等待而非立即报 database is locked。
+        # 注意它不能熔断 Connection.backup() 的内部重试循环（那是 P1-2，由
+        # _snapshot_database 的 progress 看门狗负责）。
+        cursor.execute("PRAGMA busy_timeout=5000")
+        global _wal_degradation_logged
+        if not self._is_memory_database:
+            # :memory: 库不支持 WAL（journal_mode 恒为 memory），跳过以免误报降级。
+            try:
+                mode = cursor.execute("PRAGMA journal_mode=WAL").fetchone()
+                if not mode or str(mode[0]).lower() != "wal":
+                    if not _wal_degradation_logged:
+                        _wal_degradation_logged = True
+                        logger.warning(
+                            "SQLite WAL 模式启用失败（journal_mode=%s），已降级为原日志模式继续运行。"
+                            "若数据目录位于 OneDrive/网络盘等同步位置，建议迁移到本地磁盘。",
+                            mode[0] if mode else "unknown",
+                        )
+            except sqlite3.Error as error:
+                # 其他连接正持有写事务时切换可能失败：降级为原模式即可，不影响本次连接。
+                if not _wal_degradation_logged:
+                    _wal_degradation_logged = True
+                    logger.warning("SQLite WAL 模式设置失败（%s），本连接使用原日志模式。", error)
         cursor.close()
 
     def create_all(self) -> None:
@@ -210,7 +239,36 @@ class Database:
         while backup_path.exists():
             backup_path = backup_dir / f"ledger-before-{version}-{timestamp}-{suffix}.db"
             suffix += 1
-        shutil.copy2(database_path, backup_path)
+        # WAL 模式下主库文件可能缺最新事务（内容在 -wal 中），必须用在线备份 API
+        # 而不是 copy 主库文件，否则升级前备份会是缺表的全损副本。backup 对 BUSY
+        # 无限重试，与 _snapshot_database 相同必须挂看门狗；失败时删除半成品——
+        # 这次备份正是后续改库的唯一回退手段，损坏比缺失更危险。
+        deadline = time.monotonic() + SCHEMA_BACKUP_LOCK_DEADLINE_SECONDS
+
+        def lock_watchdog(_status: int, _remaining: int, _pagecount: int) -> None:
+            if time.monotonic() > deadline:
+                raise RuntimeError(
+                    f"升级前备份等待数据库锁超过 {SCHEMA_BACKUP_LOCK_DEADLINE_SECONDS} 秒，已中止"
+                )
+
+        source = sqlite3.connect(database_path)
+        try:
+            target = sqlite3.connect(backup_path)
+            backup_failed = False
+            try:
+                source.backup(target, progress=lock_watchdog)
+            except BaseException:
+                backup_failed = True
+                raise
+            finally:
+                target.close()
+                if backup_failed:
+                    try:
+                        backup_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+        finally:
+            source.close()
 
     def _migrate_project_duplicate_pathology_warning(self) -> None:
         """Add the per-project duplicate pathology-number warning switch."""

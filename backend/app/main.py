@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 from collections.abc import AsyncIterator
@@ -54,11 +55,16 @@ def create_app(
             cleanup_native_previews(app_settings.report_work_dir / "native-previews")
         with database.session_factory() as session:
             seed_initial_data(session)
-            prune_audit_logs(
-                session,
-                max_rows=app_settings.audit_log_max_rows,
-                retention_days=app_settings.audit_log_retention_days,
-            )
+            try:
+                prune_audit_logs(
+                    session,
+                    max_rows=app_settings.audit_log_max_rows,
+                    retention_days=app_settings.audit_log_retention_days,
+                )
+            except Exception:
+                # 清理失败只跳过本次裁剪，绝不能阻断启动（否则每次重启都崩溃）。
+                logging.getLogger(__name__).exception("审计日志清理失败，已跳过本次裁剪")
+                session.rollback()
             session.commit()
         await database_backup_scheduler.start()
         try:

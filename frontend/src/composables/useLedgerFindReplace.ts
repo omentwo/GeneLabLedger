@@ -4,6 +4,7 @@ import { ElMessage } from "element-plus";
 
 import { commitReplace, previewReplace } from "@/api/records";
 import type { FieldDefinition, ProjectRecord, RecordReplacePreview } from "@/types/api";
+import { isImeComposingKeydown } from "@/utils/imeKeydown";
 import type { LedgerRow } from "@/utils/ledgerTableView";
 import { getRecordFieldValue as valueFor } from "@/utils/recordFieldValue";
 import type { GridCellPosition, GridCellRange, GridCellSelectionSnapshot } from "@/utils/gridSelectionModel";
@@ -305,6 +306,9 @@ async function navigateFindMatchCursor(direction: -1 | 1): Promise<void> {
 }
 function handleFindReplaceInputEnter(event: KeyboardEvent): void {
   if (findReplaceMode.value !== "find") return;
+  // 中文输入法按 Enter 上屏候选（keyCode 229 / isComposing）不触发查找导航，
+  // 与网格、快速录入的既有防护保持一致。
+  if (isImeComposingKeydown(event)) return;
   event.preventDefault();
   event.stopPropagation();
   void navigateFindMatch(event.shiftKey ? -1 : 1);
